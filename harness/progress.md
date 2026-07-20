@@ -5,29 +5,31 @@
 | Gate | Status |
 |------|--------|
 | C3 multiarch | PASS |
-| C5 double-run | PASS (stale) |
+| C5 double-run | PASS (stale — re-run pending) |
 | C4 clean-room | held |
-| **C2** | **BLOCKED** — CREATE → SQLITE_CORRUPT |
+| **C2** | **IN PROGRESS** — CREATE/INSERT/SELECT int green; REAL→Inf |
 | **C1** | **BLOCKED** |
 
 ### C2 smoke (Docker Linux, ggcc .s only)
 | Step | Result |
 |------|--------|
 | open / empty / `;` / `SELECT 1` | **PASS** |
-| CREATE TABLE | **FAIL** rc=11 `database disk image is malformed` (no longer SEGV at start) |
+| CREATE TABLE + INSERT + SELECT int | **PASS** |
+| master cell vs gcc (`1f 01 06 17 … table…`) | **PASS** |
+| REAL column value | **FAIL** — reads as `Inf` (float/Vdbe path) |
+| full C2 suite / Redis | pending |
 
-### Root causes fixed this session (cont.)
-1. SELECT 1: stack 9th+ arg receive
-2. Bitfield packing; sizeof array bounds (Bitvec); 64-bit cmp; UInt loads
-3. measure Switch/Case → VdbeExec frame
-4. **offsetof in array dims** → NestedParse `saveBuf[136]` (was 0 → stack smash memset 0x120)
-5. **va_list stack overflow copy** → NestedParse `#%d` formats to `#2` (was literal `#%d` / unrecognized token)
+### Root causes fixed this session
+1. SELECT 1: stack 9th+ arg; bitfields; sizeof/offsetof; 64-bit cmp; UInt
+2. measure Switch/Case → VdbeExec frame
+3. offsetof array dims → NestedParse saveBuf
+4. va_list stack overflow copy → NestedParse `#%d` → `#2`
+5. **x19 not preserved across calls** → `nHdr += f()` lost → MakeRecord nHdr=2 → CORRUPT
+   - fix: prolog/epilog save x19; spill x19 across compound-assign RHS
 
-### CREATE diagnosis (open)
-- NestedParse SQL now well-formed:  
-  `UPDATE 'main'.sqlite_master SET type='table', name='t', … rootpage=#2 … rowid=#1`
-- Still corrupt when applying schema / writing btree pages
-- Next: put/get page image, OP_CreateBtree, master insert path
+### Next
+- Fix REAL/`Inf` (OP_Real / double constant embedding / Mem.u.r)
+- Full C2 harness log; C1 kernel; C5 re-run
 
 ### blocked_reason
-C2: CREATE malformed disk image. C1: no boot. Goal NOT complete.
+C2 not complete (REAL broken; full suite not green). C1 no boot. Goal NOT complete.
