@@ -5,7 +5,7 @@
 | Gate | Status |
 |------|--------|
 | C3 multiarch | PASS |
-| C5 double-run | PASS |
+| C5 double-run | PASS (stale — re-run after C2) |
 | C4 clean-room | held |
 | **C2** | **BLOCKED** |
 | **C1** | **BLOCKED** |
@@ -14,33 +14,30 @@
 | Step | Result |
 |------|--------|
 | amalgamation → asm → link | PASS |
-| libversion | **PASS** `3.45.3` / `3045003` |
+| libversion | **PASS** `3.45.3` |
 | initialize | **PASS** |
 | open `:memory:` | **PASS** |
 | close | **PASS** |
 | exec `""` | **PASS** |
-| exec `";"` / `select 1` | **FAIL** SIGSEGV (`ExprDeleteNN` / parser) |
+| exec `";"` | **PASS** `rc=0` |
+| exec `SELECT 1` | **FAIL** `rc=20` SQLITE_MISMATCH (datatype mismatch) — no SIGSEGV |
+| CREATE/INSERT | **FAIL** schema/rootpage / later SEGV |
 
-### Key fixes landed
-- Real va_list (AAPCS64)
-- Compound-assign register spill (`pColl += enc-1`)
-- Aggregate/struct assign via memcpy (Hash copy)
-- Int stack slot vs struct field store widths
-- Static string fields in initializers
-- **Multi-pass `collect_layouts`** (HashMap order no longer collapses nested unions; `sizeof(YYMINORTYPE)=16`)
-- **Small struct/union ABI (≤16B)** in 1–2 GPRs: Token pass into `sqlite3Parser`, struct returns, local init from calls
-- **`signed char` → Type::SChar** with `ldrsb x` (lemon `yyRuleInfoNRhs[]` negative RHS counts)
+### Key fixes landed (this session + prior)
+- Multi-pass `collect_layouts` (YYMINORTYPE size)
+- AAPCS64 small struct ABI (Token ≤16B in 2 GPRs)
+- `signed char` → `Type::SChar` + `ldrsb x`
+- **`.hword` for 2-byte static data** (lemon `yy_action`/`yy_lookahead` were `.long` → wrong shift/reduce → ExprDelete crash)
 
-### Verified offsets (ggcc == gcc)
-- `Parse.sLastToken` @ 288
-- `sizeof(Expr)=72`, `offsetof(pLeft)=16`, `yyStackEntry=24`
-- `yyRuleInfoNRhs` data bytes match source; loads use `ldrsb x`
+### Evidence
+- `{SCRATCH}/stage_c_projects.log` updated with post-hword ladder
+- GDB: after hword, only 2 `sqlite3Parser` calls (SEMI+EOF); no parser SEGV
 
 ### Next
-1. Fail-driven: `exec(";")` still dies in `sqlite3ExprDeleteNN` after Token ABI + signed char look correct — dig reduce actions / Expr build
-2. Green select/create → full SQLite tests or Redis
-3. C1 kernel QEMU boot
+1. Fix VDBE path so `SELECT 1` returns rows (MEM_Int / affinity / MustBeInt)
+2. CREATE TABLE + INSERT + SELECT round-trip
+3. Full SQLite tests or Redis; C1 kernel; C5 re-run
 
 ### blocked_reason
-C2: open/close/empty-exec green; any real SQL token still crashes in ExprDelete/parser — not full-project green.  
+C2: SQL parser no longer crashes; `SELECT 1` still SQLITE_MISMATCH — not full-project green.  
 C1: no boot proof.
