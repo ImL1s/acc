@@ -1,50 +1,40 @@
 # Progress (NO-DOWNGRADE)
 
 ## Stage A — PASS
-- Evidence: stage_a.log
+- Evidence: `{SCRATCH}/stage_a.log`
 
 ## Stage B — PASS  
-- Full single-exec: **202/220 ≈ 91.8%** baseline
+- Full single-exec: **202/220 ≈ 91.8%**
 - 3 projects: tinyc, lua_smoke, miniz_smoke
-- Evidence: stage_b.log, suite_full_count.txt
+- Evidence: `{SCRATCH}/stage_b.log`
 
-## Stage C — PARTIAL
+## Stage C — PARTIAL (NOT complete)
 | Gate | Status |
 |------|--------|
-| C5 double-run | PASS |
-| C3 dual ISA 40/40 | PASS |
+| C5 double-run | PASS (`stage_c_rerun.log`) |
+| C3 dual ISA 40/40 | PASS (`stage_c_multiarch.log`) |
 | C4 clean-room | held |
-| C2 SQLite/Redis | **IN PROGRESS** — full `sqlite3.c` → Linux aarch64 `.s` **OK** (~12.4MB asm); link/run smoke + full tests still open |
-| C1 kernel 6.9 boot | BLOCKED (Docker/wrapper scripts ready; language/CLI gap for kernel TUs) |
+| C2 SQLite/Redis | **BLOCKED** — amalgamation **frontend→codegen→.s→.o→link** works in Docker; **runtime incorrect** (version garbage / open segfault). Full SQLite tests not green. |
+| C1 kernel 6.9 boot | **BLOCKED** — Docker/wrapper/tinyconfig scripts ready; no boot proof |
 
-### Milestone 2026-07-20 session
-**Full amalgamation `third_party/stage_c/sqlite/sqlite3.c` compiles to assembly with:**
-```
-./target/release/ggcc --target-os linux -S -o $SCRATCH/sqlite3.s third_party/stage_c/sqlite/sqlite3.c
-# EXIT 0, ~12455116 bytes
-```
+### C2 evidence trail (2026-07-20)
+1. `ggcc --target-os linux -S sqlite3.c` → EXIT 0, ~12.4MB `.s`
+2. Docker `cc -c sqlite3.s` → EXIT 0, ~4.8MB `.o`
+3. Link `smain + sqlite3 + errno_def` → EXIT 0
+4. Run: `smoke_ver` prints garbage; `smoke_open` SIGSEGV
+5. Log: `{SCRATCH}/stage_c_projects.log` VERDICT BLOCKED
 
-### Language / PP / codegen fixes (SQLite-driven this session)
-- Compound assign: `|= &= ^= <<= >>=`
-- Storage: `register` / `inline` / `restrict` / `auto`
-- Hex int suffixes `LL`/`ULL` after hex digits
-- POSIX stubs: `uid_t`/`gid_t`/`stat`/`tm`/`flock`/pthread constants/errno map/mmap/fcntl/sysconf
-- PP: `NDEBUG` + `assert(x)` no-op; dynamic `__LINE__`/`__FILE__`
-- Parser: call args use `parse_assign` (comma was eating multi-arg calls)
-- Codegen: >8 integer args (AAPCS64 stack); undeclared id as extern fn designator;
-  index/`->` soft fallbacks for incomplete typing; global `&` / compound init;
-  bare InitList as static blob
+### Key fixes this session
+- Bitwise compound assign; register/inline/restrict; hex `LL`
+- PP stubs: POSIX types, errno/fcntl/mmap, `assert`/`NDEBUG`, `S_IS*`, `PTHREAD_MUTEX_INITIALIZER`, `__LINE__`/`__FILE__`
+- Parser: call args via `parse_assign` (comma operator bug)
+- Codegen: AAPCS64 stack args; large frame offsets (ADD/SUB ranges); global inits; extern-fn designators
 
-### Next for C2
-1. Docker assemble+link `smain.s` + `sqlite3.s` (system `cc` only on `.s`)
-2. Run `sqlite_smoke_ok` / `sqlite3_libversion_number`
-3. Full SQLite test suite or Redis as second large project
-4. Evidence: `{SCRATCH}/stage_c_projects.log` VERDICT PASS
-
-### Next for C1
-- Run `harness/docker/build_kernel.sh` for real last_failure under ggcc CC wrapper
-- Expand language for kernel (GNU attributes, asm, `-I`/`-D`)
+### Next (hard)
+1. Correctness on sqlite: real types for function returns/pointers; ABI for structs; global init of function pointers (aSyscall table)
+2. Green smoke: `sqlite_smoke_ok` + libversion match
+3. Full test suite or Redis
+4. C1: `build_kernel.sh` first real make failure → language work
 
 ### Rule
-Do NOT claim complete until C1+C2 green with SCRATCH evidence.
-Do NOT rebrand Stage B as complete.
+**Do NOT claim complete until C1+C2 green.** Stage B is not complete.

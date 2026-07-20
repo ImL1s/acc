@@ -157,10 +157,83 @@ pub fn preprocess_with_options(
     macros.insert("S_IFMT".into(), MacroBody::Object("61440".into()));
     macros.insert("S_IFREG".into(), MacroBody::Object("32768".into()));
     macros.insert("S_IFDIR".into(), MacroBody::Object("16384".into()));
+    macros.insert("S_IFCHR".into(), MacroBody::Object("8192".into()));
+    macros.insert("S_IFBLK".into(), MacroBody::Object("24576".into()));
+    macros.insert("S_IFIFO".into(), MacroBody::Object("4096".into()));
+    macros.insert("S_IFSOCK".into(), MacroBody::Object("49152".into()));
     macros.insert("S_IFLNK".into(), MacroBody::Object("40960".into()));
     macros.insert("S_IRUSR".into(), MacroBody::Object("256".into()));
     macros.insert("S_IWUSR".into(), MacroBody::Object("128".into()));
     macros.insert("S_IXUSR".into(), MacroBody::Object("64".into()));
+    // mode test macros (function-like)
+    macros.insert(
+        "S_ISDIR".into(),
+        MacroBody::Function {
+            params: vec!["m".into()],
+            body: "(((m)&61440)==16384)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "S_ISREG".into(),
+        MacroBody::Function {
+            params: vec!["m".into()],
+            body: "(((m)&61440)==32768)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "S_ISLNK".into(),
+        MacroBody::Function {
+            params: vec!["m".into()],
+            body: "(((m)&61440)==40960)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "S_ISCHR".into(),
+        MacroBody::Function {
+            params: vec!["m".into()],
+            body: "(((m)&61440)==8192)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "S_ISBLK".into(),
+        MacroBody::Function {
+            params: vec!["m".into()],
+            body: "(((m)&61440)==24576)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "S_ISFIFO".into(),
+        MacroBody::Function {
+            params: vec!["m".into()],
+            body: "(((m)&61440)==4096)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "S_ISSOCK".into(),
+        MacroBody::Function {
+            params: vec!["m".into()],
+            body: "(((m)&61440)==49152)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "PTHREAD_MUTEX_INITIALIZER".into(),
+        MacroBody::Object("{0}".into()),
+    );
+    macros.insert(
+        "PTHREAD_COND_INITIALIZER".into(),
+        MacroBody::Object("{0}".into()),
+    );
+    macros.insert(
+        "PTHREAD_ONCE_INIT".into(),
+        MacroBody::Object("0".into()),
+    );
     macros.insert("DT_UNKNOWN".into(), MacroBody::Object("0".into()));
     macros.insert("DT_FIFO".into(), MacroBody::Object("1".into()));
     macros.insert("DT_CHR".into(), MacroBody::Object("2".into()));
@@ -374,6 +447,7 @@ pub fn preprocess_with_options(
          typedef signed char int8_t;\n\
          typedef unsigned long uint64_t;\n\
          typedef void *va_list;\n\
+         /* errno: one definition via common symbol in codegen if needed */\n\
          extern int __ggcc_errno;\n\
          typedef long off_t;\n\
          typedef int pid_t;\n\

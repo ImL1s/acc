@@ -478,6 +478,7 @@ impl Codegen {
                 | "__stderrp"
                 | "__stdinp"
                 | "errno"
+                | "__ggcc_errno"
                 | "optarg"
                 | "optind"
         )
@@ -977,7 +978,7 @@ impl Codegen {
                     fpr += 1;
                 }
             } else if igpr < 8 {
-                writeln!(self.out, "\tstr\tx{igpr}, [x29, #{off}]").unwrap();
+                self.store_to_offset(off, &Type::Long, igpr);
                 igpr += 1;
             }
         }
@@ -1203,16 +1204,7 @@ impl Codegen {
                             writeln!(self.out, "\tfmov\td0, x0").unwrap();
                             writeln!(self.out, "\tfcvtzs\tx0, d0").unwrap();
                         }
-                        match &ty {
-                            Type::Char
-                            | Type::Short
-                            | Type::Int
-                            | Type::Long
-                            | Type::Ptr(_) => {
-                                writeln!(self.out, "\tstr\tx0, [x29, #{off}]").unwrap();
-                            }
-                            _ => self.store_to_offset(off, &ty, 0),
-                        }
+                        self.store_to_offset(off, &ty, 0);
                     }
                 }
                 Ok(())
@@ -1527,10 +1519,15 @@ impl Codegen {
         }
     }
 
-    /// Materialize x29+off into x{addr_reg} (handles offsets outside [-256,255]).
+    /// Materialize x29+off into x{addr_reg}.
+    /// AArch64 ADD/SUB immediates are non-negative 0..4095; LDR/STR signed 9-bit is -256..255.
     fn emit_fp_addr(&mut self, off: i64, addr_reg: u8) {
-        if (-256..256).contains(&off) {
+        if off == 0 {
+            writeln!(self.out, "\tmov\tx{addr_reg}, x29").unwrap();
+        } else if (1..=4095).contains(&off) {
             writeln!(self.out, "\tadd\tx{addr_reg}, x29, #{off}").unwrap();
+        } else if (-4095..=-1).contains(&off) {
+            writeln!(self.out, "\tsub\tx{addr_reg}, x29, #{}", -off).unwrap();
         } else {
             // movz/movk full offset then add
             self.emit_imm(off, 16);
@@ -1644,7 +1641,7 @@ impl Codegen {
             _ => {
                 if let Some((_, e)) = fields_in.first() {
                     self.emit_expr_rval(e, 0, typedefs)?;
-                    writeln!(self.out, "\tstr\tx0, [x29, #{base_off}]").unwrap();
+                    self.store_to_offset(base_off, &Type::Long, 0);
                 }
             }
         }
