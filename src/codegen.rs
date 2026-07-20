@@ -2308,20 +2308,29 @@ impl Codegen {
                             | Type::AnonUnion(_)
                             | Type::Array(_, _)
                     );
-                // Aggregate assign via memcpy when RHS is *p (common: *va_arg(...)).
+                // Aggregate / struct assign via memcpy.
                 if is_agg {
-                    if let Expr::Unary {
-                        op: UnaryOp::Deref,
-                        expr,
-                    } = right.as_ref()
-                    {
-                        // Prefer size of *expr type when known (avoids wrong Member sizes).
-                        let rty = self.typeof_expr(expr, typedefs);
-                        let copy_sz = match &rty {
-                            Type::Ptr(inner) => self.type_size(inner).max(1),
-                            _ => lsz,
-                        };
-                        self.emit_expr_rval(expr, 0, typedefs)?;
+                    let (src_ok, copy_sz) = match right.as_ref() {
+                        // *p  (e.g. *va_arg(...))
+                        Expr::Unary {
+                            op: UnaryOp::Deref,
+                            expr,
+                        } => {
+                            let rty = self.typeof_expr(expr, typedefs);
+                            let sz = match &rty {
+                                Type::Ptr(inner) => self.type_size(inner).max(1),
+                                _ => lsz,
+                            };
+                            self.emit_expr_rval(expr, 0, typedefs)?;
+                            (true, sz)
+                        }
+                        // struct/union lvalue: a = b, a = s.field, etc.
+                        other => match self.emit_lvalue_addr(other, 0, typedefs) {
+                            Ok(_) => (true, lsz),
+                            Err(_) => (false, lsz),
+                        },
+                    };
+                    if src_ok {
                         writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
                         let lty = self.emit_lvalue_addr(left, 9, typedefs)?;
                         writeln!(self.out, "\tldr\tx1, [sp], #16").unwrap(); // src

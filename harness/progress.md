@@ -7,32 +7,29 @@
 | C5 | PASS |
 | C3 | PASS |
 | C4 | held |
-| C2 | **BLOCKED** (major progress) |
-| C1 | **BLOCKED** |
+| **C2** | **BLOCKED** (open works; exec crashes) |
+| **C1** | **BLOCKED** |
 
-### C2 evidence
+### C2 smoke ladder
 | Check | Result |
 |-------|--------|
-| amalgamation → `.s`→`.o`→link | PASS |
-| `sqlite3_libversion` | **PASS** `3.45.3` / `3045003` |
-| `sqlite3_initialize` | **PASS** `rc=0` |
-| `sqlite3_open(":memory:")` | **FAIL** SIGSEGV (`createCollation` / `FindCollSeq`) |
-| full SQLite tests / Redis | not started |
+| amalgamation link | PASS |
+| libversion | **PASS** `3.45.3` |
+| initialize | **PASS** `rc=0` |
+| `open(":memory:")` | **PASS** `rc=0` + valid db ptr |
+| `exec("select 1")` | **FAIL** SIGSEGV |
+| full tests / Redis | not started |
 
-### Fixes landed
-- Real `va_list` (AAPCS64 reg save)
-- Struct assign via `memcpy`
-- Static string fields in struct inits
-- Int locals: full 8-byte stores (killed high-bit garbage)
-- Linux printf ABI, frame offsets, etc.
+### Fixes this stretch
+1. Compound-assign spill (`pColl += enc-1` clobber)
+2. Int store width: struct fields `str w`, stack slots zero-extend 8-byte; `ldrsw` loads
+3. Prior: va_list, memcpy struct assign, static string fields
 
 ### Next
-1. Fix `createCollation` / `sqlite3FindCollSeq` crash on open
-2. `sqlite_smoke_ok` then full tests or Redis
+1. Diagnose `sqlite3_exec` crash
+2. Green create/insert/select smoke → full suite or Redis
 3. C1 kernel boot
 
 ### blocked_reason
-C2: initialize works; open still crashes — full project tests not green.  
+C2: open OK, SQL exec still crashes — not full-project green.  
 C1: no boot proof.
-
-**Never claim complete without C1+C2 green.**
