@@ -45,3 +45,4 @@ harness/current_tasks/*.lock
 
 # Cargo
 Cargo.lock.bak
+third_party/linux-*/
