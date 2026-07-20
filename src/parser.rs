@@ -617,6 +617,28 @@ impl Parser {
             {
                 continue;
             }
+            // Kernel sparse/address-space markers as type qualifiers
+            // (also erased at PP; keep parser soft if any leak through).
+            if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                if matches!(
+                    s.as_str(),
+                    "__user"
+                        | "__kernel"
+                        | "__iomem"
+                        | "__percpu"
+                        | "__rcu"
+                        | "__force"
+                        | "__bitwise"
+                        | "__bitwise__"
+                        | "__private"
+                        | "__safe"
+                        | "__nocast"
+                        | "__pmem"
+                ) {
+                    self.bump();
+                    continue;
+                }
+            }
             if self.eat(TokenKind::Signed) {
                 saw_signed = true;
                 continue;
@@ -813,8 +835,8 @@ impl Parser {
                 ));
             }
         };
-        // Trailing type qualifiers: `char const`, `int volatile`, etc.
-        while self.eat(TokenKind::Const) || self.eat(TokenKind::Volatile) {}
+        // Trailing type qualifiers: `char const`, `char __user`, etc.
+        self.skip_kernel_type_quals();
         Ok(ty)
     }
 
@@ -1002,20 +1024,72 @@ impl Parser {
 
     /// Parse declarator: pointers, name / nested (*name), arrays, function suffix.
     /// Returns (name, type, outermost function params + variadic if this is a function).
+    fn skip_kernel_type_quals(&mut self) {
+        loop {
+            match self.peek_kind().clone() {
+                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
+                    self.bump();
+                }
+                TokenKind::Ident(s)
+                    if matches!(
+                        s.as_str(),
+                        "__user"
+                            | "__kernel"
+                            | "__iomem"
+                            | "__percpu"
+                            | "__rcu"
+                            | "__force"
+                            | "__bitwise"
+                            | "__bitwise__"
+                            | "__private"
+                            | "__safe"
+                            | "__nocast"
+                            | "__pmem"
+                            | "restrict"
+                            | "__restrict"
+                            | "__restrict__"
+                    ) =>
+                {
+                    self.bump();
+                }
+                _ => break,
+            }
+        }
+    }
+
     fn parse_declarator(
         &mut self,
         base: Type,
     ) -> Result<(String, Type, Option<(Vec<(String, Type)>, bool)>), String> {
         let mut ty = base;
+        // Qualifiers may appear before the first `*`: `char __user *p`.
+        self.skip_kernel_type_quals();
         while self.eat(TokenKind::Star) {
-            // pointer qualifiers: *const / *volatile / *restrict / *__restrict__
+            // pointer qualifiers: *const / *volatile / *restrict / *__user
             loop {
                 match self.peek_kind().clone() {
                     TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
                         self.bump();
                     }
                     TokenKind::Ident(s)
-                        if s == "restrict" || s == "__restrict" || s == "__restrict__" =>
+                        if matches!(
+                            s.as_str(),
+                            "restrict"
+                                | "__restrict"
+                                | "__restrict__"
+                                | "__user"
+                                | "__kernel"
+                                | "__iomem"
+                                | "__percpu"
+                                | "__rcu"
+                                | "__force"
+                                | "__bitwise"
+                                | "__bitwise__"
+                                | "__private"
+                                | "__safe"
+                                | "__nocast"
+                                | "__pmem"
+                        ) =>
                     {
                         self.bump();
                     }

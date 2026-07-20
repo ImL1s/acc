@@ -400,6 +400,30 @@ pub fn preprocess_with_options_arch(
                 variadic: true,
             },
         );
+        // Kernel address-space / sparse markers — normally attribute macros;
+        // force empty so `const char __user *p` parses as `const char *p`.
+        for q in [
+            "__user",
+            "__kernel",
+            "__iomem",
+            "__percpu",
+            "__rcu",
+            "__force",
+            "__bitwise",
+            "__bitwise__",
+            "__must_hold",
+            "__acquires",
+            "__releases",
+            "__cond_lock",
+            "__private",
+            "__safe",
+            "__nocast",
+            "__pmem",
+            "__vmlinux_symbol",
+            "__kernel_symbol",
+        ] {
+            macros.insert(q.into(), MacroBody::Object("".into()));
+        }
     }
     // stdarg: expand to intrinsics handled in codegen (__ggcc_va_*).
     // va_list is a char* cursor into the register-save area of a variadic fn.

@@ -1209,6 +1209,15 @@ impl Codegen {
                 let elem = match bty {
                     Type::Array(e, _) => *e,
                     Type::Ptr(e) => *e,
+                    // Incomplete typing: treat integer/void as opaque byte pointer.
+                    Type::Int
+                    | Type::UInt
+                    | Type::Long
+                    | Type::ULong
+                    | Type::Short
+                    | Type::UShort
+                    | Type::Char
+                    | Type::Void => Type::Char,
                     other => return Err(format!("index of non-array {:?}", other)),
                 };
                 let esz = self.type_size(&elem).max(1);
