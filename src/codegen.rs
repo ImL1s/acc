@@ -1239,7 +1239,12 @@ impl Codegen {
         self.func_name = f.name.clone();
         self.func_ret = f.ret.clone();
         self.locals.clear();
-        self.stack_size = 0;
+        // Reserve [x29,#-8] for saved x19 (lvalue address temp / logical reg 19).
+        // x19 is callee-saved under AAPCS64; we use it across calls in
+        // CompoundAssign / PreInc / PostInc, so every function must preserve it
+        // (same pattern as x86_64 %rbx). Without this, `n += f()` stores through
+        // the callee's clobbered x19 and the add is lost (SQLite MakeRecord nHdr).
+        self.stack_size = 8;
         self.break_stack.clear();
         self.continue_stack.clear();
         self.va_regsave_off = 0;
@@ -1247,7 +1252,7 @@ impl Codegen {
 
         let body = f.body.as_ref().unwrap();
 
-        // Measure total frame: params + optional va_regsave + locals
+        // Measure total frame: saved x19 + params + optional va_regsave + locals
         for (pname, pty) in &f.params {
             if pname.is_empty() {
                 continue;
@@ -1271,9 +1276,9 @@ impl Codegen {
         // fixed-frame locals (AAPCS64 has no red zone). Keep SP well below frame.
         let frame = Self::align_up(measure_size + 256, 16);
 
-        // Reset and emit for real
+        // Reset and emit for real (keep slot for saved x19)
         self.locals.clear();
-        self.stack_size = 0;
+        self.stack_size = 8;
 
         // Count fixed GPRs consumed (small aggregates take 1–2 regs).
         let mut fixed_gp = 0usize;
@@ -1298,6 +1303,7 @@ impl Codegen {
         writeln!(self.out, "{sym}:").unwrap();
         writeln!(self.out, "\tstp\tx29, x30, [sp, #-16]!").unwrap();
         writeln!(self.out, "\tmov\tx29, sp").unwrap();
+        // frame always >= 8 (saved x19 slot); still guard for safety
         if frame > 0 {
             if frame <= 4095 {
                 writeln!(self.out, "\tsub\tsp, sp, #{frame}").unwrap();
@@ -1306,6 +1312,8 @@ impl Codegen {
                 writeln!(self.out, "\tsub\tsp, sp, x16").unwrap();
             }
         }
+        // Preserve caller's x19 (callee-saved) before any body use.
+        writeln!(self.out, "\tstr\tx19, [x29, #-8]").unwrap();
 
         // Allocate named params.
         // reg: 0..7 = GPR, 128+fpr = float, 255 = incoming stack slot.
@@ -1440,6 +1448,8 @@ impl Codegen {
         writeln!(self.out, "\tmov\tw0, #0").unwrap();
         let end = format!("L_{}_epilogue", f.name);
         writeln!(self.out, "{end}:").unwrap();
+        // Restore caller's x19 before tearing down the frame.
+        writeln!(self.out, "\tldr\tx19, [x29, #-8]").unwrap();
         if frame > 0 {
             writeln!(self.out, "\tmov\tsp, x29").unwrap();
         }
@@ -2921,12 +2931,16 @@ impl Codegen {
             }
             Expr::CompoundAssign { op, left, right } => {
                 // left = left op right (pointer += n scales)
-                // Spill left value before evaluating right — right-hand Binary/calls
-                // reuse x9 and would clobber `pColl` in `pColl += enc-1`.
+                // Spill left value AND address before evaluating right — RHS
+                // Binary/calls reuse x9 and nested CompoundAssign/PreInc reuse
+                // x19; without spilling the address, `n += f()` writes through
+                // the callee's x19 after the call (nHdr never updates).
                 let lty = self.emit_lvalue_addr(left, 19, typedefs)?;
                 self.load_ty(&lty, 19, 9);
                 writeln!(self.out, "\tstr\tx9, [sp, #-16]!").unwrap();
+                writeln!(self.out, "\tstr\tx19, [sp, #-16]!").unwrap();
                 self.emit_expr_rval(right, 10, typedefs)?;
+                writeln!(self.out, "\tldr\tx19, [sp], #16").unwrap();
                 writeln!(self.out, "\tldr\tx9, [sp], #16").unwrap();
                 let floaty = matches!(lty, Type::Float | Type::Double);
                 if floaty {
