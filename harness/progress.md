@@ -1,35 +1,44 @@
 # Progress (NO-DOWNGRADE)
 
-## Stage A — PASS | Stage B — PASS | Stage C — **NOT complete**
+## Stage A/B — PASS | Stage C — **NOT complete**
 
 | Gate | Status |
 |------|--------|
-| C5 | PASS |
-| C3 | PASS |
-| C4 | held |
-| **C2** | **BLOCKED** (open works; exec crashes) |
+| C3 multiarch | PASS |
+| C5 double-run | PASS |
+| C4 clean-room | held |
+| **C2** | **BLOCKED** |
 | **C1** | **BLOCKED** |
 
-### C2 smoke ladder
-| Check | Result |
-|-------|--------|
-| amalgamation link | PASS |
-| libversion | **PASS** `3.45.3` |
-| initialize | **PASS** `rc=0` |
-| `open(":memory:")` | **PASS** `rc=0` + valid db ptr |
-| `exec("select 1")` | **FAIL** SIGSEGV |
-| full tests / Redis | not started |
+### C2 smoke ladder (Docker Linux, ggcc-produced .s only)
+| Step | Result |
+|------|--------|
+| amalgamation → asm → link | PASS |
+| libversion | **PASS** `3.45.3` / `3045003` |
+| initialize | **PASS** |
+| open `:memory:` | **PASS** |
+| close | **PASS** |
+| exec `""` | **PASS** |
+| exec `";"` / `select 1` | **FAIL** SIGSEGV (`ExprDeleteNN` / parser) |
 
-### Fixes this stretch
-1. Compound-assign spill (`pColl += enc-1` clobber)
-2. Int store width: struct fields `str w`, stack slots zero-extend 8-byte; `ldrsw` loads
-3. Prior: va_list, memcpy struct assign, static string fields
+### Key fixes landed
+- Real va_list (AAPCS64)
+- Compound-assign register spill (`pColl += enc-1`)
+- Aggregate/struct assign via memcpy (Hash copy)
+- Int stack slot vs struct field store widths
+- Static string fields in initializers
+- **Multi-pass `collect_layouts`** (HashMap order no longer collapses nested unions; `sizeof(YYMINORTYPE)=16`)
+- **Small struct/union ABI (≤16B)** in 1–2 GPRs: Token pass into `sqlite3Parser`, struct returns, local init from calls
+
+### Verified offsets (ggcc == gcc)
+- `Parse.sLastToken` @ 288
+- `sizeof(Expr)=72`, `offsetof(pLeft)=16`, `yyStackEntry=24`
 
 ### Next
-1. Diagnose `sqlite3_exec` crash
-2. Green create/insert/select smoke → full suite or Redis
-3. C1 kernel boot
+1. Fail-driven: `exec(";")` still dies in `sqlite3ExprDeleteNN` (db/p garbage; stack frames corrupt) after Token ABI looks correct
+2. Green select/create → full SQLite tests or Redis
+3. C1 kernel QEMU boot
 
 ### blocked_reason
-C2: open OK, SQL exec still crashes — not full-project green.  
+C2: open/close/empty-exec green; any real SQL token still crashes in ExprDelete/parser — not full-project green.  
 C1: no boot proof.
