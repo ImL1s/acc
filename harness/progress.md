@@ -4,41 +4,24 @@
 
 | Gate | Status |
 |------|--------|
-| **C3** multiarch | **PASS** 40/40 (held; re-run after language churn) |
-| **C5** double-run | **PASS** 207/207 identical (held) |
+| **C3** multiarch | **PASS** (held) |
+| **C5** double-run | **PASS** (held) |
 | C4 clean-room | held |
-| **C2** | SQLite amalgamation smoke PASS; no testfixture |
-| **C1** | **PROGRESS** — ~165 kernel .o on amd64; no bzImage/QEMU |
+| **C2** | SQLite smoke only |
+| **C1** | **PROGRESS** — ~174 kernel .o; **no bzImage/QEMU** |
 
-### C1 Linux 6.9 (Docker `ggcc-linux-amd64`)
+### C1 (ggcc-linux-amd64)
 
-**Green (evidence):**
-- prepare0 rebuildable (bounds/asm-offsets/devicetable-offsets)
-- init: main.o, do_mounts.o, calibrate.o, noinitramfs.o
-- vdso: vma.o
-- mm: mempool.o, filemap.o
-- lib: string.o, vsprintf.o, hexdump.o (+ many more)
-- drivers/base: core.o + built-in.a
-- ~165 non-tools `.o` objects mid-tree
+**Green clusters:** prepare0, init (main/do_mounts/…), vdso/vma, mm (mempool/filemap), lib (string/vsprintf/hexdump/…), drivers/base (core+built-in.a), kernel/entry, kernel/dma, kernel/events, many fs/*.o
 
-**Language fixes landed this session (commits):**
-- enum IntLit enumerators after PP (`1=1`)
-- soft `->`/member on Int/Void/void*
-- `__int128` + `__SIZEOF_INT128__` + arch predefs (`__x86_64__`)
-- Func/Global symbol dedupe
-- `__restrict__` pointer quals
-- `__builtin_va_arg` / offsetof(`field[n]`)
-- indirect calls >6 SysV args
-- kernel `__user`/`__rcu`/… empty markers
+**Session language fixes (commits on main):**
+`1ca5d8f` enum IntLit, soft member, int128, arch macros, symbol dedupe  
+`259fdbe` restrict, va_arg, offsetof[arr], indirect >6  
+`040c8fb` __user/__rcu quals, soft index  
+`bc80a15` EXPORT_SYMBOL post-PP strip  
+`6cd1558` skip GNU local-label asm  
 
-**Still failing (sample):**
-- fs/namei.o, fs/exec.o — expected type on huge PP lines
-- kernel/sched/*.o — expected type
-- arch/x86/entry/vdso/extable.o, events/*.o
-- residual asm local labels (`1:`) on some TUs
-- **no** bzImage / QEMU
+**Still red:** fs/namei, fs/exec, kernel/sched/*, kernel/rcu/*, kernel/time/*, arch events/vdso/extable, …
 
 ### blocked_reason
-C1: dozens more TUs after ~165 objects; no boot.  
-C2: testfixture/Redis not run.  
-**Goal NOT complete.**
+C1 not booting. C2 testfixture not run. **Goal NOT complete.**
