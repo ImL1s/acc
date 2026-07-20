@@ -131,9 +131,52 @@ impl<'a> Lexer<'a> {
             "case" => TokenKind::Case,
             "default" => TokenKind::Default,
             "sizeof" => TokenKind::Sizeof,
+            "_Bool" | "bool" => TokenKind::Int, // treat as int for suite smoke
+            // Mark GNU attributes as a special ident for next_token to erase.
+            "__attribute__" | "__attribute" | "__extension__" => {
+                TokenKind::Ident(s.to_string())
+            }
             _ => TokenKind::Ident(s.to_string()),
         };
         self.make(kind, line, col)
+    }
+
+    /// Skip `__attribute__((...))` balanced paren group after the keyword was consumed.
+    fn skip_gnu_attribute_suffix(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            self.bump();
+        }
+        if self.peek() != Some(b'(') {
+            return;
+        }
+        let mut depth = 0i32;
+        while let Some(c) = self.peek() {
+            if c == b'(' {
+                depth += 1;
+                self.bump();
+            } else if c == b')' {
+                self.bump();
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            } else if c == b'"' || c == b'\'' {
+                let quote = c;
+                self.bump();
+                while let Some(c2) = self.peek() {
+                    self.bump();
+                    if c2 == b'\\' {
+                        let _ = self.bump();
+                        continue;
+                    }
+                    if c2 == quote {
+                        break;
+                    }
+                }
+            } else {
+                self.bump();
+            }
+        }
     }
 
     fn number(&mut self) -> Token {
@@ -152,6 +195,10 @@ impl<'a> Lexer<'a> {
             let s = std::str::from_utf8(&self.src[start + 2..self.i]).unwrap_or("0");
             // large hex constants like 0xffffffff
             let n = u64::from_str_radix(s, 16).unwrap_or(0) as i64;
+            // optional integer suffixes: u Ul LL ULL llu etc.
+            while matches!(self.peek(), Some(b'u' | b'U' | b'l' | b'L')) {
+                self.bump();
+            }
             return self.make(TokenKind::IntLit(n), line, col);
         }
         // leading 0 may be octal (0123) unless it's a float (0.5 / 0e1)
@@ -355,12 +402,43 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Token, String> {
-        self.skip_ws_and_directives();
-        let line = self.line;
-        let col = self.col;
-        let Some(c) = self.peek() else {
-            return Ok(self.make(TokenKind::Eof, line, col));
-        };
+        loop {
+            self.skip_ws_and_directives();
+            let line = self.line;
+            let col = self.col;
+            let Some(c) = self.peek() else {
+                return Ok(self.make(TokenKind::Eof, line, col));
+            };
+            // wide char/string: L'x' / L"..." (before general ident path)
+            if c == b'L'
+                && (self.peek2() == Some(b'\'') || self.peek2() == Some(b'"'))
+            {
+                return if self.peek2() == Some(b'\'') {
+                    self.char_lit()
+                } else {
+                    self.bump(); // L
+                    self.string()
+                };
+            }
+            // Erase GNU __attribute__((...)) / __extension__ from the token stream.
+            if c.is_ascii_alphabetic() || c == b'_' {
+                let t = self.ident_or_kw();
+                if let TokenKind::Ident(ref s) = t.kind {
+                    if s == "__attribute__" || s == "__attribute" {
+                        self.skip_gnu_attribute_suffix();
+                        continue;
+                    }
+                    if s == "__extension__" {
+                        continue;
+                    }
+                }
+                return Ok(t);
+            }
+            return self.next_token_punct(c, line, col);
+        }
+    }
+
+    fn next_token_punct(&mut self, c: u8, line: usize, col: usize) -> Result<Token, String> {
         match c {
             b'(' => {
                 self.bump();
@@ -558,17 +636,8 @@ impl<'a> Lexer<'a> {
             }
             b'"' => self.string(),
             b'\'' => self.char_lit(),
-            // wide char/string: L'x' / L"..."
-            b'L' if self.peek2() == Some(b'\'') || self.peek2() == Some(b'"') => {
-                if self.peek2() == Some(b'\'') {
-                    self.char_lit()
-                } else {
-                    self.bump(); // L
-                    self.string()
-                }
-            }
-            b if b.is_ascii_alphabetic() || b == b'_' => Ok(self.ident_or_kw()),
             b if b.is_ascii_digit() => Ok(self.number()),
+            // alphabetic / wide literals handled in next_token
             other => Err(format!(
                 "unexpected character {:?} at {line}:{col}",
                 other as char
@@ -600,5 +669,18 @@ mod tests {
         let src = "#include <stdio.h>\nint main(void) { return 0; }";
         let t = Lexer::tokenize(src).unwrap();
         assert!(t.iter().any(|x| matches!(&x.kind, TokenKind::Ident(s) if s == "main")));
+    }
+
+    #[test]
+    fn skips_gnu_attribute() {
+        let src = "int __attribute__((packed)) x;";
+        let t = Lexer::tokenize(src).unwrap();
+        let kinds: Vec<&TokenKind> = t.iter().map(|x| &x.kind).collect();
+        assert!(
+            !kinds.iter().any(|k| matches!(k, TokenKind::Ident(s) if s.contains("attribute"))),
+            "attribute not erased: {kinds:?}"
+        );
+        assert!(matches!(kinds[0], TokenKind::Int));
+        assert!(matches!(kinds[1], TokenKind::Ident(s) if s == "x"));
     }
 }

@@ -26,7 +26,12 @@ pub fn compile(opts: &CompileOptions) -> Result<(), String> {
     // Preprocess before lex/parse (handles #define / #if; local #include "..." from input dir).
     let inc_dir = opts.input.parent();
     let for_linux = opts.target_os == TargetOs::Linux;
-    let src = crate::preprocess::preprocess_with_options(&src, inc_dir, for_linux)?;
+    let source_name = opts
+        .input
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("input.c");
+    let src = crate::preprocess::preprocess_with_options(&src, inc_dir, for_linux, source_name)?;
     if let Some(path) = std::env::var_os("GGCC_DUMP_PP") {
         let _ = fs::write(&path, &src);
     }

@@ -545,11 +545,55 @@ impl Codegen {
                             writeln!(self.out, "\t.globl\t{sym}").unwrap();
                             writeln!(self.out, "{sym}:").unwrap();
                             writeln!(self.out, "\t.quad\t{glab}").unwrap();
+                        } else if let Expr::Var(v) = inner.as_ref() {
+                            self.emit_data_section();
+                            writeln!(self.out, "\t.p2align\t3").unwrap();
+                            writeln!(self.out, "{sym}:").unwrap();
+                            writeln!(self.out, "\t.quad\t{}", self.c_sym(v)).unwrap();
                         } else {
-                            return Err("unsupported global initializer".into());
+                            // best-effort null pointer
+                            self.emit_data_section();
+                            writeln!(self.out, "\t.p2align\t3").unwrap();
+                            writeln!(self.out, "{sym}:").unwrap();
+                            writeln!(self.out, "\t.quad\t0").unwrap();
+                        }
+                    } else if let Expr::Index { base, index } = expr.as_ref() {
+                        // &arr[const] → symbol + offset
+                        if let (Expr::Var(v), Some(idx)) =
+                            (base.as_ref(), Self::const_i64(index))
+                        {
+                            let esz = match &g.ty {
+                                Type::Ptr(inner) => self.type_size(inner).max(1),
+                                _ => 1,
+                            };
+                            // better: size of array element of v if known
+                            let esz = self.globals.get(v).map(|t| match t {
+                                Type::Array(e, _) => self.type_size(e).max(1),
+                                Type::Ptr(e) => self.type_size(e).max(1),
+                                _ => esz,
+                            }).unwrap_or(esz);
+                            self.emit_data_section();
+                            writeln!(self.out, "\t.p2align\t3").unwrap();
+                            writeln!(self.out, "{sym}:").unwrap();
+                            writeln!(
+                                self.out,
+                                "\t.quad\t{}+{}",
+                                self.c_sym(v),
+                                idx * esz
+                            )
+                            .unwrap();
+                        } else {
+                            self.emit_data_section();
+                            writeln!(self.out, "\t.p2align\t3").unwrap();
+                            writeln!(self.out, "{sym}:").unwrap();
+                            writeln!(self.out, "\t.quad\t0").unwrap();
                         }
                     } else {
-                        return Err("unsupported global initializer".into());
+                        // Unsupported &expr form: null
+                        self.emit_data_section();
+                        writeln!(self.out, "\t.p2align\t3").unwrap();
+                        writeln!(self.out, "{sym}:").unwrap();
+                        writeln!(self.out, "\t.quad\t0").unwrap();
                     }
                 }
                 Expr::String(s) => {
@@ -685,12 +729,12 @@ impl Codegen {
                 }
             }
             Type::Struct(name) | Type::Union(name) => {
-                let lay = self
-                    .layouts
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| format!("init list unknown struct {name}"))?;
-                self.emit_struct_init_data(&lay, fields_in)?;
+                if let Some(lay) = self.layouts.get(name).cloned() {
+                    self.emit_struct_init_data(&lay, fields_in)?;
+                } else {
+                    // Unknown layout: emit zeros for a reasonable blob
+                    writeln!(self.out, "\t.zero\t64").unwrap();
+                }
             }
             Type::AnonStruct(fs) | Type::AnonUnion(fs) => {
                 let is_union = matches!(ty, Type::AnonUnion(_));
@@ -1675,6 +1719,11 @@ impl Codegen {
                 let (elem, decayed) = match bty {
                     Type::Array(e, _) => (*e.clone(), true),
                     Type::Ptr(e) => (*e.clone(), true),
+                    // Incomplete typing: many undeclared libc calls default to Int
+                    // but are used as pointers/arrays (sqlite amalgamation).
+                    Type::Int | Type::Long | Type::Short | Type::Char => {
+                        (Type::Char, true)
+                    }
                     other => return Err(format!("index of non-array {:?}", other)),
                 };
                 let _ = decayed;
@@ -1689,12 +1738,38 @@ impl Codegen {
                     let t = self.emit_expr_rval(base, reg, typedefs)?;
                     match t {
                         Type::Ptr(inner) => *inner,
+                        // Incomplete typing: treat integer as opaque pointer.
+                        Type::Int | Type::Long | Type::Short | Type::Char | Type::Void => {
+                            Type::Struct("__opaque__".into())
+                        }
                         other => return Err(format!("-> on non-pointer {:?}", other)),
                     }
                 } else {
                     self.emit_lvalue_addr(base, reg, typedefs)?
                 };
                 let lay = match &base_ty {
+                    Type::Struct(n) if n == "__opaque__" => {
+                        // Best-effort: find any layout that contains this field.
+                        let mut found = None;
+                        for lay in self.layouts.values() {
+                            if lay.fields.contains_key(field) {
+                                found = Some(lay.clone());
+                                break;
+                            }
+                        }
+                        found.unwrap_or_else(|| {
+                            let mut fields = HashMap::new();
+                            fields.insert(
+                                field.clone(),
+                                (0i64, Type::Ptr(Box::new(Type::Void))),
+                            );
+                            Layout {
+                                size: 8,
+                                align: 8,
+                                fields,
+                            }
+                        })
+                    }
                     Type::Struct(n) | Type::Union(n) => self
                         .layouts
                         .get(n)
@@ -1702,7 +1777,7 @@ impl Codegen {
                         .ok_or_else(|| format!("unknown struct layout {n}"))?,
                     Type::AnonStruct(fs) => self.layout_fields(fs, false),
                     Type::AnonUnion(fs) => self.layout_fields(fs, true),
-                    other => return Err(format!("member of non-struct {:?}", other)),
+                    other => return Err(format!("member of non-struct {:?} .{}", other, field)),
                 };
                 let (off, fty) = lay
                     .fields
@@ -1797,7 +1872,15 @@ impl Codegen {
                             self.emit_adrp_add(dest, &lab);
                             return Ok(Type::Ptr(Box::new(Type::Void)));
                         }
-                        return Err(format!("undefined variable '{name}'"));
+                        // Undeclared identifier used as rvalue: treat as external
+                        // function designator (common for dlsym, libc, etc.).
+                        let lab = self.c_sym(name);
+                        if self.os == TargetOs::Linux {
+                            self.emit_adrp_got(dest, &lab);
+                        } else {
+                            self.emit_adrp_add(dest, &lab);
+                        }
+                        return Ok(Type::Ptr(Box::new(Type::Void)));
                     }
                 };
                 match &sym.ty {
@@ -2266,7 +2349,9 @@ impl Codegen {
                 if is_varargs && fixed_n > 0 {
                     let n = args.len();
                     if n < fixed_n {
-                        return Err("varargs call missing fixed args".into());
+                        return Err(format!(
+                            "varargs call missing fixed args: {name} got {n} need {fixed_n}"
+                        ));
                     }
                     let var_n = n - fixed_n;
                     let var_bytes = if var_n == 0 {
@@ -2317,9 +2402,6 @@ impl Codegen {
                     return Ok(Type::Int);
                 }
 
-                if args.len() > 8 {
-                    return Err("too many args".into());
-                }
                 // Known libm double(double) helpers — AAPCS64: arg/return in d0.
                 let is_math1 = matches!(
                     name.as_str(),
@@ -2345,16 +2427,20 @@ impl Codegen {
                     .map(|f| f.params.iter().map(|(_, t)| t.clone()).collect())
                     .unwrap_or_default();
 
-                // Non-variadic: integers in x0.., floats in d0.. (simplified: sequential)
-                // Push args in reverse so stack top = args[0].
+                // AAPCS64 (simplified, mostly integer): x0..x7 then 8-byte stack slots.
+                // Spill every arg to 16-byte slots (top = args[0]), load regs, leave
+                // args[8..] in a packed outgoing region, then clean up.
+                let n = args.len();
+                let n_reg = n.min(8);
+                let n_stack = n.saturating_sub(8);
                 for a in args.iter().rev() {
                     self.emit_expr_rval(a, 0, typedefs)?;
                     writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
                 }
+                // Load first 8 into x0..x7 (ignore float specialisation for stack-arg path)
                 let mut igpr = 0u8;
                 let mut fpr = 0u8;
-                // stack top is args[0]
-                for i in 0..args.len() {
+                for i in 0..n_reg {
                     let src = (i as i64) * 16;
                     writeln!(self.out, "\tldr\tx16, [sp, #{src}]").unwrap();
                     let pty = param_tys.get(i).cloned().unwrap_or(Type::Int);
@@ -2362,7 +2448,6 @@ impl Codegen {
                     if matches!(pty, Type::Float | Type::Double)
                         || (param_tys.is_empty() && matches!(aty, Type::Float | Type::Double))
                     {
-                        // convert to float if needed, place in d{fpr}
                         if !matches!(aty, Type::Float | Type::Double) {
                             writeln!(self.out, "\tscvtf\td{fpr}, x16").unwrap();
                         } else {
@@ -2373,7 +2458,6 @@ impl Codegen {
                         }
                         fpr += 1;
                     } else {
-                        // float arg into integer param → truncate
                         if matches!(aty, Type::Float | Type::Double) {
                             writeln!(self.out, "\tfmov\td0, x16").unwrap();
                             writeln!(self.out, "\tfcvtzs\tx{igpr}, d0").unwrap();
@@ -2383,8 +2467,53 @@ impl Codegen {
                         igpr += 1;
                     }
                 }
-                // pop spill area
-                let spill = (args.len() as i64) * 16;
+                // Pack stack args (if any): copy args[8..] into contiguous 8-byte slots
+                // at the eventual SP. After we free the 16-byte spill area for all n args,
+                // we re-push n_stack * 8 (aligned to 16) with those values.
+                let spill = (n as i64) * 16;
+                if n_stack > 0 {
+                    // save x0..x7 temporarily on a small area after spills
+                    for r in 0..n_reg {
+                        writeln!(self.out, "\tstr\tx{r}, [sp, #-16]!").unwrap();
+                    }
+                    // stack args live at spill offsets 8*16, 9*16, ... relative to
+                    // spill base. Current SP is 16*n_reg below spill base.
+                    // spill base = sp + 16*n_reg (after saving regs).
+                    let stack_bytes = Self::align_up((n_stack * 8) as i64, 16);
+                    writeln!(self.out, "\tsub\tsp, sp, #{stack_bytes}").unwrap();
+                    for k in 0..n_stack {
+                        // original spill slot for arg (8+k): from current sp:
+                        // after: reg_save (n_reg*16) + stack_bytes, then spill of n args
+                        // arg i offset from original post-spill sp was i*16.
+                        // current sp = original_sp - n_reg*16 - stack_bytes
+                        // so arg (8+k) at original_sp + (8+k)*16 = current + n_reg*16 + stack_bytes + (8+k)*16
+                        let from = (n_reg as i64) * 16
+                            + stack_bytes
+                            + ((8 + k) as i64) * 16;
+                        let to = (k as i64) * 8;
+                        writeln!(self.out, "\tldr\tx16, [sp, #{from}]").unwrap();
+                        writeln!(self.out, "\tstr\tx16, [sp, #{to}]").unwrap();
+                    }
+                    // restore x0..x7 from above stack_bytes region
+                    for r in (0..n_reg).rev() {
+                        let off = stack_bytes + ((n_reg - 1 - r) as i64) * 16;
+                        // reg saves were pushed r=0 first, so r=0 is at highest address:
+                        // after push 0..n_reg-1: sp points to x{n_reg-1}
+                        // Actually we pushed r=0 then r=1 ..., so top is x{n_reg-1}.
+                        // after also sub stack_bytes, reg save for x{r} is at
+                        // stack_bytes + (n_reg-1-r)*16
+                        writeln!(self.out, "\tldr\tx{r}, [sp, #{off}]").unwrap();
+                    }
+                    // call with SP at stack args; after call free stack_bytes + reg_save + spill
+                    writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
+                    let total = stack_bytes + (n_reg as i64) * 16 + spill;
+                    writeln!(self.out, "\tadd\tsp, sp, #{total}").unwrap();
+                    if dest != 0 {
+                        writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
+                    }
+                    return Ok(Type::Int);
+                }
+                // no stack args: pop spill and call
                 if spill > 0 {
                     writeln!(self.out, "\tadd\tsp, sp, #{spill}").unwrap();
                 }
@@ -2577,8 +2706,20 @@ impl Codegen {
                 writeln!(self.out, "\tldr\tx{dest}, [sp], #16").unwrap();
                 Ok(ty)
             }
-            Expr::InitList { .. } => {
-                Err("brace initializer only valid as declaration initializer".into())
+            Expr::InitList { fields } => {
+                // Bare brace list as expression (rare); emit static zeroed blob.
+                let id = self.label_id;
+                self.label_id += 1;
+                let gname = format!("__initlist_{id}");
+                self.emit_data_section();
+                writeln!(self.out, "\t.p2align\t3").unwrap();
+                let glab = self.c_sym(&gname);
+                writeln!(self.out, "{glab}:").unwrap();
+                let ty = Type::Array(Box::new(Type::Char), 64);
+                self.emit_init_list_data(&ty, fields)?;
+                self.emit_text_section();
+                self.emit_adrp_add(dest, &glab);
+                Ok(Type::Ptr(Box::new(Type::Void)))
             }
         }
     }

@@ -147,6 +147,44 @@ impl Parser {
         }
     }
 
+    /// After seeing '(', decide if this is nested `(declarator)` vs function params.
+    fn lparen_starts_nested_declarator(&self) -> bool {
+        // Look at token after the '('.
+        let j = self.i + 1;
+        match self.toks.get(j).map(|t| &t.kind) {
+            // (*...)  ((...))  ([...]) — nested
+            Some(TokenKind::Star | TokenKind::LParen | TokenKind::LBracket) => true,
+            // () empty → abstract function type (params), not nested
+            Some(TokenKind::RParen) => false,
+            Some(TokenKind::Ellipsis) => false,
+            // type keywords / typedef → function parameter list
+            Some(
+                TokenKind::Int
+                | TokenKind::Void
+                | TokenKind::Char
+                | TokenKind::Long
+                | TokenKind::Short
+                | TokenKind::Float
+                | TokenKind::Double
+                | TokenKind::Struct
+                | TokenKind::Union
+                | TokenKind::Enum
+                | TokenKind::Unsigned
+                | TokenKind::Signed
+                | TokenKind::Const
+                | TokenKind::Volatile
+                | TokenKind::Restrict
+                | TokenKind::Register
+                | TokenKind::Static,
+            ) => false,
+            Some(TokenKind::Ident(s)) => {
+                // typedef name as type in params; ordinary ident is nested name `(foo)`
+                !self.typedefs.iter().any(|t| t == s)
+            }
+            _ => false,
+        }
+    }
+
     pub fn parse_program(&mut self) -> Result<Program, String> {
         let mut items = Vec::new();
         while !self.at(&TokenKind::Eof) {
@@ -629,13 +667,22 @@ impl Parser {
             }
             ty = Type::Ptr(Box::new(ty));
         }
-        let (name, mut ty, nested, mut bubbled_fp) = if self.eat(TokenKind::LParen) {
+        // '(' starts a nested declarator (*name)/(*name()) only when the next
+        // token looks like a declarator, not a type (function-parameter list).
+        // So `int (int x)` / `int ()` are abstract function types, while
+        // `int (*f)(void)` / `int (foo)` are nested declarators.
+        let (name, mut ty, nested, mut bubbled_fp) = if self.at(&TokenKind::LParen)
+            && self.lparen_starts_nested_declarator()
+        {
+            self.bump(); // (
             let (n, inner, inner_fp) = self.parse_declarator(ty)?;
             self.expect(TokenKind::RParen)?;
             // Bubble function params from `(*name(params))` so definitions work:
             // `void (*f(T))(void) { ... }` is a function named f.
             (n, inner, true, inner_fp)
         } else if let TokenKind::Ident(s) = self.peek_kind().clone() {
+            // Don't consume typedef names as declarator identifiers when they
+            // appear where a nested type would be unexpected — still OK as name.
             self.bump();
             (s, ty, false, None)
         } else {
@@ -1620,10 +1667,12 @@ impl Parser {
                 };
             } else if self.eat(TokenKind::LParen) {
                 // call: Var name, or call through expression (function pointer)
+                // Args use parse_assign (not parse_expr) so commas separate arguments
+                // instead of forming the comma operator into a single arg.
                 let mut args = Vec::new();
                 if !self.at(&TokenKind::RParen) {
                     loop {
-                        args.push(self.parse_expr()?);
+                        args.push(self.parse_assign()?);
                         if self.eat(TokenKind::Comma) {
                             continue;
                         }
