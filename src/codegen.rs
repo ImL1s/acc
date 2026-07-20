@@ -1564,8 +1564,23 @@ impl Codegen {
         match st {
             Stmt::Empty => Ok(()),
             Stmt::Asm { lines } => {
-                // Emit resolved kbuild/GNU asm lines as raw assembly.
+                // Emit kbuild DEFINE lines; skip raw templates with %0/%[name].
                 for line in lines {
+                    let t = line.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    if t.contains('%')
+                        && t.bytes().enumerate().any(|(i, b)| {
+                            b == b'%'
+                                && t.as_bytes()
+                                    .get(i + 1)
+                                    .map(|c| c.is_ascii_digit() || *c == b'[')
+                                    .unwrap_or(false)
+                        })
+                    {
+                        continue;
+                    }
                     writeln!(self.out, "\t{line}").unwrap();
                 }
                 Ok(())

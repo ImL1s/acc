@@ -771,7 +771,25 @@ impl Codegen {
         match st {
             Stmt::Empty => Ok(()),
             Stmt::Asm { lines } => {
+                // Emit kbuild DEFINE lines (`.ascii "->..."`) only. Skip raw
+                // machine templates that still contain `%0` output operands —
+                // those need real register allocation we don't do for headers.
                 for line in lines {
+                    let t = line.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    if t.contains('%')
+                        && t.bytes().enumerate().any(|(i, b)| {
+                            b == b'%'
+                                && t.as_bytes()
+                                    .get(i + 1)
+                                    .map(|c| c.is_ascii_digit() || *c == b'[')
+                                    .unwrap_or(false)
+                        })
+                    {
+                        continue;
+                    }
                     writeln!(self.out, "\t{line}").unwrap();
                 }
                 Ok(())
