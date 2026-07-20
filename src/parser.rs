@@ -761,9 +761,9 @@ impl Parser {
             } else if self.at(&TokenKind::RBracket) {
                 0
             } else {
-                // Constant expression: 11, (11+1), sizeof...
+                // Constant expression: 11, (11+1), sizeof, offsetof...
                 let e = self.parse_expr()?;
-                Self::const_array_len(&e).unwrap_or(0)
+                self.const_array_len(&e).unwrap_or(0)
             };
             self.expect(TokenKind::RBracket)?;
             dims.push(n);
@@ -814,10 +814,116 @@ impl Parser {
         }
     }
 
+    fn align_up(n: i64, a: i64) -> i64 {
+        if a <= 1 {
+            return n;
+        }
+        (n + a - 1) & !(a - 1)
+    }
+
+    fn const_type_align(&self, ty: &Type) -> i64 {
+        match ty {
+            Type::Void | Type::Char | Type::SChar => 1,
+            Type::Short | Type::UShort => 2,
+            Type::Int | Type::UInt | Type::Float => 4,
+            Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
+            Type::Array(e, _) => self.const_type_align(e),
+            Type::Struct(n) | Type::Union(n) => self
+                .layout_named(n)
+                .map(|(_, a, _)| a)
+                .unwrap_or(8),
+            Type::AnonStruct(fs) => self.layout_fields_const(fs, false).1,
+            Type::AnonUnion(fs) => self.layout_fields_const(fs, true).1,
+        }
+    }
+
+    /// Layout from struct_fields (bit-offset packing, matches codegen).
+    /// Returns (size, align, field_name → byte offset).
+    fn layout_fields_const(
+        &self,
+        fields: &[Field],
+        is_union: bool,
+    ) -> (i64, i64, std::collections::HashMap<String, i64>) {
+        let mut map = std::collections::HashMap::new();
+        let mut max_align = 1i64;
+        let mut max_size = 0i64;
+        let mut offset_bits: u64 = 0;
+
+        for f in fields {
+            if f.name.is_empty() && f.bit_width.is_none() {
+                continue;
+            }
+            if let Some(width) = f.bit_width {
+                let container_sz = self.const_type_size(&f.ty).unwrap_or(4).max(1) as u64;
+                let container_bits = container_sz * 8;
+                let al = self.const_type_align(&f.ty);
+                max_align = max_align.max(al);
+                if is_union {
+                    if !f.name.is_empty() && width > 0 {
+                        map.insert(f.name.clone(), 0);
+                    }
+                    max_size = max_size.max(container_sz as i64);
+                    continue;
+                }
+                if width == 0 {
+                    let al_bits = (al as u64) * 8;
+                    if al_bits > 0 {
+                        offset_bits = ((offset_bits + al_bits - 1) / al_bits) * al_bits;
+                    }
+                    continue;
+                }
+                let w = width as u64;
+                if container_bits > 0 && (offset_bits % container_bits) + w > container_bits {
+                    offset_bits =
+                        ((offset_bits + container_bits - 1) / container_bits) * container_bits;
+                }
+                let bit_pos = offset_bits;
+                let cont_index = bit_pos / container_bits.max(1);
+                let unit_start = (cont_index * container_sz) as i64;
+                if !f.name.is_empty() {
+                    map.insert(f.name.clone(), unit_start);
+                }
+                offset_bits = bit_pos + w;
+                max_size = max_size.max(((offset_bits + 7) / 8) as i64);
+                continue;
+            }
+            let sz = self.const_type_size(&f.ty).unwrap_or(8);
+            let al = self.const_type_align(&f.ty);
+            max_align = max_align.max(al);
+            if is_union {
+                if !f.name.is_empty() {
+                    map.insert(f.name.clone(), 0);
+                }
+                max_size = max_size.max(sz);
+            } else {
+                let mut byte_off = ((offset_bits + 7) / 8) as i64;
+                byte_off = Self::align_up(byte_off, al);
+                if !f.name.is_empty() {
+                    map.insert(f.name.clone(), byte_off);
+                }
+                offset_bits = ((byte_off + sz) as u64) * 8;
+            }
+        }
+        let size = if is_union {
+            Self::align_up(max_size, max_align.max(1))
+        } else {
+            let byte_off = ((offset_bits + 7) / 8) as i64;
+            Self::align_up(byte_off, max_align.max(1))
+        };
+        (size, max_align.max(1), map)
+    }
+
+    fn layout_named(
+        &self,
+        name: &str,
+    ) -> Option<(i64, i64, std::collections::HashMap<String, i64>)> {
+        let fields = self.struct_fields.get(name)?;
+        let is_union = self.unions.iter().any(|u| u == name);
+        Some(self.layout_fields_const(fields, is_union))
+    }
+
     /// Sizeof for constant-expression evaluation at parse time (array bounds).
-    /// Pointers are 8; structs/unions fall back to 8 (only used when size is
-    /// not yet known — `sizeof(T*)` is fine and is what SQLite BITVEC macros need).
-    fn const_type_size(ty: &Type) -> Option<i64> {
+    fn const_type_size(&self, ty: &Type) -> Option<i64> {
         Some(match ty {
             Type::Void => 0,
             Type::Char | Type::SChar => 1,
@@ -828,50 +934,93 @@ impl Parser {
                 if *n <= 0 {
                     return None;
                 }
-                Self::const_type_size(e)? * n
+                self.const_type_size(e)? * n
             }
-            // Incomplete/unknown named aggregates: pointer-sized fallback is
-            // wrong for `sizeof(struct X)` but correct for nothing we need in
-            // array bounds that also use `sizeof(X*)` only. Prefer None so we
-            // don't silently emit wrong [8] arrays.
-            Type::Struct(_) | Type::Union(_) => return None,
-            Type::AnonStruct(fs) => {
-                // Rough C layout for simple const eval (no bitfields).
-                let mut off = 0i64;
-                let mut al = 1i64;
-                for f in fs {
-                    let sz = Self::const_type_size(&f.ty)?;
-                    let a = match &f.ty {
-                        Type::Char | Type::SChar => 1,
-                        Type::Short | Type::UShort => 2,
-                        Type::Int | Type::UInt | Type::Float => 4,
-                        _ => 8,
-                    };
-                    al = al.max(a);
-                    off = ((off + a - 1) / a) * a + sz;
-                }
-                ((off + al - 1) / al) * al
+            Type::Struct(n) | Type::Union(n) => {
+                return self.layout_named(n).map(|(s, _, _)| s);
             }
-            Type::AnonUnion(fs) => {
-                let mut m = 0i64;
-                for f in fs {
-                    m = m.max(Self::const_type_size(&f.ty)?);
-                }
-                m
-            }
+            Type::AnonStruct(fs) => self.layout_fields_const(fs, false).0,
+            Type::AnonUnion(fs) => self.layout_fields_const(fs, true).0,
         })
     }
 
-    fn const_array_len(e: &Expr) -> Option<i64> {
+    /// Evaluate `offsetof(T, field)` patterns:
+    /// `((int)((char*)&((T*)0)->field))` or `&((T*)0)->field`.
+    fn const_offsetof(&self, e: &Expr) -> Option<i64> {
+        // Strip outer casts
+        let e = match e {
+            Expr::Cast { expr, .. } => expr.as_ref(),
+            other => other,
+        };
+        let e = match e {
+            Expr::Unary {
+                op: UnaryOp::Addr,
+                expr,
+            } => expr.as_ref(),
+            other => other,
+        };
+        match e {
+            Expr::Member { base, field, .. } => {
+                // base should be (T*)0 or cast chain ending at null
+                let mut b = base.as_ref();
+                let mut ty: Option<Type> = None;
+                loop {
+                    match b {
+                        Expr::Cast { ty: t, expr } => {
+                            ty = Some(t.clone());
+                            b = expr.as_ref();
+                        }
+                        Expr::Int(0) | Expr::Char(0) => break,
+                        _ => return None,
+                    }
+                }
+                let ty = ty?;
+                let (struct_name, fields_map) = match ty {
+                    Type::Ptr(inner) => match *inner {
+                        Type::Struct(n) | Type::Union(n) => {
+                            let lay = self.layout_named(&n)?;
+                            (n, lay.2)
+                        }
+                        Type::AnonStruct(fs) => {
+                            let lay = self.layout_fields_const(&fs, false);
+                            (String::new(), lay.2)
+                        }
+                        _ => return None,
+                    },
+                    Type::Struct(n) | Type::Union(n) => {
+                        let lay = self.layout_named(&n)?;
+                        (n, lay.2)
+                    }
+                    _ => return None,
+                };
+                let _ = struct_name;
+                fields_map.get(field).copied()
+            }
+            _ => None,
+        }
+    }
+
+    fn const_array_len(&self, e: &Expr) -> Option<i64> {
+        // Try offsetof first (before generic cast peel loses Addr).
+        if let Some(o) = self.const_offsetof(e) {
+            return Some(o);
+        }
         match e {
             Expr::Int(n) | Expr::Char(n) => Some(*n),
             Expr::Unary {
                 op: UnaryOp::Neg,
                 expr,
-            } => Some(-Self::const_array_len(expr)?),
+            } => Some(-self.const_array_len(expr)?),
+            Expr::Unary {
+                op: UnaryOp::Addr,
+                expr,
+            } => self.const_offsetof(&Expr::Unary {
+                op: UnaryOp::Addr,
+                expr: expr.clone(),
+            }),
             Expr::Binary { op, left, right } => {
-                let l = Self::const_array_len(left)?;
-                let r = Self::const_array_len(right)?;
+                let l = self.const_array_len(left)?;
+                let r = self.const_array_len(right)?;
                 Some(match op {
                     BinOp::Add => l.wrapping_add(r),
                     BinOp::Sub => l.wrapping_sub(r),
@@ -881,28 +1030,36 @@ impl Parser {
                     _ => return None,
                 })
             }
-            Expr::Cast { expr, .. } => Self::const_array_len(expr),
-            Expr::SizeofType(ty) => Self::const_type_size(ty),
-            Expr::SizeofExpr(ex) => {
-                // sizeof(expr): only handle simple cases / types-as-expr failures
-                // by re-evaluating if the expr itself is a constant sizeof tree.
-                match ex.as_ref() {
-                    Expr::SizeofType(ty) | Expr::Cast { ty, .. } => Self::const_type_size(ty),
-                    other => Self::const_array_len(other),
+            Expr::Cast { expr, .. } => {
+                // Cast may wrap offsetof; try offsetof on full expr first already done.
+                // Also try offsetof on inner with outer cast re-wrapped.
+                if let Some(o) = self.const_offsetof(expr) {
+                    return Some(o);
                 }
+                self.const_array_len(expr)
             }
+            Expr::SizeofType(ty) => self.const_type_size(ty),
+            Expr::SizeofExpr(ex) => match ex.as_ref() {
+                Expr::SizeofType(ty) | Expr::Cast { ty, .. } => self.const_type_size(ty),
+                other => {
+                    // sizeof(var) — try typeof-ish via sizeof of expression type
+                    // For const eval, only constants matter.
+                    self.const_array_len(other)
+                }
+            },
             Expr::Cond {
                 cond,
                 then_e,
                 else_e,
             } => {
-                let c = Self::const_array_len(cond)?;
+                let c = self.const_array_len(cond)?;
                 if c != 0 {
-                    Self::const_array_len(then_e)
+                    self.const_array_len(then_e)
                 } else {
-                    Self::const_array_len(else_e)
+                    self.const_array_len(else_e)
                 }
             }
+            Expr::Member { .. } => self.const_offsetof(e),
             _ => None,
         }
     }

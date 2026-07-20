@@ -1258,9 +1258,11 @@ impl Codegen {
             };
             let _ = self.alloc_local(pname, &pty);
         }
-        // Variadic: reserve 64 bytes for x0..x7 save (after params, before body locals).
+        // Variadic: 64B for x0..x7 save + 128B (16×8) copy of stack-passed
+        // overflow args so va_arg walks a contiguous cursor (NestedParse has 8+
+        // variadic args; without the overflow copy, #%d stays literal).
         if f.variadic {
-            self.stack_size = Self::align_up(self.stack_size, 16) + 64;
+            self.stack_size = Self::align_up(self.stack_size, 16) + 64 + 128;
         }
         let mut measure = self.locals.clone();
         let mut measure_size = self.stack_size;
@@ -1350,14 +1352,24 @@ impl Codegen {
             }
         }
 
-        // Variadic: reserve save area, spill x0-x7, then materialize named params from it.
+        // Variadic: reserve save area, spill x0-x7, copy stack overflow args
+        // into the contiguous region after x7, then materialize named params.
         if f.variadic {
-            self.stack_size = Self::align_up(self.stack_size, 16) + 64;
+            self.stack_size = Self::align_up(self.stack_size, 16) + 64 + 128;
             self.va_regsave_off = -self.stack_size; // x0 at this offset
             for r in 0u8..8 {
                 let off = self.va_regsave_off + (r as i64) * 8;
                 self.emit_fp_addr(off, 17);
                 writeln!(self.out, "\tstr\tx{r}, [x17]").unwrap();
+            }
+            // Stack-passed args (9th+) land at [x29,#16] after stp fp,lr.
+            // Copy 16 words so va_arg after x7 keeps walking linearly.
+            for i in 0i64..16 {
+                let src = 16 + i * 8;
+                writeln!(self.out, "\tldr\tx16, [x29, #{src}]").unwrap();
+                let dest = self.va_regsave_off + 64 + i * 8;
+                self.emit_fp_addr(dest, 17);
+                writeln!(self.out, "\tstr\tx16, [x17]").unwrap();
             }
             for (off, pty, reg, nregs, stack_off) in &param_offs {
                 if *reg < 8 {
