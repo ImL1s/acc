@@ -1674,7 +1674,12 @@ impl Codegen {
                     if matches!(ty, Type::Float | Type::Double) {
                         let rty = self.typeof_expr(init, typedefs);
                         if !matches!(rty, Type::Float | Type::Double) {
-                            writeln!(self.out, "\tscvtf\td0, x0").unwrap();
+                            // u64→double must be ucvtf, not scvtf (AtoF significand path).
+                            if matches!(rty, Type::UShort | Type::UInt | Type::ULong) {
+                                writeln!(self.out, "\tucvtf\td0, x0").unwrap();
+                            } else {
+                                writeln!(self.out, "\tscvtf\td0, x0").unwrap();
+                            }
                             writeln!(self.out, "\tfmov\tx0, d0").unwrap();
                         }
                         self.emit_fp_addr(off, 9);
@@ -1685,11 +1690,22 @@ impl Codegen {
                         if matches!(rty, Type::Float | Type::Double)
                             && matches!(
                                 ty,
-                                Type::Char | Type::Short | Type::Int | Type::Long
+                                Type::Char
+                                    | Type::SChar
+                                    | Type::Short
+                                    | Type::UShort
+                                    | Type::Int
+                                    | Type::UInt
+                                    | Type::Long
+                                    | Type::ULong
                             )
                         {
                             writeln!(self.out, "\tfmov\td0, x0").unwrap();
-                            writeln!(self.out, "\tfcvtzs\tx0, d0").unwrap();
+                            if matches!(ty, Type::UShort | Type::UInt | Type::ULong) {
+                                writeln!(self.out, "\tfcvtzu\tx0, d0").unwrap();
+                            } else {
+                                writeln!(self.out, "\tfcvtzs\tx0, d0").unwrap();
+                            }
                         }
                         self.store_to_offset(off, &ty, 0);
                     }
@@ -2609,14 +2625,18 @@ impl Codegen {
                 let floaty = matches!(lty, Type::Float | Type::Double)
                     || matches!(rty, Type::Float | Type::Double);
                 if floaty {
-                    // move to d0/d1 (int → float first if needed)
+                    // move to d0/d1 (int → float first if needed; unsigned → ucvtf)
                     if matches!(lty, Type::Float | Type::Double) {
                         writeln!(self.out, "\tfmov\td0, x9").unwrap();
+                    } else if matches!(lty, Type::UShort | Type::UInt | Type::ULong) {
+                        writeln!(self.out, "\tucvtf\td0, x9").unwrap();
                     } else {
                         writeln!(self.out, "\tscvtf\td0, x9").unwrap();
                     }
                     if matches!(rty, Type::Float | Type::Double) {
                         writeln!(self.out, "\tfmov\td1, x10").unwrap();
+                    } else if matches!(rty, Type::UShort | Type::UInt | Type::ULong) {
+                        writeln!(self.out, "\tucvtf\td1, x10").unwrap();
                     } else {
                         writeln!(self.out, "\tscvtf\td1, x10").unwrap();
                     }
@@ -2899,17 +2919,32 @@ impl Codegen {
                 if matches!(lty, Type::Float | Type::Double)
                     && !matches!(rty, Type::Float | Type::Double)
                 {
-                    writeln!(self.out, "\tscvtf\td0, x0").unwrap();
+                    if matches!(rty, Type::UShort | Type::UInt | Type::ULong) {
+                        writeln!(self.out, "\tucvtf\td0, x0").unwrap();
+                    } else {
+                        writeln!(self.out, "\tscvtf\td0, x0").unwrap();
+                    }
                     writeln!(self.out, "\tfmov\tx0, d0").unwrap();
                 }
                 // float → int conversion on assign
                 if matches!(
                     lty,
-                    Type::Char | Type::Short | Type::Int | Type::Long
+                    Type::Char
+                        | Type::SChar
+                        | Type::Short
+                        | Type::UShort
+                        | Type::Int
+                        | Type::UInt
+                        | Type::Long
+                        | Type::ULong
                 ) && matches!(rty, Type::Float | Type::Double)
                 {
                     writeln!(self.out, "\tfmov\td0, x0").unwrap();
-                    writeln!(self.out, "\tfcvtzs\tx0, d0").unwrap();
+                    if matches!(lty, Type::UShort | Type::UInt | Type::ULong) {
+                        writeln!(self.out, "\tfcvtzu\tx0, d0").unwrap();
+                    } else {
+                        writeln!(self.out, "\tfcvtzs\tx0, d0").unwrap();
+                    }
                 }
                 // Always use store_ty so float/double get correct width/format.
                 if matches!(left.as_ref(), Expr::Var(_))
@@ -2948,6 +2983,8 @@ impl Codegen {
                     let rty = self.typeof_expr(right, typedefs);
                     if matches!(rty, Type::Float | Type::Double) {
                         writeln!(self.out, "\tfmov\td1, x10").unwrap();
+                    } else if matches!(rty, Type::UShort | Type::UInt | Type::ULong) {
+                        writeln!(self.out, "\tucvtf\td1, x10").unwrap();
                     } else {
                         writeln!(self.out, "\tscvtf\td1, x10").unwrap();
                     }
@@ -3237,10 +3274,16 @@ impl Codegen {
                     if arg_is_float[i] {
                         let src = slot * 16;
                         writeln!(self.out, "\tldr\tx16, [sp, #{src}]").unwrap();
-                        if !matches!(aty, Type::Float | Type::Double) {
-                            writeln!(self.out, "\tscvtf\td{fpr}, x16").unwrap();
-                        } else {
+                        // Prefer param type: if callee expects double, spilled bits are
+                        // already IEEE (even when typeof_expr of a complex arg is wrong).
+                        let as_float = matches!(pty, Type::Float | Type::Double)
+                            || matches!(aty, Type::Float | Type::Double);
+                        if as_float {
                             writeln!(self.out, "\tfmov\td{fpr}, x16").unwrap();
+                        } else if matches!(aty, Type::UShort | Type::UInt | Type::ULong) {
+                            writeln!(self.out, "\tucvtf\td{fpr}, x16").unwrap();
+                        } else {
+                            writeln!(self.out, "\tscvtf\td{fpr}, x16").unwrap();
                         }
                         if matches!(pty, Type::Float) {
                             writeln!(self.out, "\tfcvt\ts{fpr}, d{fpr}").unwrap();
@@ -3381,22 +3424,52 @@ impl Codegen {
                     return Ok(Type::Ptr(Box::new(ty.clone())));
                 }
                 let from = self.emit_expr_rval(expr, dest, typedefs)?;
+                // Integer → float/double: must use scvtf (signed) or ucvtf (unsigned).
+                // A bare fmov would bitcast the integer payload (sqlite3AtoF u64→double
+                // then produced denormals/Inf and broke SELECT 1.5).
+                let from_signed = matches!(
+                    from,
+                    Type::Char | Type::SChar | Type::Short | Type::Int | Type::Long
+                );
+                let from_unsigned = matches!(from, Type::UShort | Type::UInt | Type::ULong);
+                let from_int = from_signed || from_unsigned;
+                let to_signed = matches!(
+                    ty,
+                    Type::Char | Type::SChar | Type::Short | Type::Int | Type::Long
+                );
+                let to_unsigned = matches!(ty, Type::UShort | Type::UInt | Type::ULong);
                 match (&from, ty) {
-                    (Type::Int | Type::Long | Type::Char, Type::Float) => {
-                        writeln!(self.out, "\tscvtf\ts0, x{dest}").unwrap();
+                    (_, Type::Float) if from_int => {
+                        if from_unsigned {
+                            writeln!(self.out, "\tucvtf\ts0, x{dest}").unwrap();
+                        } else {
+                            writeln!(self.out, "\tscvtf\ts0, x{dest}").unwrap();
+                        }
                         writeln!(self.out, "\tfmov\tw{dest}, s0").unwrap();
                     }
-                    (Type::Int | Type::Long | Type::Char, Type::Double) => {
-                        writeln!(self.out, "\tscvtf\td0, x{dest}").unwrap();
+                    (_, Type::Double) if from_int => {
+                        if from_unsigned {
+                            writeln!(self.out, "\tucvtf\td0, x{dest}").unwrap();
+                        } else {
+                            writeln!(self.out, "\tscvtf\td0, x{dest}").unwrap();
+                        }
                         writeln!(self.out, "\tfmov\tx{dest}, d0").unwrap();
                     }
-                    (Type::Float, Type::Int | Type::Long) => {
+                    (Type::Float, _) if to_signed || to_unsigned => {
                         writeln!(self.out, "\tfmov\ts0, w{dest}").unwrap();
-                        writeln!(self.out, "\tfcvtzs\tx{dest}, s0").unwrap();
+                        if to_unsigned {
+                            writeln!(self.out, "\tfcvtzu\tx{dest}, s0").unwrap();
+                        } else {
+                            writeln!(self.out, "\tfcvtzs\tx{dest}, s0").unwrap();
+                        }
                     }
-                    (Type::Double, Type::Int | Type::Long) => {
+                    (Type::Double, _) if to_signed || to_unsigned => {
                         writeln!(self.out, "\tfmov\td0, x{dest}").unwrap();
-                        writeln!(self.out, "\tfcvtzs\tx{dest}, d0").unwrap();
+                        if to_unsigned {
+                            writeln!(self.out, "\tfcvtzu\tx{dest}, d0").unwrap();
+                        } else {
+                            writeln!(self.out, "\tfcvtzs\tx{dest}, d0").unwrap();
+                        }
                     }
                     (Type::Float, Type::Double) => {
                         writeln!(self.out, "\tfmov\ts0, w{dest}").unwrap();
@@ -3548,6 +3621,24 @@ impl Codegen {
                 Type::Ptr(i) | Type::Array(i, _) => *i,
                 _ => Type::Int,
             },
+            // -1.5 must stay Double (not Int): call-arg setup uses typeof to choose
+            // fmov vs scvtf when loading spilled float bits into dN. Wrong typeof
+            // made dekkerMul2's yy = scvtf(bitpattern) → Inf and broke sqlite3AtoF.
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => {
+                let t = self.typeof_expr(expr, typedefs);
+                if matches!(t, Type::Float | Type::Double) {
+                    Type::Double
+                } else {
+                    t
+                }
+            }
+            Expr::Unary {
+                op: UnaryOp::Not | UnaryOp::BitNot,
+                ..
+            } => Type::Int,
             Expr::Index { base, .. } => match self.typeof_expr(base, typedefs) {
                 Type::Ptr(i) | Type::Array(i, _) => *i,
                 _ => Type::Int,
