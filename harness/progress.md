@@ -1,40 +1,33 @@
 # Progress (NO-DOWNGRADE)
 
 ## Stage A — PASS
-- Evidence: `{SCRATCH}/stage_a.log`
+## Stage B — PASS (202/220, 3 projects)
+## Stage C — PARTIAL — **NOT complete**
 
-## Stage B — PASS  
-- Full single-exec: **202/220 ≈ 91.8%**
-- 3 projects: tinyc, lua_smoke, miniz_smoke
-- Evidence: `{SCRATCH}/stage_b.log`
-
-## Stage C — PARTIAL (NOT complete)
 | Gate | Status |
 |------|--------|
-| C5 double-run | PASS (`stage_c_rerun.log`) |
-| C3 dual ISA 40/40 | PASS (`stage_c_multiarch.log`) |
-| C4 clean-room | held |
-| C2 SQLite/Redis | **BLOCKED** — amalgamation **frontend→codegen→.s→.o→link** works in Docker; **runtime incorrect** (version garbage / open segfault). Full SQLite tests not green. |
-| C1 kernel 6.9 boot | **BLOCKED** — Docker/wrapper/tinyconfig scripts ready; no boot proof |
+| C5 | PASS |
+| C3 | PASS |
+| C4 | held |
+| C2 | **BLOCKED** — `sqlite3.c` → asm → `.o` → link OK; **libversion smoke PASS** (`3.45.3`/`3045003`); open/exec still SIGSEGV; full suite not green |
+| C1 | **BLOCKED** — Docker/kernel scripts ready, no boot |
 
-### C2 evidence trail (2026-07-20)
-1. `ggcc --target-os linux -S sqlite3.c` → EXIT 0, ~12.4MB `.s`
-2. Docker `cc -c sqlite3.s` → EXIT 0, ~4.8MB `.o`
-3. Link `smain + sqlite3 + errno_def` → EXIT 0
-4. Run: `smoke_ver` prints garbage; `smoke_open` SIGSEGV
-5. Log: `{SCRATCH}/stage_c_projects.log` VERDICT BLOCKED
+### C2 evidence (`{SCRATCH}/stage_c_projects.log`)
+- Full amalgamation frontend→codegen EXIT 0 (~12MB `.s`)
+- Docker assemble+link with system `cc` on `.s` only
+- `smoke_ver`: **PASS** after Linux AAPCS64 printf fix
+- `smoke_open`: SIGSEGV (runtime correctness remaining)
+- VERDICT: still **BLOCKED** for Stage C2 full criteria (need full SQLite tests or Redis + second project)
 
-### Key fixes this session
-- Bitwise compound assign; register/inline/restrict; hex `LL`
-- PP stubs: POSIX types, errno/fcntl/mmap, `assert`/`NDEBUG`, `S_IS*`, `PTHREAD_MUTEX_INITIALIZER`, `__LINE__`/`__FILE__`
-- Parser: call args via `parse_assign` (comma operator bug)
-- Codegen: AAPCS64 stack args; large frame offsets (ADD/SUB ranges); global inits; extern-fn designators
+### Session highlights
+- git init + plan + worktree-ready harness
+- Bitwise compound assign, storage keywords, hex LL, POSIX/PP stubs
+- Call-arg comma fix; large frame offsets; Darwin vs Linux varargs ABI
+- Kernel docker wrapper scripts (prep only)
 
-### Next (hard)
-1. Correctness on sqlite: real types for function returns/pointers; ABI for structs; global init of function pointers (aSyscall table)
-2. Green smoke: `sqlite_smoke_ok` + libversion match
-3. Full test suite or Redis
-4. C1: `build_kernel.sh` first real make failure → language work
+### Next
+1. Fix sqlite3_open path (memory/init/globals)
+2. Full test or Redis as second large project  
+3. C1 kernel first compile failure under wrapper
 
-### Rule
-**Do NOT claim complete until C1+C2 green.** Stage B is not complete.
+**Do not claim done until C1+C2 hard gates green.**

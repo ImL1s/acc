@@ -2330,17 +2330,25 @@ impl Codegen {
                 // Apple Silicon ABI: only *variadic* args go on the stack; fixed
                 // parameters stay in registers (x0..). printf has 1 fixed arg;
                 // sprintf/fprintf have 2; snprintf has 3.
-                let fixed_n: usize = match name.as_str() {
-                    "printf" | "scanf" => 1,
-                    "sprintf" | "fprintf" | "sscanf" => 2,
-                    "snprintf" => 3,
-                    // function-pointer globals wrapping printf family
-                    n if n.contains("snprintf") => 3,
-                    n if n.contains("sprintf") || n.contains("fprintf") || n.contains("sscanf") => {
-                        2
+                // Linux AAPCS64: variadic uses the same x0..x7 then stack path as
+                // non-variadic — do NOT take the Darwin special case.
+                let fixed_n: usize = if self.os == TargetOs::Darwin {
+                    match name.as_str() {
+                        "printf" | "scanf" => 1,
+                        "sprintf" | "fprintf" | "sscanf" => 2,
+                        "snprintf" => 3,
+                        n if n.contains("snprintf") => 3,
+                        n if n.contains("sprintf")
+                            || n.contains("fprintf")
+                            || n.contains("sscanf") =>
+                        {
+                            2
+                        }
+                        n if n.contains("printf") || n.contains("scanf") => 1,
+                        _ => 0,
                     }
-                    n if n.contains("printf") || n.contains("scanf") => 1,
-                    _ => 0,
+                } else {
+                    0
                 };
                 let is_varargs = fixed_n > 0;
                 if is_varargs && fixed_n > 0 {
