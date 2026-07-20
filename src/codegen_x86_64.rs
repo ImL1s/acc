@@ -780,6 +780,8 @@ impl Codegen {
                 // Emit kbuild DEFINE lines (`.ascii "->..."`) only. Skip raw
                 // machine templates that still contain `%0` output operands —
                 // those need real register allocation we don't do for headers.
+                // Also skip GNU local-label refs (`1:`, `1b`, `2f`) when the
+                // paired label line was itself skipped → assembler "unknown 1:".
                 for line in lines {
                     let t = line.trim();
                     if t.is_empty() {
@@ -794,6 +796,20 @@ impl Codegen {
                                     .unwrap_or(false)
                         })
                     {
+                        continue;
+                    }
+                    // Soft-skip lines with numeric local labels / refs.
+                    let has_local_lab = t.bytes().enumerate().any(|(i, b)| {
+                        b.is_ascii_digit()
+                            && t.as_bytes()
+                                .get(i + 1)
+                                .map(|c| *c == b':' || *c == b'b' || *c == b'f')
+                                .unwrap_or(false)
+                            && (i == 0
+                                || !t.as_bytes()[i - 1].is_ascii_alphanumeric()
+                                    && t.as_bytes()[i - 1] != b'_')
+                    });
+                    if has_local_lab {
                         continue;
                     }
                     writeln!(self.out, "\t{line}").unwrap();
