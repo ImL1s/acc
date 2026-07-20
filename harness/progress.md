@@ -29,13 +29,15 @@
 - Static string fields in initializers
 - **Multi-pass `collect_layouts`** (HashMap order no longer collapses nested unions; `sizeof(YYMINORTYPE)=16`)
 - **Small struct/union ABI (≤16B)** in 1–2 GPRs: Token pass into `sqlite3Parser`, struct returns, local init from calls
+- **`signed char` → Type::SChar** with `ldrsb x` (lemon `yyRuleInfoNRhs[]` negative RHS counts)
 
 ### Verified offsets (ggcc == gcc)
 - `Parse.sLastToken` @ 288
 - `sizeof(Expr)=72`, `offsetof(pLeft)=16`, `yyStackEntry=24`
+- `yyRuleInfoNRhs` data bytes match source; loads use `ldrsb x`
 
 ### Next
-1. Fail-driven: `exec(";")` still dies in `sqlite3ExprDeleteNN` (db/p garbage; stack frames corrupt) after Token ABI looks correct
+1. Fail-driven: `exec(";")` still dies in `sqlite3ExprDeleteNN` after Token ABI + signed char look correct — dig reduce actions / Expr build
 2. Green select/create → full SQLite tests or Redis
 3. C1 kernel QEMU boot
 
