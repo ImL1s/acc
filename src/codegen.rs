@@ -1628,23 +1628,13 @@ impl Codegen {
                     // static init is in data; do not re-run at each call
                     return Ok(());
                 }
-                // If already allocated during measure-matched emit path, reuse offset.
-                let off = if let Some(sym) = self.locals.get(&d.name) {
-                    if let Storage::Local { offset } = sym.storage {
-                        offset
-                    } else {
-                        self.alloc_local(&d.name, &ty)
-                    }
-                } else {
-                    self.alloc_local(&d.name, &ty)
-                };
-                self.locals.insert(
-                    d.name.clone(),
-                    Sym {
-                        ty: ty.clone(),
-                        storage: Storage::Local { offset: off },
-                    },
-                );
+                // Always allocate a fresh stack slot. C allows the same name in
+                // sibling blocks with different types/sizes (sqlite3FpDecode:
+                // `double rr` in the long-double branch vs `double rr[2]` in
+                // the else). Reusing the first offset leaves rr[2] as 8 bytes
+                // and overlaps the next local (exp) — FpDecode then corrupts
+                // exp via rr[1] and prints garbage like 1.5e+g70.
+                let off = self.alloc_local(&d.name, &ty);
                 if let Some(init) = &d.init {
                     if let Expr::InitList { fields } = init {
                         self.emit_local_init_list(off, &ty, fields, typedefs)?;
@@ -3208,6 +3198,25 @@ impl Codegen {
                     .map(|f| f.params.iter().map(|(_, t)| t.clone()).collect())
                     .unwrap_or_default();
 
+                // Our va_list is a char* walking the GP regsave only (x0..x7).
+                // Variadic callees compiled by ggcc therefore cannot see doubles in d0..d7.
+                // Pass float/double args in GPRs (IEEE bits) for those calls so
+                // va_arg(ap, double) reads the right payload (sqlite3_mprintf %g).
+                // Libc printf still uses dN (standard aarch64 va_list has a VR area).
+                let callee_variadic = self
+                    .funcs
+                    .get(name)
+                    .map(|f| f.variadic)
+                    .unwrap_or(false)
+                    || {
+                        let n = name.as_str();
+                        n.starts_with("sqlite3_")
+                            && (n.contains("printf")
+                                || n.contains("snprintf")
+                                || n.contains("vsnprintf")
+                                || n.ends_with("Printf"))
+                    };
+
                 // AAPCS64: small aggregates (≤16B) occupy 1–2 consecutive GPRs.
                 // Spill each logical half-register as a 16-byte slot (top = args[0]).
                 let n = args.len();
@@ -3220,6 +3229,7 @@ impl Codegen {
                     let is_f = matches!(pty, Type::Float | Type::Double)
                         || (param_tys.is_empty() && matches!(aty, Type::Float | Type::Double));
                     arg_is_float.push(is_f);
+                    // ggcc-variadic floats travel as one GPR each (not FPR).
                     let nr = if is_f {
                         1
                     } else {
@@ -3278,18 +3288,37 @@ impl Codegen {
                         // already IEEE (even when typeof_expr of a complex arg is wrong).
                         let as_float = matches!(pty, Type::Float | Type::Double)
                             || matches!(aty, Type::Float | Type::Double);
-                        if as_float {
-                            writeln!(self.out, "\tfmov\td{fpr}, x16").unwrap();
-                        } else if matches!(aty, Type::UShort | Type::UInt | Type::ULong) {
-                            writeln!(self.out, "\tucvtf\td{fpr}, x16").unwrap();
+                        if !as_float {
+                            // integer expression promoted to float param
+                            if matches!(aty, Type::UShort | Type::UInt | Type::ULong) {
+                                writeln!(self.out, "\tucvtf\td0, x16").unwrap();
+                            } else {
+                                writeln!(self.out, "\tscvtf\td0, x16").unwrap();
+                            }
+                            writeln!(self.out, "\tfmov\tx16, d0").unwrap();
+                        }
+                        if callee_variadic {
+                            // IEEE bits in next GPR (va_arg walks GP regsave only).
+                            if igpr < 8 {
+                                writeln!(self.out, "\tmov\tx{igpr}, x16").unwrap();
+                                igpr += 1;
+                                gpr_slots_used += 1;
+                            }
+                            // if igpr>=8: bits stay in spill; stack packer sends them
+                            slot += 1;
                         } else {
-                            writeln!(self.out, "\tscvtf\td{fpr}, x16").unwrap();
+                            if as_float {
+                                writeln!(self.out, "\tfmov\td{fpr}, x16").unwrap();
+                            } else {
+                                // already converted above into x16 bits
+                                writeln!(self.out, "\tfmov\td{fpr}, x16").unwrap();
+                            }
+                            if matches!(pty, Type::Float) {
+                                writeln!(self.out, "\tfcvt\ts{fpr}, d{fpr}").unwrap();
+                            }
+                            fpr += 1;
+                            slot += 1;
                         }
-                        if matches!(pty, Type::Float) {
-                            writeln!(self.out, "\tfcvt\ts{fpr}, d{fpr}").unwrap();
-                        }
-                        fpr += 1;
-                        slot += 1;
                     } else {
                         for r in 0..nr {
                             if igpr < 8 {
