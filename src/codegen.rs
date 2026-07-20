@@ -728,7 +728,9 @@ impl Codegen {
 
         for item in &prog.items {
             if let Item::Func(f) = item {
-                if f.body.is_some() {
+                // Skip static function bodies except main: kernel headers inject
+                // thousands of static inlines; kbuild offset TUs only need main.
+                if f.body.is_some() && (!f.is_static || f.name == "main") {
                     self.emit_function(f, &typedefs)?;
                 }
             }

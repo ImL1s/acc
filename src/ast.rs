@@ -31,6 +31,9 @@ pub struct Function {
     /// True if the prototype ends with `...` (variadic).
     pub variadic: bool,
     pub body: Option<Vec<Stmt>>, // None = declaration only
+    /// File-scope `static` function (internal linkage). Kernel headers pull in
+    /// thousands of static inlines; codegen may skip their bodies for speed.
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone)]

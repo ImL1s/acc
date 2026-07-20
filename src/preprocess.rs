@@ -352,6 +352,26 @@ pub fn preprocess_with_options(
         macros.insert("__linux__".into(), MacroBody::Object("1".into()));
         macros.insert("linux".into(), MacroBody::Object("1".into()));
         macros.insert("__linux".into(), MacroBody::Object("1".into()));
+        // Erase GNU attributes at PP time for kernel headers. Nested attribute
+        // macros otherwise explode into multi-KB tokens that break parsing;
+        // ggcc ignores attributes for codegen anyway. Variadic so both
+        // `__attribute__((x))` and multi-arg forms match.
+        macros.insert(
+            "__attribute__".into(),
+            MacroBody::Function {
+                params: vec![],
+                body: "".into(),
+                variadic: true,
+            },
+        );
+        macros.insert(
+            "__attribute".into(),
+            MacroBody::Function {
+                params: vec![],
+                body: "".into(),
+                variadic: true,
+            },
+        );
     }
     // stdarg: expand to intrinsics handled in codegen (__ggcc_va_*).
     // va_list is a char* cursor into the register-save area of a variadic fn.

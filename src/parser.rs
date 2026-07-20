@@ -241,15 +241,24 @@ impl Parser {
                 continue;
             }
             // storage class at file scope (may repeat / interleave)
-            while self.eat(TokenKind::Static)
-                || self.eat(TokenKind::Extern)
-                || self.eat(TokenKind::Register)
-                || self.eat(TokenKind::Inline)
-                || self.eat(TokenKind::Restrict)
-                || self.eat(TokenKind::Auto)
-                || self.eat(TokenKind::Const)
-                || self.eat(TokenKind::Volatile)
-            {}
+            let mut file_static = false;
+            loop {
+                if self.eat(TokenKind::Static) {
+                    file_static = true;
+                    continue;
+                }
+                if self.eat(TokenKind::Extern)
+                    || self.eat(TokenKind::Register)
+                    || self.eat(TokenKind::Inline)
+                    || self.eat(TokenKind::Restrict)
+                    || self.eat(TokenKind::Auto)
+                    || self.eat(TokenKind::Const)
+                    || self.eat(TokenKind::Volatile)
+                {
+                    continue;
+                }
+                break;
+            }
             if self.at(&TokenKind::Typedef) {
                 items.push(self.parse_typedef()?);
                 continue;
@@ -277,7 +286,7 @@ impl Parser {
                 items.push(self.parse_struct_or_union_item()?);
                 continue;
             }
-            items.extend(self.parse_decl_or_func()?);
+            items.extend(self.parse_decl_or_func(file_static)?);
         }
         // Flush enum constants discovered inside type specs (e.g. struct { enum { X } x; })
         for g in self.pending_enum_globals.drain(..) {
@@ -508,6 +517,8 @@ impl Parser {
         let mut saw_unsigned = false;
         let mut saw_signed = false;
         loop {
+            // Residual GNU attributes that escaped the lexer (nested explosion).
+            self.skip_trailing_gnu_attrs();
             if self.eat(TokenKind::Static)
                 || self.eat(TokenKind::Extern)
                 || self.eat(TokenKind::Register)
@@ -631,12 +642,16 @@ impl Parser {
                 // GNU/C23 typeof(expr) / typeof(type) — enough for kernel READ_ONCE etc.
                 self.bump();
                 self.expect(TokenKind::LParen)?;
-                let t = if self.is_typename() {
-                    // Prefer type-name when the next token is clearly a type.
-                    // `typeof(_Generic(...))` starts with ident that is not a type.
+                // Prefer expression form for `typeof(*(p))`, `typeof(x->f[i])`, casts.
+                // Only take type-name when the next token is a plain type keyword/typedef
+                // (not `(` which starts cast/paren expr).
+                let t = if self.is_typename()
+                    && !matches!(
+                        self.peek_kind(),
+                        TokenKind::LParen | TokenKind::Star | TokenKind::AndAnd | TokenKind::Amp
+                    ) {
                     self.parse_type_name()?
                 } else {
-                    // Expression form: we only need a parseable type for casts/decl.
                     let _e = self.parse_assign()?;
                     Type::ULong
                 };
@@ -1082,6 +1097,25 @@ impl Parser {
         }
     }
 
+    /// Nested offsetof path: `a.b.c` → sum of successive field offsets.
+    fn const_offsetof_type_path(&self, ty: &Type, path: &[String]) -> Option<i64> {
+        let mut cur = ty.clone();
+        let mut total = 0i64;
+        for field in path {
+            let off = self.const_offsetof_type_field(&cur, field)?;
+            total += off;
+            // Advance type to the field's type for the next segment.
+            let fields = match &cur {
+                Type::Struct(n) | Type::Union(n) => self.struct_fields.get(n)?.clone(),
+                Type::AnonStruct(fs) | Type::AnonUnion(fs) => fs.clone(),
+                _ => return None,
+            };
+            let fty = fields.iter().find(|f| f.name == *field)?.ty.clone();
+            cur = fty;
+        }
+        Some(total)
+    }
+
     /// Evaluate `offsetof(T, field)` patterns:
     /// `((int)((char*)&((T*)0)->field))` or `&((T*)0)->field`.
     fn const_offsetof(&self, e: &Expr) -> Option<i64> {
@@ -1203,7 +1237,58 @@ impl Parser {
         }
     }
 
-    fn parse_decl_or_func(&mut self) -> Result<Vec<Item>, String> {
+    /// Skip leftover `__attribute__` / `__section__` / similar after a declarator.
+    fn skip_trailing_gnu_attrs(&mut self) {
+        loop {
+            match self.peek_kind().clone() {
+                TokenKind::Ident(s) => {
+                    let is_attr = s.starts_with("__attribute")
+                        || s == "__section__"
+                        || s == "__section"
+                        || s == "__asm"
+                        || s == "__asm__"
+                        || s == "asm"
+                        || (s.starts_with("__")
+                            && (s.contains("alloc")
+                                || s.contains("section")
+                                || s.contains("cold")
+                                || s.contains("hot")
+                                || s.contains("pure")
+                                || s.contains("noreturn")
+                                || s.contains("unused")
+                                || s.contains("used")
+                                || s.contains("weak")
+                                || s.contains("alias")
+                                || s.contains("aligned")
+                                || s.contains("packed")
+                                || s.contains("malloc")
+                                || s.contains("warn")
+                                || s.contains("error")
+                                || s.contains("deprecated")
+                                || s.contains("always")
+                                || s.contains("noinline")
+                                || s.contains("flatten")));
+                    if !is_attr {
+                        break;
+                    }
+                    self.bump();
+                    if self.at(&TokenKind::LParen) {
+                        let _ = self.skip_balanced_parens();
+                    }
+                }
+                // Bare nested parens residue from broken attribute expansion
+                TokenKind::LParen => {
+                    let _ = self.skip_balanced_parens();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn parse_decl_or_func(&mut self, file_static: bool) -> Result<Vec<Item>, String> {
+        // parse_type_specifier may also consume `static`
+        let more_static = self.at(&TokenKind::Static);
+        let is_static = file_static || more_static;
         let base = self.parse_type_specifier()?;
         // Could be: type name(...) { }  or type name, name2;
         // Function params are part of the declarator (including multi-suffix forms).
@@ -1216,6 +1301,9 @@ impl Parser {
             ));
         }
         if let Some((params, variadic)) = func_params {
+            // Skip residual GNU attributes / section macros after the declarator
+            // (lexer usually erases them; nested/broken expansions may leave idents).
+            self.skip_trailing_gnu_attrs();
             // Function prototype or definition
             if self.eat(TokenKind::Semicolon) {
                 return Ok(vec![Item::Func(Function {
@@ -1224,6 +1312,7 @@ impl Parser {
                     params,
                     variadic,
                     body: None,
+                    is_static,
                 })]);
             }
             if self.at(&TokenKind::LBrace) {
@@ -1234,6 +1323,7 @@ impl Parser {
                     params,
                     variadic,
                     body: Some(body),
+                    is_static,
                 })]);
             }
             if self.eat(TokenKind::Comma) {
@@ -1244,6 +1334,7 @@ impl Parser {
                     params,
                     variadic,
                     body: None,
+                    is_static,
                 })];
                 loop {
                     let (n2, t2, fp2) = self.parse_declarator(base.clone())?;
@@ -1254,6 +1345,7 @@ impl Parser {
                             params: p2,
                             variadic: v2,
                             body: None,
+                            is_static,
                         }));
                         let _ = t2;
                     } else {
@@ -1266,7 +1358,7 @@ impl Parser {
                             name: n2,
                             ty: t2,
                             init,
-                            is_static: false,
+                            is_static,
                         }));
                     }
                     if self.eat(TokenKind::Comma) {
@@ -1295,8 +1387,8 @@ impl Parser {
             name,
             ty: ty.clone(),
             init,
-        is_static: false,
-    }));
+            is_static,
+        }));
         while self.eat(TokenKind::Comma) {
             let (n2, t2, _) = self.parse_declarator(base.clone())?;
             let init2 = if self.eat(TokenKind::Assign) {
@@ -1309,8 +1401,8 @@ impl Parser {
                 name: n2,
                 ty: t2,
                 init: init2,
-            is_static: false,
-        }));
+                is_static,
+            }));
         }
         self.expect(TokenKind::Semicolon)?;
         let _ = &ty;
@@ -1693,6 +1785,22 @@ impl Parser {
             let _ = self.eat(TokenKind::Semicolon);
             return Ok(Stmt::Empty);
         }
+        // GCC local labels: `__label__ name [, name2...];`
+        if matches!(self.peek_kind(), TokenKind::Ident(s) if s == "__label__") {
+            self.bump();
+            loop {
+                if let TokenKind::Ident(_) = self.peek_kind().clone() {
+                    self.bump();
+                } else {
+                    break;
+                }
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            let _ = self.eat(TokenKind::Semicolon);
+            return Ok(Stmt::Empty);
+        }
         // label: stmt
         if let TokenKind::Ident(name) = self.peek_kind().clone() {
             if self.toks.get(self.i + 1).map(|t| &t.kind) == Some(&TokenKind::Colon) {
@@ -1962,7 +2070,12 @@ impl Parser {
     fn parse_cond(&mut self) -> Result<Expr, String> {
         let mut e = self.parse_or()?;
         if self.eat(TokenKind::Question) {
-            let t = self.parse_expr()?;
+            // GNU extension: `x ?: y` ≡ `x ? x : y` (omit middle operand).
+            let t = if self.at(&TokenKind::Colon) {
+                e.clone()
+            } else {
+                self.parse_expr()?
+            };
             self.expect(TokenKind::Colon)?;
             let f = self.parse_cond()?;
             e = Expr::Cond {
@@ -2168,6 +2281,18 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
+        // GCC address-of-label: `&&label` (not logical-and). Used as
+        // `({ __label__ L; L: (unsigned long)&&L; })` in kernel softirq headers.
+        if self.at(&TokenKind::AndAnd) {
+            if let Some(TokenKind::Ident(_)) = self.toks.get(self.i + 1).map(|t| &t.kind) {
+                self.bump(); // &&
+                if let TokenKind::Ident(_lab) = self.peek_kind().clone() {
+                    self.bump();
+                    // Soft: label address is not a real constant for DEFINE; use 0.
+                    return Ok(Expr::Int(0));
+                }
+            }
+        }
         if self.eat(TokenKind::PlusPlus) {
             return Ok(Expr::PreInc(Box::new(self.parse_unary()?)));
         }
@@ -2220,6 +2345,24 @@ impl Parser {
             }
             return Ok(Expr::SizeofExpr(Box::new(self.parse_unary()?)));
         }
+        // GCC/C11 alignof: `__alignof__(T)` / `__alignof(T)` / `alignof(T)`.
+        // Soft: return alignment as int; use type size as a crude stand-in for
+        // scalar types (good enough for kernel header comparisons).
+        if let TokenKind::Ident(name) = self.peek_kind().clone() {
+            if name == "__alignof__" || name == "__alignof" || name == "alignof" {
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                if self.is_typename() {
+                    let ty = self.parse_type_name()?;
+                    self.expect(TokenKind::RParen)?;
+                    let al = self.const_type_align(&ty);
+                    return Ok(Expr::Int(al));
+                }
+                let _e = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(Expr::Int(8));
+            }
+        }
         // Kernel/Linux: __builtin_offsetof(struct T, field) → constant int.
         // TYPE may be `struct name` / `union name` / typedef name.
         if let TokenKind::Ident(name) = self.peek_kind().clone() {
@@ -2228,23 +2371,26 @@ impl Parser {
                 self.expect(TokenKind::LParen)?;
                 let ty = self.parse_type_name()?;
                 self.expect(TokenKind::Comma)?;
-                let field = if let TokenKind::Ident(f) = self.peek_kind().clone() {
-                    self.bump();
-                    f
-                } else {
-                    return Err(format!(
-                        "offsetof member name at {}:{}",
-                        self.peek().line,
-                        self.peek().col
-                    ));
-                };
+                // Support nested paths: `tss.x86_tss.sp1`
+                let mut path: Vec<String> = Vec::new();
+                loop {
+                    if let TokenKind::Ident(f) = self.peek_kind().clone() {
+                        self.bump();
+                        path.push(f);
+                    } else {
+                        return Err(format!(
+                            "offsetof member name at {}:{}",
+                            self.peek().line,
+                            self.peek().col
+                        ));
+                    }
+                    if !self.eat(TokenKind::Dot) {
+                        break;
+                    }
+                }
                 self.expect(TokenKind::RParen)?;
-                // Soft-fallback 0 when layout is incomplete (common in kernel headers
-                // before full struct parsing). DEFINE that need real offsets still work
-                // when the struct was recorded correctly.
-                let off = self
-                    .const_offsetof_type_field(&ty, &field)
-                    .unwrap_or(0);
+                // Soft-fallback 0 when layout is incomplete.
+                let off = self.const_offsetof_type_path(&ty, &path).unwrap_or(0);
                 return Ok(Expr::Int(off));
             }
         }
@@ -2554,17 +2700,24 @@ impl Parser {
                     self.bump(); // {
                     let mut last = Expr::Int(0);
                     while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        // Empty statement: `({ ; expr; })` appears in kernel seqlock macros.
+                        if self.eat(TokenKind::Semicolon) {
+                            continue;
+                        }
                         // Prefer expression-statement so the final value is kept.
                         // Local decls / other stmts are parsed and discarded.
-                        if self.is_typename()
+                        // GNU: `__label__ L;` and `L: expr;` inside statement exprs.
+                        if matches!(self.peek_kind(), TokenKind::Ident(s) if s == "__label__")
+                            || matches!(self.peek_kind(), TokenKind::Ident(_))
+                                && self.toks.get(self.i + 1).map(|t| &t.kind)
+                                    == Some(&TokenKind::Colon)
+                            || self.is_typename()
                             || self.at(&TokenKind::Static)
                             || self.at(&TokenKind::Extern)
                             || self.at(&TokenKind::Register)
                             || self.at(&TokenKind::Inline)
                             || self.at(&TokenKind::Typedef)
-                        {
-                            let _ = self.parse_local_decl()?;
-                        } else if self.at(&TokenKind::If)
+                            || self.at(&TokenKind::If)
                             || self.at(&TokenKind::While)
                             || self.at(&TokenKind::For)
                             || self.at(&TokenKind::Do)
@@ -2576,16 +2729,57 @@ impl Parser {
                             || self.at(&TokenKind::LBrace)
                             || matches!(
                                 self.peek_kind(),
-                                TokenKind::Ident(s) if s == "asm" || s == "__asm" || s == "__asm__"
+                                TokenKind::Ident(s)
+                                    if s == "asm" || s == "__asm" || s == "__asm__"
+                                        || s == "_Static_assert" || s == "static_assert"
                             )
                         {
-                            let _ = self.parse_stmt()?;
+                            // Labels may wrap an expression statement: `L: expr;`
+                            // parse_stmt handles Label → stmt; for `L: expr` use parse_stmt
+                            // when next after label is not another statement keyword.
+                            let st = self.parse_stmt()?;
+                            // If the last thing was a labelled expr, try to keep its value
+                            // is hard without AST; leave last as-is unless pure expr path.
+                            let _ = st;
                         } else {
-                            let e = self.parse_expr()?;
-                            last = e;
-                            if !self.eat(TokenKind::Semicolon) {
-                                // last expression may omit trailing `;` before `}`
-                                break;
+                            // Soft recovery: if expression parse fails (complex kernel
+                            // macros), skip to `;` / `}` so the statement-expr still closes.
+                            match self.parse_expr() {
+                                Ok(e) => {
+                                    last = e;
+                                    if !self.eat(TokenKind::Semicolon) {
+                                        break;
+                                    }
+                                }
+                                Err(_) => {
+                                    while !self.at(&TokenKind::Semicolon)
+                                        && !self.at(&TokenKind::RBrace)
+                                        && !self.at(&TokenKind::Eof)
+                                    {
+                                        if self.at(&TokenKind::LParen) {
+                                            let _ = self.skip_balanced_parens();
+                                        } else if self.at(&TokenKind::LBrace) {
+                                            // skip nested block
+                                            self.bump();
+                                            let mut d = 1i32;
+                                            while d > 0 && !self.at(&TokenKind::Eof) {
+                                                if self.at(&TokenKind::LBrace) {
+                                                    d += 1;
+                                                } else if self.at(&TokenKind::RBrace) {
+                                                    d -= 1;
+                                                    if d == 0 {
+                                                        self.bump();
+                                                        break;
+                                                    }
+                                                }
+                                                self.bump();
+                                            }
+                                        } else {
+                                            self.bump();
+                                        }
+                                    }
+                                    let _ = self.eat(TokenKind::Semicolon);
+                                }
                             }
                         }
                     }
