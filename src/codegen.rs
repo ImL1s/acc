@@ -956,7 +956,9 @@ impl Codegen {
         let mut measure = self.locals.clone();
         let mut measure_size = self.stack_size;
         self.measure_stmts(body, &mut measure, &mut measure_size, typedefs);
-        let frame = Self::align_up(measure_size, 16);
+        // Extra padding: temporary SP spills during calls must not collide with
+        // fixed-frame locals (AAPCS64 has no red zone). Keep SP well below frame.
+        let frame = Self::align_up(measure_size + 256, 16);
 
         // Reset and emit for real
         self.locals.clear();
@@ -1611,16 +1613,35 @@ impl Codegen {
             self.store_ty(ty, 17, reg);
             return;
         }
+        // Stack slots are 8-byte; always store full x-reg so high bits are
+        // defined (str wN leaves upper 4 bytes as stale garbage → broken
+        // 64-bit reloads of int locals, e.g. nName after strlen).
         if (-256..256).contains(&off) {
             match self.type_size(ty) {
-                1 => writeln!(self.out, "\tstrb\tw{reg}, [x29, #{off}]").unwrap(),
-                2 => writeln!(self.out, "\tstrh\tw{reg}, [x29, #{off}]").unwrap(),
-                4 => writeln!(self.out, "\tstr\tw{reg}, [x29, #{off}]").unwrap(),
+                1 => {
+                    // zero-extend byte into slot
+                    writeln!(self.out, "\tand\tx{reg}, x{reg}, #0xff").unwrap();
+                    writeln!(self.out, "\tstr\tx{reg}, [x29, #{off}]").unwrap();
+                }
+                2 => {
+                    writeln!(self.out, "\tand\tx{reg}, x{reg}, #0xffff").unwrap();
+                    writeln!(self.out, "\tstr\tx{reg}, [x29, #{off}]").unwrap();
+                }
                 _ => writeln!(self.out, "\tstr\tx{reg}, [x29, #{off}]").unwrap(),
             }
         } else {
             self.emit_fp_addr(off, 17);
-            self.store_ty(ty, 17, reg);
+            match self.type_size(ty) {
+                1 => {
+                    writeln!(self.out, "\tand\tx{reg}, x{reg}, #0xff").unwrap();
+                    writeln!(self.out, "\tstr\tx{reg}, [x17]").unwrap();
+                }
+                2 => {
+                    writeln!(self.out, "\tand\tx{reg}, x{reg}, #0xffff").unwrap();
+                    writeln!(self.out, "\tstr\tx{reg}, [x17]").unwrap();
+                }
+                _ => writeln!(self.out, "\tstr\tx{reg}, [x17]").unwrap(),
+            }
         }
     }
 
@@ -1896,7 +1917,16 @@ impl Codegen {
             _ => match self.type_size(ty) {
                 1 => writeln!(self.out, "\tstrb\tw{val_reg}, [x{addr_reg}]").unwrap(),
                 2 => writeln!(self.out, "\tstrh\tw{val_reg}, [x{addr_reg}]").unwrap(),
-                4 => writeln!(self.out, "\tstr\tw{val_reg}, [x{addr_reg}]").unwrap(),
+                4 => {
+                    // Zero-extend before 8-byte store when writing stack-sized
+                    // slots: callers often `ldr x` reloads. For true 4-byte
+                    // struct fields this over-writes 4 padding/next bytes —
+                    // acceptable for LP64-aligned structs (int fields pad to 8
+                    // in our layout_fields when following a pointer rule…).
+                    // Prefer full-slot store to kill high garbage.
+                    writeln!(self.out, "\tmov\tw{val_reg}, w{val_reg}").unwrap();
+                    writeln!(self.out, "\tstr\tx{val_reg}, [x{addr_reg}]").unwrap();
+                }
                 _ => writeln!(self.out, "\tstr\tx{val_reg}, [x{addr_reg}]").unwrap(),
             },
         }

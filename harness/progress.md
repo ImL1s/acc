@@ -9,21 +9,35 @@
 | C5 | PASS |
 | C3 | PASS |
 | C4 | held |
-| C2 | **BLOCKED** — amalgamation → `.s`→`.o`→link; **libversion PASS** (`3.45.3`); va_list real; **sqlite3_open still SIGSEGV** |
-| C1 | **BLOCKED** — Docker/kernel scripts only |
+| **C2** | **BLOCKED** |
+| **C1** | **BLOCKED** |
 
-### Recent (2026-07-20 night)
-- **Root cause of early open crash:** `va_arg` was `(*(T*)0)` — fixed with AAPCS64 reg-save + `__ggcc_va_start`/`__ggcc_va_arg`
-- **Struct assign:** `*ptr` → memcpy for aggregates (sqlite3_config MALLOC/MUTEX)
-- **Still failing:** open path SIGSEGV (likely more ABI/global/layout issues after init)
+### C2 detail
+| Step | Result |
+|------|--------|
+| `sqlite3.c` → frontend → `.s` | PASS (~12MB) |
+| Docker assemble `.o` + link | PASS |
+| `sqlite3_libversion` smoke | **PASS** `3.45.3` / `3045003` |
+| `sqlite3_initialize` / `open` | **FAIL** SIGSEGV / pthread abort |
+| Full SQLite tests / Redis | not run |
 
-### Evidence
-- `{SCRATCH}/stage_c_projects.log` — VERDICT BLOCKED + partial smokes
-- git: `feat: real va_list...`
+### Root causes fixed this stretch
+1. **`va_arg` was null-deref** → real AAPCS64 reg-save + `__ggcc_va_start`/`__ggcc_va_arg`
+2. **Struct `*p` assign** only stored 8 bytes → `memcpy` for aggregates
+3. **Static `const char*` fields** emitted `.zero` → `.quad l_str_*`
+4. Linux vs Darwin **printf varargs ABI**
+5. Large **FP offsets**, call-arg comma, bitwise compound assign, etc.
 
-### Next
-1. GDB open crash after va_list fix → next null/fnptr/layout bug
-2. Green `sqlite_smoke_ok` then full tests / Redis
-3. C1 kernel compile under wrapper
+### Still broken (open path)
+- Crash in/around `sqlite3InsertBuiltinFuncs` / later pthread
+- GDB: corrupt stack frames (SP discipline / frame size?)
+- Evidence: `{SCRATCH}/stage_c_projects.log`, `open_gdb*.txt`, `init_test.txt`
 
-**Do not claim done until C1+C2 green.**
+### C1
+Docker kernel scripts + `ggcc_cc_wrapper` ready; no bootable kernel.
+
+### blocked_reason
+C2: amalgamation links and libversion works, but initialize/open runtime incorrect — full project tests not green.  
+C1: no QEMU boot proof.
+
+**Do not claim complete. Do not rebrand Stage B as complete.**
