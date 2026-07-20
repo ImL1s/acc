@@ -1,0 +1,13 @@
+[package]
+name = "ggcc"
+version = "0.1.0"
+edition = "2021"
+description = "From-scratch minimal C compiler (clean-room; no CCC sources)"
+license = "MIT"
+
+[[bin]]
+name = "ggcc"
+path = "src/main.rs"
+
+[profile.release]
+lto = false

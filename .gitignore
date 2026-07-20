@@ -1,0 +1,47 @@
+# Build
+/target/
+**/*.rs.bk
+*.rlib
+*.rmeta
+
+# Object / asm artifacts (compiler may emit under cwd)
+*.o
+*.a
+*.so
+*.dylib
+*.out
+a.out
+# do not ignore source .s under fixtures if any — only top-level dumps
+/tmp_*.s
+/*.s
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Oracle / harness workdirs
+target/oracle_work/
+target/ctest_work/
+/work/
+/scratch/
+*.log
+!harness/**/*.md
+
+# Nested VCS inside vendored trees (we vendor as plain files)
+third_party/**/.git/
+
+# Large optional Stage C fetches (keep amalgamation tracked if small enough)
+third_party/stage_c/**/*.zip
+third_party/stage_c/linux-*/
+third_party/stage_c/redis-*/
+
+# Local agent state (locks ok to track empty; runtime locks optional)
+harness/current_tasks/*.lock
+.omc/
+.claude/worktrees/
+
+# Cargo
+Cargo.lock.bak
