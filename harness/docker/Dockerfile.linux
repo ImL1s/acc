@@ -7,9 +7,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential flex bison bc libelf-dev libssl-dev \
     qemu-system-x86 qemu-system-arm qemu-system-aarch64 \
     curl ca-certificates git python3 xz-utils \
-    rustc cargo \
     pkg-config rsync cpio \
     && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 24.04 apt cargo is 1.75 (Cargo.lock v3 only). Host ggcc uses lockfile
+# v4 (Cargo ≥1.83). Install rustup toolchain so in-container `cargo build` works.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && rustc --version && cargo --version
 
 # Note: ggcc must be built *inside* this image (or as a Linux ELF binary).
 # A macOS host target/release/ggcc is Mach-O and will not run here.

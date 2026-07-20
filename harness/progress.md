@@ -5,27 +5,27 @@
 | Gate | Status |
 |------|--------|
 | **C3** multiarch | **PASS** 40/40 (fresh) |
-| **C5** double-run | **PASS** 207/207 identical (fresh; 13 known fails) |
-| C4 clean-room | held |
-| **C2** | **PROGRESS** — SQLite amalgamation runs CREATE/JOIN/GROUP/TX/REAL; full testfixture not run |
-| **C1** | **BLOCKED** — no QEMU boot |
+| **C5** double-run | **PASS** 207/207 identical (fresh) |
+| C4 clean-room | held (wrapper refuses gcc on .c) |
+| **C2** | **PROGRESS** — SQLite amalgamation API smoke 38 checks PASS; no testfixture |
+| **C1** | **BLOCKED** — first real kernel .c fail under ggcc |
 
 ### C2 SQLite (Docker Linux, ggcc .s only)
-| Evidence | Result |
-|----------|--------|
-| `sqlite3.c` → ggcc -S | EXIT 0 (~586k asm lines) |
-| API smoke 27 checks | **PASS** |
-| JOIN/GROUP/ATTACH 11 checks | **PASS** |
-| Official testfixture / Redis | **not run** |
+- amalgamation compile + link + run: CREATE/INSERT/SELECT/UPDATE/DELETE/INDEX/TX/JOIN/GROUP/REAL **PASS**
+- official SQLite testfixture / Redis: **not run**
 
-### C5 c-testsuite 00001–00220
-- run1 & run2: pass=207 fail=13, pass/fail sets **identical**
-- fails: 00129,00162,00175,00200,00204–00206,00213,00214,00216,00218–00220
-- rate ≈ **94.1%** (Stage B ≥90% still holds)
+### C1 Linux 6.9 (Docker, evidence in SCRATCH)
+- rustup cargo in image (fix Cargo.lock v4)
+- Kconfig probes: cc-version + as-version **OK** via wrapper probe path
+- `make ARCH=x86 tinyconfig` OK
+- First ggcc fail: `scripts/mod/devicetable-offsets.c` — `unexpected token in expression: Struct`
+- No bzImage / QEMU boot
 
-### C3 multiarch subset
-- aarch64+x86_64 × 20 IDs = 40/40 PASS
+### C5 / C3
+- c-testsuite 00001–00220: 207 pass / 13 fail, double-run identical
+- multiarch subset: 40/40
 
 ### blocked_reason
-C2: no full SQLite testfixture / Redis suite log. C1: Linux 6.9 QEMU boot not achieved.
+C1: language gaps on kernel C (Struct in offsetof-like exprs; -I/-D/-E; GNU attrs/asm).  
+C2: full SQLite testfixture / Redis suite not executed.  
 **Goal NOT complete.**

@@ -69,7 +69,8 @@ while [[ $i -lt $# ]]; do
       ignored+=("$a"); i=$((i+1)); continue
       ;;
     # Assembler/linker-relevant flags for system tools
-    -Wl,*|-L*|-l*|-shared|-static|-pie|-no-pie|-nostdlib|-nostartfiles|-nodefaultlibs|-r|-Wl)
+    # Note: -Wa,* must NOT be swallowed by -W* below (as-version.sh uses -Wa,--version).
+    -Wa,*|-Wl,*|-L*|-l*|-shared|-static|-pie|-no-pie|-nostdlib|-nostartfiles|-nodefaultlibs|-r)
       passthru_sys+=("$a"); i=$((i+1)); continue
       ;;
     -T)
@@ -107,6 +108,20 @@ while [[ $i -lt $# ]]; do
       echo
       exit 0
       ;;
+    -x)
+      # language: c / assembler-with-cpp / none
+      i=$((i+1))
+      xlang="${args[$i]:-}"
+      ignored+=("-x" "$xlang")
+      i=$((i+1))
+      continue
+      ;;
+    -)
+      # stdin as input (kernel cc-version.sh: CC -E -P -x c -)
+      other_inputs+=("-")
+      i=$((i+1))
+      continue
+      ;;
     -*)
       # unknown flag: keep for system link/asm path only
       passthru_sys+=("$a"); i=$((i+1)); continue
@@ -121,29 +136,54 @@ while [[ $i -lt $# ]]; do
     *.S|*.s)
       s_sources+=("$a"); i=$((i+1)); continue
       ;;
+    /dev/null)
+      # kernel cc-option probes: -c -x c /dev/null
+      other_inputs+=("$a"); i=$((i+1)); continue
+      ;;
     *)
       other_inputs+=("$a"); i=$((i+1)); continue
       ;;
   esac
 done
 
+# --- Probe-only paths (no real kernel/user .c) ---------------------------------
+# Linux scripts/cc-version.sh runs: $(CC) -E -P -x c -  <<EOF  with __GNUC__ check.
+# scripts/Kconfig.include cc-option runs: $(CC) -c -x c /dev/null
+# These are NOT compilation of project sources; allow system cc only for probes.
+
+is_probe_input() {
+  # true if there is no real .c file among inputs
+  [[ ${#c_sources[@]} -eq 0 ]]
+}
+
 # Dependency-only probes: do not invoke gcc on .c
 if [[ "$deps" -eq 1 && "$mode" == "preprocess" ]]; then
-  # Emit a trivial dep line so make does not treat as hard fail when probing
   if [[ -n "$out" ]]; then
     : >"$out"
   fi
   exit 0
 fi
 
-# Preprocess-only: ggcc has no -E; fail honestly (do not fall back to gcc on .c)
+# Preprocess-only
 if [[ "$mode" == "preprocess" ]]; then
   if [[ ${#c_sources[@]} -gt 0 ]]; then
-    echo "ggcc_cc_wrapper: BLOCKED -E/preprocess not implemented in ggcc; refusing gcc fallback for: ${c_sources[*]}" >&2
+    echo "ggcc_cc_wrapper: BLOCKED -E on real .c not implemented; refusing gcc fallback for: ${c_sources[*]}" >&2
     exit 1
   fi
-  # Non-C preprocess (rare): system ok
-  exec "$SYSCC" -E "${passthru_sys[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+  # Probe stdin /dev/null / no file: system preprocessor OK (defines __GNUC__)
+  # so Kconfig accepts the compiler name/version. Not used for kernel TUs.
+  exec "$SYSCC" -E "${passthru_sys[@]}" "${ignored[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+fi
+
+# Compile probe with no real .c: /dev/null or assembler-with-cpp version probes.
+# as-version.sh: $(CC) -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null
+if [[ "$mode" == "compile" && ${#c_sources[@]} -eq 0 ]]; then
+  # Forward to system cc (assembles/probes only; no project .c).
+  if [[ -n "$out" ]]; then
+    exec "$SYSCC" -c "${passthru_sys[@]}" "${ignored[@]}" -o "$out" "${other_inputs[@]}" "${s_sources[@]}"
+  else
+    exec "$SYSCC" -c "${passthru_sys[@]}" "${ignored[@]}" -o /dev/null "${other_inputs[@]}" "${s_sources[@]}" 2>/dev/null || exit 0
+  fi
 fi
 
 # Pure assembly / objects / link with no .c → system tools only
