@@ -28,11 +28,13 @@ esac
 out=""
 mode=link   # link | compile (-c) | asm (-S) | preprocess (-E)
 deps=0
+DEP_MF=""
 c_sources=()
 s_sources=()   # .S / .s
 other_inputs=()  # .o .a ...
 passthru_sys=()  # flags kept for system as/ld only
 ignored=()
+ggcc_flags=()    # -I/-D forwarded to ggcc
 
 i=0
 args=("$@")
@@ -54,18 +56,78 @@ while [[ $i -lt $# ]]; do
       continue
       ;;
     -M|-MM|-MD|-MMD|-MG|-MP) deps=1; i=$((i+1)); continue ;;
-    -MF|-MT|-MQ)
-      # drop arg
+    -MF)
+      i=$((i+1))
+      DEP_MF="${args[$i]:-}"
+      deps=1
+      i=$((i+1)); continue
+      ;;
+    -MF*)
+      DEP_MF="${a#-MF}"
+      deps=1
+      i=$((i+1)); continue
+      ;;
+    -MT|-MQ)
       i=$((i+2)); continue
       ;;
-    -MF*|-MT*|-MQ*) i=$((i+1)); continue ;;
-    # Keep -I/-D/-U/-include for future ggcc use in env (not yet supported by CLI).
-    # Do not forward to system cc when compiling .c.
-    -I|-D|-U|-include|-idirafter|-isystem|-iquote)
+    -MT*|-MQ*) i=$((i+1)); continue ;;
+    # Kernel uses -Wp,-MMD,path (and sometimes -Wp,-MD,path). Must not hit -W*.
+    -Wp,*)
+      # Comma-separated preprocessor flags after -Wp,
+      IFS=',' read -r -a _wp_parts <<< "${a#-Wp,}"
+      _wp_i=0
+      while [[ $_wp_i -lt ${#_wp_parts[@]} ]]; do
+        _w="${_wp_parts[$_wp_i]}"
+        case "$_w" in
+          -MMD|-MD|-M|-MM|-MG|-MP) deps=1 ;;
+          -MF)
+            _wp_i=$((_wp_i+1))
+            DEP_MF="${_wp_parts[$_wp_i]:-}"
+            deps=1
+            ;;
+          -MF*)
+            DEP_MF="${_w#-MF}"
+            deps=1
+            ;;
+          -MT|-MQ) _wp_i=$((_wp_i+1)) ;;
+          *) ;;
+        esac
+        _wp_i=$((_wp_i+1))
+      done
+      unset IFS _wp_parts _wp_i _w
+      i=$((i+1)); continue
+      ;;
+    # -I/-D go to ggcc (kernel builds); also keep for probe preprocess path.
+    -I)
+      ggcc_flags+=("-I" "${args[$((i+1))]:-}")
+      ignored+=("-I" "${args[$((i+1))]:-}")
+      i=$((i+2)); continue
+      ;;
+    -I*)
+      ggcc_flags+=("$a"); ignored+=("$a"); i=$((i+1)); continue
+      ;;
+    -D)
+      ggcc_flags+=("-D" "${args[$((i+1))]:-}")
+      ignored+=("-D" "${args[$((i+1))]:-}")
+      i=$((i+2)); continue
+      ;;
+    -D*)
+      ggcc_flags+=("$a"); ignored+=("$a"); i=$((i+1)); continue
+      ;;
+    # -include is required by kernel (kconfig.h / compiler-version.h). Forward to ggcc.
+    -include)
+      ggcc_flags+=("-include" "${args[$((i+1))]:-}")
+      ignored+=("-include" "${args[$((i+1))]:-}")
+      i=$((i+2)); continue
+      ;;
+    -include*)
+      ggcc_flags+=("$a"); ignored+=("$a"); i=$((i+1)); continue
+      ;;
+    -U|-idirafter|-isystem|-iquote)
       ignored+=("$a" "${args[$((i+1))]:-}")
       i=$((i+2)); continue
       ;;
-    -I*|-D*|-U*|-include*|-idirafter*|-isystem*|-iquote*)
+    -U*|-idirafter*|-isystem*|-iquote*)
       ignored+=("$a"); i=$((i+1)); continue
       ;;
     # Assembler/linker-relevant flags for system tools
@@ -80,7 +142,8 @@ while [[ $i -lt $# ]]; do
     -T*)
       passthru_sys+=("$a"); i=$((i+1)); continue
       ;;
-    # Drop compiler-ish flags ggcc cannot use
+    # Drop compiler-ish flags ggcc cannot use.
+    # Note: -Wp,* handled above (before -W*). -Wa,* handled in passthru.
     -W*|-f*|-m*|-O*|-g*|-std=*|-pedantic*|--param*|-pipe|-pthread|-P|-C|-dM|-dD)
       ignored+=("$a"); i=$((i+1)); continue
       ;;
@@ -218,7 +281,7 @@ asm_out="$work/out.s"
 obj_out="$work/out.o"
 
 set +e
-"$GGCC" --target-os "$TARGET_OS" -m "$GGCC_M" -S -o "$asm_out" "$src" 2>"$work/ggcc.err"
+"$GGCC" --target-os "$TARGET_OS" -m "$GGCC_M" "${ggcc_flags[@]}" -S -o "$asm_out" "$src" 2>"$work/ggcc.err"
 ec=$?
 set -e
 if [[ $ec -ne 0 ]]; then
@@ -228,6 +291,25 @@ if [[ $ec -ne 0 ]]; then
   exit "$ec"
 fi
 
+# Write a minimal gcc-compatible depfile when -MD/-MMD was requested.
+write_depfile() {
+  local srcf="$1"
+  [[ "$deps" -eq 1 || -n "$DEP_MF" ]] || return 0
+  local dfile
+  if [[ -n "$DEP_MF" ]]; then
+    dfile="$DEP_MF"
+  elif [[ -n "$out" ]]; then
+    local base dir
+    base="$(basename "$out")"
+    dir="$(dirname "$out")"
+    dfile="$dir/.${base}.d"
+  else
+    dfile=".$(basename "$srcf" .c).o.d"
+  fi
+  mkdir -p "$(dirname "$dfile")" 2>/dev/null || true
+  printf '%s: %s\n' "${out:-$(basename "$srcf" .c).o}" "$srcf" >"$dfile"
+}
+
 case "$mode" in
   asm)
     if [[ -n "$out" ]]; then
@@ -235,6 +317,7 @@ case "$mode" in
     else
       cp "$asm_out" "$(basename "$src" .c).s"
     fi
+    write_depfile "$src"
     exit 0
     ;;
   compile)
@@ -244,6 +327,7 @@ case "$mode" in
     else
       "$SYSCC" -c -o "$(basename "$src" .c).o" "$asm_out"
     fi
+    write_depfile "$src"
     exit 0
     ;;
   link)

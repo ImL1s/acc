@@ -15,7 +15,8 @@ use std::process;
 fn usage() -> ! {
     eprintln!(
         "ggcc — from-scratch minimal C compiler\n\
-         usage: ggcc [-o <output>] [-S] [--keep-asm] [-m aarch64|x86_64] [--target-os darwin|linux] <input.c>\n\
+         usage: ggcc [-o <output>] [-S] [--keep-asm] [-m aarch64|x86_64] [--target-os darwin|linux]\n\
+                [-I dir] [-Dname[=val]] <input.c>\n\
          \n\
          Compiles C with the in-tree frontend/codegen. System `cc` is used only\n\
          to assemble/link emitted assembly, never to compile the user's .c.\n\
@@ -23,7 +24,10 @@ fn usage() -> ! {
          -m aarch64          emit aarch64 (default)\n\
          -m x86_64           emit x86_64 System V\n\
          --target-os darwin  Mach-O / Darwin asm (default on macOS host)\n\
-         --target-os linux   ELF / Linux asm (for Docker Stage C)"
+         --target-os linux   ELF / Linux asm (for Docker Stage C)\n\
+         -I dir              add include search path\n\
+         -Dname[=val]        define macro (default val=1)\n\
+         -include file       pre-include file (like first #include)"
     );
     process::exit(2);
 }
@@ -36,6 +40,9 @@ fn main() {
     let mut target = Target::Aarch64;
     let mut target_os = TargetOs::host();
     let mut input: Option<PathBuf> = None;
+    let mut include_dirs: Vec<PathBuf> = Vec::new();
+    let mut defines: Vec<(String, String)> = Vec::new();
+    let mut force_includes: Vec<PathBuf> = Vec::new();
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -69,17 +76,62 @@ fn main() {
                     process::exit(2);
                 });
             }
+            "-I" => {
+                let p = args.next().unwrap_or_else(|| {
+                    eprintln!("ERROR: -I requires a directory");
+                    process::exit(2);
+                });
+                include_dirs.push(PathBuf::from(p));
+            }
+            s if s.starts_with("-I") && s.len() > 2 => {
+                include_dirs.push(PathBuf::from(&s[2..]));
+            }
+            "-D" => {
+                let p = args.next().unwrap_or_else(|| {
+                    eprintln!("ERROR: -D requires NAME or NAME=value");
+                    process::exit(2);
+                });
+                if let Some((k, v)) = p.split_once('=') {
+                    defines.push((k.to_string(), v.to_string()));
+                } else {
+                    defines.push((p, String::new()));
+                }
+            }
+            s if s.starts_with("-D") && s.len() > 2 => {
+                let rest = &s[2..];
+                if let Some((k, v)) = rest.split_once('=') {
+                    defines.push((k.to_string(), v.to_string()));
+                } else {
+                    defines.push((rest.to_string(), String::new()));
+                }
+            }
+            "-include" => {
+                let p = args.next().unwrap_or_else(|| {
+                    eprintln!("ERROR: -include requires a file path");
+                    process::exit(2);
+                });
+                force_includes.push(PathBuf::from(p));
+            }
+            s if s.starts_with("-include") && s.len() > 8 => {
+                // -includeFILE (no space) — rare but accept
+                force_includes.push(PathBuf::from(&s[8..]));
+            }
             s if s.starts_with("-m") && s.len() > 2 => {
                 // Support -march style glue: -mx86_64 / -maarch64
                 let t = &s[2..];
+                // -m32/-m64 are ignored (kernel flags)
+                if t == "32" || t == "64" || t.starts_with("cpu") || t.starts_with("arch") {
+                    continue;
+                }
                 target = Target::parse(t).unwrap_or_else(|| {
                     eprintln!("ERROR: unknown target '{t}' (use aarch64 or x86_64)");
                     process::exit(2);
                 });
             }
             s if s.starts_with('-') => {
-                eprintln!("ERROR: unknown flag {s}");
-                usage();
+                // Silently ignore unknown gcc-style flags (kernel builds pass many).
+                // Critical flags (-I/-D/-include/-S/-o/-m) are handled above.
+                continue;
             }
             s => {
                 if input.is_some() {
@@ -111,6 +163,9 @@ fn main() {
         target,
         target_os,
         linker: None,
+        include_dirs,
+        defines,
+        force_includes,
     }) {
         eprintln!("ERROR: {e}");
         process::exit(1);

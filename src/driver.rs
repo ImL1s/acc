@@ -17,6 +17,12 @@ pub struct CompileOptions {
     pub target_os: TargetOs,
     /// Optional assembler/linker program (default: `cc`). Used for cross tools in Docker.
     pub linker: Option<String>,
+    /// Additional `-I` include search paths (kernel builds need many).
+    pub include_dirs: Vec<PathBuf>,
+    /// Predefined macros from `-DNAME` / `-DNAME=value`.
+    pub defines: Vec<(String, String)>,
+    /// Files from gcc-style `-include path` (pre-included before the TU).
+    pub force_includes: Vec<PathBuf>,
 }
 
 pub fn compile(opts: &CompileOptions) -> Result<(), String> {
@@ -31,7 +37,39 @@ pub fn compile(opts: &CompileOptions) -> Result<(), String> {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("input.c");
-    let src = crate::preprocess::preprocess_with_options(&src, inc_dir, for_linux, source_name)?;
+    let extra: Vec<&std::path::Path> = opts.include_dirs.iter().map(|p| p.as_path()).collect();
+    // Inject -D macros and -include files at the top of the TU (gcc order).
+    let mut prefixed = String::new();
+    for (k, v) in &opts.defines {
+        if v.is_empty() {
+            prefixed.push_str(&format!("#define {k} 1\n"));
+        } else {
+            prefixed.push_str(&format!("#define {k} {v}\n"));
+        }
+    }
+    // `-include file` ≡ `#include "file"` before the primary source.
+    // gcc resolves relative -include paths against the process CWD (kernel make
+    // runs from the tree root with `-include ./include/linux/kconfig.h`).
+    for fi in &opts.force_includes {
+        let abs = if fi.is_absolute() {
+            fi.clone()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(fi)
+        };
+        // Absolute path in the directive so the preprocessor does not join it
+        // against the .c file's parent directory.
+        prefixed.push_str(&format!("#include \"{}\"\n", abs.display()));
+    }
+    prefixed.push_str(&src);
+    let src = crate::preprocess::preprocess_with_options(
+        &prefixed,
+        inc_dir,
+        &extra,
+        for_linux,
+        source_name,
+    )?;
     if let Some(path) = std::env::var_os("GGCC_DUMP_PP") {
         let _ = fs::write(&path, &src);
     }
@@ -136,6 +174,9 @@ mod tests {
             target: Target::Aarch64,
             target_os: TargetOs::host(),
             linker: None,
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            force_includes: Vec::new(),
         })
         .expect("compile");
         let out = Command::new(&bin_path).output().expect("run");

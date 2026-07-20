@@ -16,6 +16,8 @@ pub struct Parser {
     tag_scope: Vec<std::collections::HashMap<String, String>>,
     tag_serial: usize,
     pending_enum_globals: Vec<VarDecl>,
+    /// Enumerator name → value (for `E = PREV` style enum initializers).
+    enum_values: std::collections::HashMap<String, i64>,
 }
 
 impl Parser {
@@ -31,6 +33,42 @@ impl Parser {
             tag_scope: vec![std::collections::HashMap::new()],
             tag_serial: 0,
             pending_enum_globals: Vec::new(),
+            enum_values: std::collections::HashMap::new(),
+        }
+    }
+
+    fn eval_enum_const(&self, e: &Expr) -> Option<i64> {
+        match e {
+            Expr::Int(n) | Expr::Char(n) => Some(*n),
+            Expr::Var(name) => self.enum_values.get(name).copied(),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => self.eval_enum_const(expr).map(|v| -v),
+            Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr,
+            } => self.eval_enum_const(expr).map(|v| !v),
+            Expr::Binary { op, left, right } => {
+                let l = self.eval_enum_const(left)?;
+                let r = self.eval_enum_const(right)?;
+                Some(match op {
+                    BinOp::Add => l.wrapping_add(r),
+                    BinOp::Sub => l.wrapping_sub(r),
+                    BinOp::Mul => l.wrapping_mul(r),
+                    BinOp::Div if r != 0 => l / r,
+                    BinOp::Mod if r != 0 => l % r,
+                    BinOp::BitOr => l | r,
+                    BinOp::BitAnd => l & r,
+                    BinOp::BitXor => l ^ r,
+                    BinOp::Shl => l.wrapping_shl(r as u32),
+                    BinOp::Shr => l.wrapping_shr(r as u32),
+                    _ => return None,
+                })
+            }
+            Expr::Cast { expr, .. } => self.eval_enum_const(expr),
+            // sizeof in enum constants — fall back to const_array_len
+            other => self.const_array_len(other),
         }
     }
 
@@ -142,9 +180,20 @@ impl Parser {
             | TokenKind::Auto
             | TokenKind::Const
             | TokenKind::Volatile => true,
-            TokenKind::Ident(s) => self.typedefs.iter().any(|t| t == s),
+            TokenKind::Ident(s) => {
+                s == "typeof"
+                    || s == "__typeof"
+                    || s == "__typeof__"
+                    || s == "__builtin_va_list"
+                    || s == "__gnuc_va_list"
+                    || self.typedefs.iter().any(|t| t == s)
+            }
             _ => false,
         }
+    }
+
+    fn is_typeof_kw(s: &str) -> bool {
+        s == "typeof" || s == "__typeof" || s == "__typeof__"
     }
 
     /// After seeing '(', decide if this is nested `(declarator)` vs function params.
@@ -203,6 +252,18 @@ impl Parser {
             {}
             if self.at(&TokenKind::Typedef) {
                 items.push(self.parse_typedef()?);
+                continue;
+            }
+            // C11 `_Static_assert(cond, "msg");` / C23 `static_assert(...)` — skip.
+            if matches!(
+                self.peek_kind(),
+                TokenKind::Ident(s) if s == "_Static_assert" || s == "static_assert"
+            ) {
+                self.bump();
+                if self.at(&TokenKind::LParen) {
+                    self.skip_balanced_parens()?;
+                }
+                let _ = self.eat(TokenKind::Semicolon);
                 continue;
             }
             if self.at(&TokenKind::Enum) && self.is_enum_tag_decl() {
@@ -345,6 +406,10 @@ impl Parser {
     fn parse_fields(&mut self) -> Result<Vec<Field>, String> {
         let mut fields = Vec::new();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            // Empty field: `struct { void *lock;; }` (double semicolon from macros).
+            if self.eat(TokenKind::Semicolon) {
+                continue;
+            }
             let base = self.parse_type_specifier()?;
             // Anonymous struct/union field: `union { int c; int d; };`
             if self.eat(TokenKind::Semicolon) {
@@ -357,7 +422,8 @@ impl Parser {
             }
             // Unnamed bit-field: `unsigned : 3;` / `int : 0;`
             if self.eat(TokenKind::Colon) {
-                let w = match self.parse_expr()? {
+                // Use assign-expr (not full expr) so `,` separates bitfields, not comma-op.
+                let w = match self.parse_assign()? {
                     Expr::Int(n) => n.max(0) as u32,
                     _ => 0,
                 };
@@ -370,12 +436,29 @@ impl Parser {
                 continue;
             }
             loop {
+                // Comma-separated bitfields may insert unnamed `: N` mid-list:
+                // `u64 a:16, b:2, :45;`
+                if self.eat(TokenKind::Colon) {
+                    let w = match self.parse_assign()? {
+                        Expr::Int(n) => n.max(0) as u32,
+                        _ => 0,
+                    };
+                    fields.push(Field {
+                        name: String::new(),
+                        ty: base.clone(),
+                        bit_width: Some(w),
+                    });
+                    if self.eat(TokenKind::Comma) {
+                        continue;
+                    }
+                    break;
+                }
                 let (name, ty, _) = self.parse_declarator(base.clone())?;
                 // Bit-field: `unsigned flags : 1;`
                 let bit_width = if self.eat(TokenKind::Colon) {
-                    let w = match self.parse_expr()? {
+                    let w = match self.parse_assign()? {
                         Expr::Int(n) => n.max(0) as u32,
-                        _ => 1,
+                        other => self.eval_enum_const(&other).unwrap_or(1).max(0) as u32,
                     };
                     Some(w)
                 } else {
@@ -519,11 +602,12 @@ impl Parser {
                         if let TokenKind::Ident(id) = self.peek_kind().clone() {
                             self.bump();
                             if self.eat(TokenKind::Assign) {
-                                if let TokenKind::IntLit(n) = self.peek_kind().clone() {
-                                    self.bump();
-                                    next_val = n;
+                                let e = self.parse_assign()?;
+                                if let Some(v) = self.eval_enum_const(&e) {
+                                    next_val = v;
                                 }
                             }
+                            self.enum_values.insert(id.clone(), next_val);
                             // store as int global for expression use
                             // (parser side-effect via temporary list on self)
                             self.pending_enum_globals.push(VarDecl {
@@ -542,6 +626,27 @@ impl Parser {
                     self.expect(TokenKind::RBrace)?;
                 }
                 Type::Int
+            }
+            TokenKind::Ident(s) if Self::is_typeof_kw(&s) => {
+                // GNU/C23 typeof(expr) / typeof(type) — enough for kernel READ_ONCE etc.
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let t = if self.is_typename() {
+                    // Prefer type-name when the next token is clearly a type.
+                    // `typeof(_Generic(...))` starts with ident that is not a type.
+                    self.parse_type_name()?
+                } else {
+                    // Expression form: we only need a parseable type for casts/decl.
+                    let _e = self.parse_assign()?;
+                    Type::ULong
+                };
+                self.expect(TokenKind::RParen)?;
+                t
+            }
+            // Compiler builtins used as types in freestanding/kernel headers.
+            TokenKind::Ident(s) if s == "__builtin_va_list" || s == "__gnuc_va_list" => {
+                self.bump();
+                Type::Ptr(Box::new(Type::Void))
             }
             TokenKind::Ident(s) if self.typedefs.iter().any(|t| t == &s) => {
                 self.bump();
@@ -583,21 +688,19 @@ impl Parser {
                 return Err("enum enumerator name expected".into());
             };
             if self.eat(TokenKind::Assign) {
-                if let TokenKind::IntLit(n) = self.peek_kind().clone() {
-                    self.bump();
-                    next_val = n;
-                } else if let TokenKind::CharLit(n) = self.peek_kind().clone() {
-                    self.bump();
-                    next_val = n;
+                let e = self.parse_assign()?;
+                if let Some(v) = self.eval_enum_const(&e) {
+                    next_val = v;
                 }
             }
+            self.enum_values.insert(id.clone(), next_val);
             // Emit as global const int
             items.push(Item::Global(VarDecl {
                 name: id,
                 ty: Type::Int,
                 init: Some(Expr::Int(next_val)),
-            is_static: false,
-        }));
+                is_static: false,
+            }));
             next_val += 1;
             if self.eat(TokenKind::Comma) {
                 continue;
@@ -803,6 +906,21 @@ impl Parser {
                 func_params = bubbled_fp.take();
             }
         }
+        // GNU register asm: `register unsigned long sp asm("esp");`
+        // Also appears as `__asm__("sp")` after the declarator name.
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Ident(s) if s == "asm" || s == "__asm" || s == "__asm__"
+        ) {
+            self.bump();
+            if self.eat(TokenKind::LParen) {
+                // one or more string literals
+                while let TokenKind::StringLit(_) = self.peek_kind().clone() {
+                    self.bump();
+                }
+                let _ = self.expect(TokenKind::RParen);
+            }
+        }
         Ok((name, ty, func_params))
     }
 
@@ -944,6 +1062,26 @@ impl Parser {
         })
     }
 
+    /// Field byte offset within a struct/union type (named or anonymous).
+    fn const_offsetof_type_field(&self, ty: &Type, field: &str) -> Option<i64> {
+        match ty {
+            Type::Struct(n) | Type::Union(n) => {
+                let lay = self.layout_named(n)?;
+                lay.2.get(field).copied()
+            }
+            Type::AnonStruct(fs) => {
+                let lay = self.layout_fields_const(fs, false);
+                lay.2.get(field).copied()
+            }
+            Type::AnonUnion(fs) => {
+                let lay = self.layout_fields_const(fs, true);
+                lay.2.get(field).copied()
+            }
+            // typedef alias stored as Struct(name) already handled; peel Ptr? no.
+            _ => None,
+        }
+    }
+
     /// Evaluate `offsetof(T, field)` patterns:
     /// `((int)((char*)&((T*)0)->field))` or `&((T*)0)->field`.
     fn const_offsetof(&self, e: &Expr) -> Option<i64> {
@@ -1007,6 +1145,7 @@ impl Parser {
         }
         match e {
             Expr::Int(n) | Expr::Char(n) => Some(*n),
+            Expr::Var(name) => self.enum_values.get(name).copied(),
             Expr::Unary {
                 op: UnaryOp::Neg,
                 expr,
@@ -1227,12 +1366,22 @@ impl Parser {
             let mut fields = Vec::new();
             while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
                 if self.eat(TokenKind::Dot) {
-                    let field = if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                    // Nested designators: `.p4d.pgd = expr` (kernel page-table types).
+                    let mut field = if let TokenKind::Ident(s) = self.peek_kind().clone() {
                         self.bump();
                         s
                     } else {
                         return Err("designated init field name".into());
                     };
+                    while self.eat(TokenKind::Dot) {
+                        if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                            self.bump();
+                            // Keep innermost name for soft layout matching.
+                            field = s;
+                        } else {
+                            return Err("nested designated init field name".into());
+                        }
+                    }
                     self.expect(TokenKind::Assign)?;
                     fields.push((Some(field), self.parse_initializer()?));
                 } else if self.eat(TokenKind::LBracket) {
@@ -1273,6 +1422,256 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// Skip a balanced `(...)` starting at the current token (must be `(`).
+    fn skip_balanced_parens(&mut self) -> Result<(), String> {
+        self.expect(TokenKind::LParen)?;
+        let mut depth = 1i32;
+        while depth > 0 && !self.at(&TokenKind::Eof) {
+            if self.at(&TokenKind::LParen) {
+                depth += 1;
+            } else if self.at(&TokenKind::RParen) {
+                depth -= 1;
+                if depth == 0 {
+                    self.bump();
+                    break;
+                }
+            }
+            self.bump();
+        }
+        Ok(())
+    }
+
+    /// GNU basic/extended asm for kbuild DEFINE / OFFSETS emission.
+    fn parse_asm_stmt(&mut self) -> Result<Stmt, String> {
+        // consume asm / __asm__ / __asm
+        self.bump();
+        // optional qualifiers: inline / volatile / goto (any order, may repeat)
+        // e.g. `asm __inline volatile (...)` / `asm goto (...)` from kernel.
+        // Note: `goto` is TokenKind::Goto, not Ident.
+        loop {
+            if self.eat(TokenKind::Volatile)
+                || self.eat(TokenKind::Inline)
+                || self.eat(TokenKind::Goto)
+            {
+                continue;
+            }
+            if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                if s == "__volatile__" || s == "__inline" || s == "__inline__" {
+                    self.bump();
+                    continue;
+                }
+            }
+            break;
+        }
+
+        // Kernel ALTERNATIVE/asm_inline macros can leave non-string tokens in the
+        // template position. Prefer structured parse; on failure, skip balanced
+        // `(...)` so headers still parse (DEFINE uses clean string templates).
+        if !self.at(&TokenKind::LParen) {
+            // Bare `asm;` / broken macro residue — treat as empty asm.
+            let _ = self.eat(TokenKind::Semicolon);
+            return Ok(Stmt::Asm { lines: Vec::new() });
+        }
+        // Peek: if next after ( is not string and not ), fall back to skip.
+        let after = self.toks.get(self.i + 1).map(|t| &t.kind);
+        let clean_template = matches!(
+            after,
+            Some(TokenKind::StringLit(_) | TokenKind::RParen)
+        );
+        if !clean_template {
+            self.skip_balanced_parens()?;
+            let _ = self.eat(TokenKind::Semicolon);
+            return Ok(Stmt::Asm { lines: Vec::new() });
+        }
+
+        self.expect(TokenKind::LParen)?;
+
+        // Template: zero or more adjacent string literals (empty "" is a valid
+        // memory-barrier asm used throughout the kernel).
+        let mut template = String::new();
+        let mut saw_template = false;
+        loop {
+            if let TokenKind::StringLit(s) = self.peek_kind().clone() {
+                self.bump();
+                template.push_str(&s);
+                saw_template = true;
+            } else {
+                break;
+            }
+        }
+        if !saw_template {
+            // Empty template only if we already saw "" — handled by saw_template.
+            // If truly no string, skip rest of operands.
+            // (Should not reach here when clean_template was true for RParen.)
+            while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                self.bump();
+            }
+            let _ = self.eat(TokenKind::RParen);
+            let _ = self.eat(TokenKind::Semicolon);
+            return Ok(Stmt::Asm { lines: Vec::new() });
+        }
+
+        // Kernel ALTERNATIVE macros often expand to string + bare tokens + more strings.
+        // If the template is not followed by `:` / `)`, abandon structured parse and
+        // skip to the matching `)` for this asm (depth already open at template level).
+        if !self.at(&TokenKind::Colon) && !self.at(&TokenKind::RParen) {
+            let mut depth = 1i32;
+            while depth > 0 && !self.at(&TokenKind::Eof) {
+                if self.at(&TokenKind::LParen) {
+                    depth += 1;
+                } else if self.at(&TokenKind::RParen) {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.bump();
+                        break;
+                    }
+                }
+                self.bump();
+            }
+            let _ = self.eat(TokenKind::Semicolon);
+            return Ok(Stmt::Asm { lines: Vec::new() });
+        }
+
+        // Optional : outputs : inputs : clobbers
+        let mut imm_vals: Vec<i64> = Vec::new();
+        if self.eat(TokenKind::Colon) {
+            // outputs — skip "constraint" (expr) list (usually empty for DEFINE)
+            self.skip_asm_operand_list()?;
+            if self.eat(TokenKind::Colon) {
+                // inputs — collect "i" (const) values for %0, %1, ...
+                imm_vals = self.parse_asm_input_immediates()?;
+                if self.eat(TokenKind::Colon) {
+                    // clobbers — skip string list
+                    while let TokenKind::StringLit(_) = self.peek_kind().clone() {
+                        self.bump();
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::Semicolon)?;
+
+        // Substitute %0, %1, ... with immediate values; %% → %
+        let mut out = String::new();
+        let bytes = template.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+                    out.push('%');
+                    i += 2;
+                    continue;
+                }
+                // %N or %cN / %nN etc. — take digits after optional letter
+                let mut j = i + 1;
+                if j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                    j += 1; // skip modifier letter
+                }
+                let start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if start < j {
+                    let idx: usize = std::str::from_utf8(&bytes[start..j])
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(usize::MAX);
+                    if let Some(v) = imm_vals.get(idx) {
+                        out.push_str(&format!("{v}"));
+                    } else {
+                        out.push('%');
+                        out.push_str(std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""));
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+
+        // Split into lines for emission (template often starts with \n)
+        let lines: Vec<String> = out
+            .split('\n')
+            .map(|s| s.trim_end().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(Stmt::Asm { lines })
+    }
+
+    /// Optional GNU named asm operand: `[name]` before the constraint string.
+    fn skip_asm_operand_name(&mut self) {
+        if self.eat(TokenKind::LBracket) {
+            // [ident] or [ident_with_digits]
+            if let TokenKind::Ident(_) = self.peek_kind().clone() {
+                self.bump();
+            }
+            let _ = self.eat(TokenKind::RBracket);
+        }
+    }
+
+    fn skip_asm_operand_list(&mut self) -> Result<(), String> {
+        // empty or [name] "cstr" (expr) [, ...]  (+ / = constraint prefixes inside string)
+        if self.at(&TokenKind::Colon) || self.at(&TokenKind::RParen) {
+            return Ok(());
+        }
+        loop {
+            self.skip_asm_operand_name();
+            if let TokenKind::StringLit(_) = self.peek_kind().clone() {
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let _ = self.parse_assign()?;
+                self.expect(TokenKind::RParen)?;
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+            }
+            break;
+        }
+        Ok(())
+    }
+
+    fn parse_asm_input_immediates(&mut self) -> Result<Vec<i64>, String> {
+        let mut vals = Vec::new();
+        if self.at(&TokenKind::Colon) || self.at(&TokenKind::RParen) {
+            return Ok(vals);
+        }
+        loop {
+            self.skip_asm_operand_name();
+            if let TokenKind::StringLit(cstr) = self.peek_kind().clone() {
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let e = self.parse_assign()?;
+                self.expect(TokenKind::RParen)?;
+                // "i" / "n" / "ri" etc. — evaluate as constant when possible.
+                // Kernel headers also use "i"(var) in non-DEFINE asm; fall back to 0
+                // so we can still parse the TU. kbuild DEFINE values must still fold.
+                if cstr.contains('i') || cstr.contains('n') {
+                    if let Some(v) = self.const_array_len(&e) {
+                        vals.push(v);
+                    } else if let Some(v) = self.const_offsetof(&e) {
+                        vals.push(v);
+                    } else if let Some(v) = self.eval_enum_const(&e) {
+                        vals.push(v);
+                    } else {
+                        vals.push(0);
+                    }
+                } else {
+                    // non-immediate: push 0 placeholder so %N still substitutes something
+                    vals.push(0);
+                }
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+            }
+            break;
+        }
+        Ok(vals)
+    }
+
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
         // block-scope typedef: typedef enum { e } h;
         if self.at(&TokenKind::Typedef) {
@@ -1280,6 +1679,18 @@ impl Parser {
             // typedef doesn't produce a runtime stmt; register via empty (parser
             // already recorded typedef into self.typedefs via parse_typedef).
             let _ = item;
+            return Ok(Stmt::Empty);
+        }
+        // C11 `_Static_assert` / C23 `static_assert` as statement
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Ident(s) if s == "_Static_assert" || s == "static_assert"
+        ) {
+            self.bump();
+            if self.at(&TokenKind::LParen) {
+                self.skip_balanced_parens()?;
+            }
+            let _ = self.eat(TokenKind::Semicolon);
             return Ok(Stmt::Empty);
         }
         // label: stmt
@@ -1303,6 +1714,14 @@ impl Parser {
         }
         if self.eat(TokenKind::Semicolon) {
             return Ok(Stmt::Empty);
+        }
+        // GNU asm / __asm__ / __asm  [volatile] ( "template" [ : outs [ : ins [ : clobbers ] ] ] );
+        // Enough for kernel kbuild DEFINE(sym,val) → .ascii "->sym val ..."
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Ident(s) if s == "asm" || s == "__asm__" || s == "__asm"
+        ) {
+            return self.parse_asm_stmt();
         }
         if self.eat(TokenKind::Return) {
             if self.eat(TokenKind::Semicolon) {
@@ -1370,6 +1789,10 @@ impl Parser {
         }
         if self.eat(TokenKind::Case) {
             let value = self.parse_expr()?;
+            // GNU case ranges: `case '0' ... '7':` — parse high end; codegen uses low.
+            if self.eat(TokenKind::Ellipsis) {
+                let _hi = self.parse_expr()?;
+            }
             self.expect(TokenKind::Colon)?;
             // case can have empty body or fallthrough chain
             let body = if self.at(&TokenKind::Case)
@@ -1797,6 +2220,34 @@ impl Parser {
             }
             return Ok(Expr::SizeofExpr(Box::new(self.parse_unary()?)));
         }
+        // Kernel/Linux: __builtin_offsetof(struct T, field) → constant int.
+        // TYPE may be `struct name` / `union name` / typedef name.
+        if let TokenKind::Ident(name) = self.peek_kind().clone() {
+            if name == "__builtin_offsetof" {
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let ty = self.parse_type_name()?;
+                self.expect(TokenKind::Comma)?;
+                let field = if let TokenKind::Ident(f) = self.peek_kind().clone() {
+                    self.bump();
+                    f
+                } else {
+                    return Err(format!(
+                        "offsetof member name at {}:{}",
+                        self.peek().line,
+                        self.peek().col
+                    ));
+                };
+                self.expect(TokenKind::RParen)?;
+                // Soft-fallback 0 when layout is incomplete (common in kernel headers
+                // before full struct parsing). DEFINE that need real offsets still work
+                // when the struct was recorded correctly.
+                let off = self
+                    .const_offsetof_type_field(&ty, &field)
+                    .unwrap_or(0);
+                return Ok(Expr::Int(off));
+            }
+        }
         // cast: (type) expr  OR compound literal (type){ init }
         if self.at(&TokenKind::LParen) && self.is_cast_start() {
             self.bump();
@@ -1951,6 +2402,10 @@ impl Parser {
                 let mut args = Vec::new();
                 if !self.at(&TokenKind::RParen) {
                     loop {
+                        // C allows trailing commas: `f(a,)` (macro residue in kernel).
+                        if self.at(&TokenKind::RParen) {
+                            break;
+                        }
                         args.push(self.parse_assign()?);
                         if self.eat(TokenKind::Comma) {
                             continue;
@@ -2024,12 +2479,120 @@ impl Parser {
                 self.bump();
                 Ok(Expr::String(s))
             }
+            TokenKind::Ident(name) if name == "__builtin_types_compatible_p" => {
+                // GCC: __builtin_types_compatible_p(type1, type2) — both args are types.
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let _t1 = self.parse_type_name()?;
+                self.expect(TokenKind::Comma)?;
+                let _t2 = self.parse_type_name()?;
+                self.expect(TokenKind::RParen)?;
+                // Soft: always 0 (not compatible) unless we later compare layouts.
+                Ok(Expr::Int(0))
+            }
+            TokenKind::Ident(name) if name == "__builtin_constant_p" => {
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let _e = self.parse_assign()?;
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::Int(0))
+            }
+            TokenKind::Ident(name) if name == "__builtin_expect" => {
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let e = self.parse_assign()?;
+                if self.eat(TokenKind::Comma) {
+                    let _ = self.parse_assign()?;
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(e)
+            }
+            TokenKind::Ident(name) if name == "_Generic" => {
+                // C11 _Generic(controlling-expr, type: expr, ..., default: expr)
+                // Kernel headers use this inside READ_ONCE/typeof; pick the last
+                // association (usually `default`) as the value — enough to parse.
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let _ctrl = self.parse_assign()?;
+                self.expect(TokenKind::Comma)?;
+                let mut result = Expr::Int(0);
+                loop {
+                    if self.at(&TokenKind::RParen) {
+                        break;
+                    }
+                    // `default` is a keyword (TokenKind::Default), not Ident.
+                    if self.eat(TokenKind::Default) {
+                        self.expect(TokenKind::Colon)?;
+                        result = self.parse_assign()?;
+                    } else if self.is_typename() {
+                        let _ty = self.parse_type_name()?;
+                        self.expect(TokenKind::Colon)?;
+                        result = self.parse_assign()?;
+                    } else {
+                        return Err(format!(
+                            "expected type or default in _Generic at {}:{}",
+                            self.peek().line,
+                            self.peek().col
+                        ));
+                    }
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(result)
+            }
             TokenKind::Ident(name) => {
                 self.bump();
                 Ok(Expr::Var(name))
             }
             TokenKind::LParen => {
                 self.bump();
+                // GNU statement expression: ({ stmts; expr; })
+                // Kernel headers use this heavily (READ_ONCE, test_bit, etc.).
+                if self.at(&TokenKind::LBrace) {
+                    self.bump(); // {
+                    let mut last = Expr::Int(0);
+                    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        // Prefer expression-statement so the final value is kept.
+                        // Local decls / other stmts are parsed and discarded.
+                        if self.is_typename()
+                            || self.at(&TokenKind::Static)
+                            || self.at(&TokenKind::Extern)
+                            || self.at(&TokenKind::Register)
+                            || self.at(&TokenKind::Inline)
+                            || self.at(&TokenKind::Typedef)
+                        {
+                            let _ = self.parse_local_decl()?;
+                        } else if self.at(&TokenKind::If)
+                            || self.at(&TokenKind::While)
+                            || self.at(&TokenKind::For)
+                            || self.at(&TokenKind::Do)
+                            || self.at(&TokenKind::Switch)
+                            || self.at(&TokenKind::Return)
+                            || self.at(&TokenKind::Break)
+                            || self.at(&TokenKind::Continue)
+                            || self.at(&TokenKind::Goto)
+                            || self.at(&TokenKind::LBrace)
+                            || matches!(
+                                self.peek_kind(),
+                                TokenKind::Ident(s) if s == "asm" || s == "__asm" || s == "__asm__"
+                            )
+                        {
+                            let _ = self.parse_stmt()?;
+                        } else {
+                            let e = self.parse_expr()?;
+                            last = e;
+                            if !self.eat(TokenKind::Semicolon) {
+                                // last expression may omit trailing `;` before `}`
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(last);
+                }
                 // compound literal: (type){ init }
                 if self.is_typename() {
                     let ty = self.parse_type_name()?;

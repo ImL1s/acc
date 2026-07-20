@@ -108,6 +108,9 @@ pub enum Stmt {
     },
     Default(Box<Stmt>),
     Empty,
+    /// Fully-resolved GNU basic asm lines (after "i" constraint substitution).
+    /// Used by kernel kbuild `DEFINE(sym, val)` → `.ascii "->sym val ..."`.
+    Asm { lines: Vec<String> },
 }
 
 #[derive(Debug, Clone)]

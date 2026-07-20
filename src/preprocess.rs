@@ -14,14 +14,16 @@ pub fn preprocess(src: &str) -> Result<String, String> {
 }
 
 pub fn preprocess_with_dir(src: &str, include_dir: Option<&std::path::Path>) -> Result<String, String> {
-    preprocess_with_options(src, include_dir, /*for_linux*/ false, "<input>")
+    preprocess_with_options(src, include_dir, &[], /*for_linux*/ false, "<input>")
 }
 
 /// `for_linux`: omit Darwin-only predefined macros so headers skip Apple blocks.
 /// `source_name`: path/name used for `__FILE__` expansion at the primary translation unit.
+/// `extra_includes`: additional `-I` directories searched for `#include "..."/`#include <...>`.
 pub fn preprocess_with_options(
     src: &str,
     include_dir: Option<&std::path::Path>,
+    extra_includes: &[&std::path::Path],
     for_linux: bool,
     source_name: &str,
 ) -> Result<String, String> {
@@ -339,6 +341,10 @@ pub fn preprocess_with_options(
     macros.insert("__STDC__".into(), MacroBody::Object("1".into()));
     macros.insert("__STDC_HOSTED__".into(), MacroBody::Object("1".into()));
     macros.insert("__STDC_VERSION__".into(), MacroBody::Object("201112L".into()));
+    // Pretend GCC enough for Linux/kernel header guards (Kconfig already saw real gcc -E).
+    macros.insert("__GNUC__".into(), MacroBody::Object("13".into()));
+    macros.insert("__GNUC_MINOR__".into(), MacroBody::Object("0".into()));
+    macros.insert("__GNUC_PATCHLEVEL__".into(), MacroBody::Object("0".into()));
     if !for_linux {
         macros.insert("__APPLE__".into(), MacroBody::Object("1".into()));
         macros.insert("__MACH__".into(), MacroBody::Object("1".into()));
@@ -491,7 +497,15 @@ pub fn preprocess_with_options(
          {pthread_stubs}"
     );
     let mut out = out_prefix;
-    preprocess_into(src, include_dir, &mut macros, &mut out, true, source_name)?;
+    preprocess_into(
+        src,
+        include_dir,
+        extra_includes,
+        &mut macros,
+        &mut out,
+        true,
+        source_name,
+    )?;
     Ok(out)
 }
 
@@ -537,6 +551,7 @@ fn expand_dynamic_predef(id: &str, line: usize, file: &str) -> Option<String> {
 fn preprocess_into(
     src: &str,
     include_dir: Option<&std::path::Path>,
+    extra_includes: &[&std::path::Path],
     macros: &mut HashMap<String, MacroBody>,
     out: &mut String,
     emit_body: bool,
@@ -565,26 +580,82 @@ fn preprocess_into(
                     continue;
                 }
                 let rest = dir["include".len()..].trim();
+                let mut found: Option<std::path::PathBuf> = None;
                 if let Some(path) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-                    if let Some(base) = include_dir {
-                        let full = base.join(path);
-                        let inc = std::fs::read_to_string(&full).map_err(|e| {
-                            format!("#include \"{path}\" read {}: {e}", full.display())
-                        })?;
-                        // Nested include shares macro table (critical for SQLITE_OK etc.)
-                        let inc_name = full.to_string_lossy();
-                        preprocess_into(
-                            &inc,
-                            include_dir,
-                            macros,
-                            out,
-                            emit_body,
-                            inc_name.as_ref(),
-                        )?;
-                        out.push('\n');
+                    // "quote" include: absolute / CWD path first (gcc -include),
+                    // then input dir, then -I paths.
+                    let as_path = std::path::Path::new(path);
+                    if as_path.is_file() {
+                        found = Some(as_path.to_path_buf());
+                    }
+                    if found.is_none() {
+                        if let Some(base) = include_dir {
+                            let full = base.join(path);
+                            if full.is_file() {
+                                found = Some(full);
+                            }
+                        }
+                    }
+                    if found.is_none() {
+                        for dir in extra_includes {
+                            let full = dir.join(path);
+                            if full.is_file() {
+                                found = Some(full);
+                                break;
+                            }
+                        }
+                    }
+                    if found.is_none() {
+                        return Err(format!("#include \"{path}\" not found"));
+                    }
+                } else if let Some(path) = rest.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+                    // <angle> include: -I paths first, then input dir, then CWD
+                    for dir in extra_includes {
+                        let full = dir.join(path);
+                        if full.is_file() {
+                            found = Some(full);
+                            break;
+                        }
+                    }
+                    if found.is_none() {
+                        if let Some(base) = include_dir {
+                            let full = base.join(path);
+                            if full.is_file() {
+                                found = Some(full);
+                            }
+                        }
+                    }
+                    if found.is_none() {
+                        let as_path = std::path::Path::new(path);
+                        if as_path.is_file() {
+                            found = Some(as_path.to_path_buf());
+                        }
+                    }
+                    // Missing system headers: skip silently (legacy stub behavior)
+                    // unless -I made it look like a project header under linux/.
+                    if found.is_none() {
+                        continue;
                     }
                 }
-                // <...> system headers ignored
+                if let Some(full) = found {
+                    let inc = std::fs::read_to_string(&full).map_err(|e| {
+                        format!("#include read {}: {e}", full.display())
+                    })?;
+                    // Nested include shares macro table (critical for SQLITE_OK etc.)
+                    let inc_name = full.to_string_lossy();
+                    // Nested files search from their own directory too
+                    let nested_dir = full.parent();
+                    preprocess_into(
+                        &inc,
+                        nested_dir.or(include_dir),
+                        extra_includes,
+                        macros,
+                        out,
+                        emit_body,
+                        inc_name.as_ref(),
+                    )?;
+                    out.push('\n');
+                }
                 continue;
             }
             if dir.starts_with("define") {
@@ -1064,6 +1135,17 @@ fn expand_pp_tokens(
     line_no: usize,
     source_name: &str,
 ) -> Result<String, String> {
+    expand_pp_tokens_disabled(s, macros, depth, line_no, source_name, &std::collections::HashSet::new())
+}
+
+fn expand_pp_tokens_disabled(
+    s: &str,
+    macros: &HashMap<String, MacroBody>,
+    depth: usize,
+    line_no: usize,
+    source_name: &str,
+    disabled: &std::collections::HashSet<String>,
+) -> Result<String, String> {
     if depth > 64 {
         return Ok(s.to_string());
     }
@@ -1088,8 +1170,21 @@ fn expand_pp_tokens(
                 out.push_str(&dyn_exp);
                 continue;
             }
+            if disabled.contains(id) {
+                out.push('0'); // painted macro in #if → treat as non-defined number path
+                continue;
+            }
             if let Some(MacroBody::Object(body)) = macros.get(id) {
-                out.push_str(&expand_pp_tokens(body, macros, depth + 1, line_no, source_name)?);
+                let mut d2 = disabled.clone();
+                d2.insert(id.to_string());
+                out.push_str(&expand_pp_tokens_disabled(
+                    body,
+                    macros,
+                    depth + 1,
+                    line_no,
+                    source_name,
+                    &d2,
+                )?);
             } else {
                 // unknown id in #if → 0
                 out.push('0');
@@ -1245,7 +1340,8 @@ fn expand_line(
     line_no: usize,
     source_name: &str,
 ) -> Result<String, String> {
-    expand_macros_in_text(line, macros, 0, line_no, source_name)
+    let disabled = std::collections::HashSet::new();
+    expand_macros_in_text(line, macros, 0, line_no, source_name, &disabled)
 }
 
 fn body_needs_reexpand(body: &str) -> bool {
@@ -1259,6 +1355,7 @@ fn expand_macros_in_text(
     depth: usize,
     line_no: usize,
     source_name: &str,
+    disabled: &std::collections::HashSet<String>,
 ) -> Result<String, String> {
     // Cap recursion: sqlite has deep macro chains; exponential blowup must stop early.
     if depth > 24 {
@@ -1299,6 +1396,12 @@ fn expand_macros_in_text(
                 out.push_str(&dyn_exp);
                 continue;
             }
+            // ISO C: a macro is not re-expanded while its own expansion is in progress
+            // ("blue paint"). Critical for kernel `#define inline inline __attribute__(...)`.
+            if disabled.contains(id) {
+                out.push_str(id);
+                continue;
+            }
             if let Some(m) = macros.get(id) {
                 match m {
                     MacroBody::Object(body) => {
@@ -1309,8 +1412,16 @@ fn expand_macros_in_text(
                         } else if body == id {
                             out.push_str(id);
                         } else {
-                            let exp =
-                                expand_macros_in_text(body, macros, depth + 1, line_no, source_name)?;
+                            let mut d2 = disabled.clone();
+                            d2.insert(id.to_string());
+                            let exp = expand_macros_in_text(
+                                body,
+                                macros,
+                                depth + 1,
+                                line_no,
+                                source_name,
+                                &d2,
+                            )?;
                             out.push_str(&exp);
                         }
                     }
@@ -1333,6 +1444,7 @@ fn expand_macros_in_text(
                         let (args, new_j) = parse_macro_args(text, j)?;
                         i = new_j;
                         // Expand args before substitution unless # or ## (cheap scan once).
+                        // Args use the caller's disabled set (not painted for this macro).
                         let body_has_hash = body.as_bytes().contains(&b'#');
                         let mut exp_args = Vec::with_capacity(args.len());
                         for a in &args {
@@ -1345,6 +1457,7 @@ fn expand_macros_in_text(
                                     depth + 1,
                                     line_no,
                                     source_name,
+                                    disabled,
                                 )?);
                             }
                         }
@@ -1353,11 +1466,20 @@ fn expand_macros_in_text(
                             exp_args.push(String::new());
                         }
                         let replaced = substitute_macro(params, *variadic, body, &exp_args)?;
-                        // Rescan substitution with following text so that
-                        // CAT(A,B)(x) → AB(x) → expands AB as a function macro.
-                        // (ISO C: macro replacement list is re-examined for more macros.)
-                        // Insert a space when gluing would merge tokens (X()2 → 1 2, not 12).
-                        let mut combined = replaced;
+                        // Rescan replacement with this macro disabled (no self-recursion).
+                        let mut d2 = disabled.clone();
+                        d2.insert(id.to_string());
+                        let exp_repl = expand_macros_in_text(
+                            &replaced,
+                            macros,
+                            depth + 1,
+                            line_no,
+                            source_name,
+                            &d2,
+                        )?;
+                        // Rescan with following text so CAT(A,B)(x) → AB(x) still works.
+                        // Following source tokens are NOT painted blue for this macro.
+                        let mut combined = exp_repl;
                         if needs_rescan_sep(&combined, &text[i..]) {
                             combined.push(' ');
                         }
@@ -1368,6 +1490,7 @@ fn expand_macros_in_text(
                             depth + 1,
                             line_no,
                             source_name,
+                            disabled,
                         )?;
                         out.push_str(&exp);
                         return Ok(out);
@@ -1642,7 +1765,7 @@ int main(void){int xy=42; return CAT(A,B)(x);}\n";
     fn line_and_file_expand() {
         // Line 1: #define ...  Line 2: empty  Line 3: int x = __LINE__;
         let s = "#define BKPT err(__LINE__)\nint x = __LINE__;\nint y = BKPT;\nconst char *f = __FILE__;\n";
-        let o = preprocess_with_options(s, None, false, "unit.c").unwrap();
+        let o = preprocess_with_options(s, None, &[], false, "unit.c").unwrap();
         assert!(
             o.contains("int x = 2;") || o.contains("int x = 2"),
             "direct __LINE__ not expanded: {o}"
@@ -1666,7 +1789,7 @@ int main(void){int xy=42; return CAT(A,B)(x);}\n";
     #[test]
     fn line_defined_in_if() {
         let s = "#if defined(__LINE__)\nint ok;\n#endif\n#if !defined(__FILE__)\nint bad;\n#endif\n";
-        let o = preprocess_with_options(s, None, false, "t.c").unwrap();
+        let o = preprocess_with_options(s, None, &[], false, "t.c").unwrap();
         assert!(o.contains("int ok"), "defined(__LINE__) should be true: {o}");
         assert!(!o.contains("int bad"), "defined(__FILE__) should be true: {o}");
     }

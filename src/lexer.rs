@@ -104,8 +104,9 @@ impl<'a> Lexer<'a> {
             "union" => TokenKind::Union,
             "typedef" => TokenKind::Typedef,
             "enum" => TokenKind::Enum,
-            "unsigned" => TokenKind::Unsigned,
-            "signed" => TokenKind::Signed,
+            // GNU C aliases used heavily by Linux uapi/compiler headers
+            "unsigned" | "__unsigned" | "__unsigned__" => TokenKind::Unsigned,
+            "signed" | "__signed" | "__signed__" => TokenKind::Signed,
             "static" => TokenKind::Static,
             "extern" => TokenKind::Extern,
             "register" => TokenKind::Register,
@@ -116,8 +117,8 @@ impl<'a> Lexer<'a> {
             "__restrict" => TokenKind::Restrict,
             "__restrict__" => TokenKind::Restrict,
             "auto" => TokenKind::Auto,
-            "const" => TokenKind::Const,
-            "volatile" => TokenKind::Volatile,
+            "const" | "__const" | "__const__" => TokenKind::Const,
+            "volatile" | "__volatile" | "__volatile__" => TokenKind::Volatile,
             "return" => TokenKind::Return,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
@@ -131,7 +132,9 @@ impl<'a> Lexer<'a> {
             "case" => TokenKind::Case,
             "default" => TokenKind::Default,
             "sizeof" => TokenKind::Sizeof,
-            "_Bool" | "bool" => TokenKind::Int, // treat as int for suite smoke
+            // `_Bool` is the C99 type keyword. Do NOT map `bool` — kernel headers
+            // (and C code) use `typedef _Bool bool;` so `bool` must stay an identifier.
+            "_Bool" => TokenKind::Int,
             // Mark GNU attributes as a special ident for next_token to erase.
             "__attribute__" | "__attribute" | "__extension__" => {
                 TokenKind::Ident(s.to_string())

@@ -1561,6 +1561,13 @@ impl Codegen {
     fn emit_stmt(&mut self, st: &Stmt, typedefs: &HashMap<String, Type>) -> Result<(), String> {
         match st {
             Stmt::Empty => Ok(()),
+            Stmt::Asm { lines } => {
+                // Emit resolved kbuild/GNU asm lines as raw assembly.
+                for line in lines {
+                    writeln!(self.out, "\t{line}").unwrap();
+                }
+                Ok(())
+            }
             Stmt::Block(ss) => {
                 for s in ss {
                     self.emit_stmt(s, typedefs)?;
