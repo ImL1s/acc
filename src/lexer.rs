@@ -97,6 +97,9 @@ impl<'a> Lexer<'a> {
             "void" => TokenKind::Void,
             "char" => TokenKind::Char,
             "long" => TokenKind::Long,
+            // GCC/Clang 128-bit integer; treat as long for parse/layout soft path
+            // (kernel uapi: typedef unsigned __int128 __u128).
+            "__int128" => TokenKind::Long,
             "short" => TokenKind::Short,
             "float" => TokenKind::Float,
             "double" => TokenKind::Double,

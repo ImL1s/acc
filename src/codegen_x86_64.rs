@@ -321,27 +321,33 @@ impl Codegen {
         }
         writeln!(self.out, "\t.p2align\t4, 0x90").unwrap();
 
+        // Unified symbol set: Func and Global must not both emit the same label
+        // (headers often declare `int f(void);` while .c defines `int f(void){...}`,
+        // and misparsed decls can also appear as zero-init globals).
+        let mut emitted_syms = std::collections::HashSet::new();
         for item in &prog.items {
             if let Item::Func(f) = item {
                 // Skip static function bodies except main: kernel headers inject
                 // thousands of static inlines; kbuild offset TUs only need main.
-                if f.body.is_some() && (!f.is_static || f.name == "main") {
+                if f.body.is_some()
+                    && (!f.is_static || f.name == "main")
+                    && emitted_syms.insert(f.name.clone())
+                {
                     self.emit_function(f, &typedefs)?;
                 }
             }
         }
 
-        let mut emitted_globals = std::collections::HashSet::new();
         for item in &prog.items {
             if let Item::Global(g) = item {
-                if g.init.is_some() && emitted_globals.insert(g.name.clone()) {
+                if g.init.is_some() && emitted_syms.insert(g.name.clone()) {
                     self.emit_global(g)?;
                 }
             }
         }
         for item in &prog.items {
             if let Item::Global(g) = item {
-                if emitted_globals.insert(g.name.clone()) {
+                if emitted_syms.insert(g.name.clone()) {
                     self.emit_global(g)?;
                 }
             }
@@ -1215,12 +1221,43 @@ impl Codegen {
                     let t = self.emit_expr_rval(base, regn, typedefs)?;
                     match t {
                         Type::Ptr(inner) => *inner,
+                        // Incomplete typing (e.g. typeof collapsed to Int): treat as
+                        // opaque pointer so kernel patterns like p->f still lower.
+                        Type::Int
+                        | Type::UInt
+                        | Type::Long
+                        | Type::ULong
+                        | Type::Short
+                        | Type::UShort
+                        | Type::Char
+                        | Type::Void => Type::Struct("__opaque__".into()),
                         other => return Err(format!("-> on non-pointer {:?}", other)),
                     }
                 } else {
                     self.emit_lvalue_addr(base, regn, typedefs)?
                 };
                 let lay = match &base_ty {
+                    Type::Struct(n) if n == "__opaque__" => {
+                        let mut found = None;
+                        for lay in self.layouts.values() {
+                            if lay.fields.contains_key(field) {
+                                found = Some(lay.clone());
+                                break;
+                            }
+                        }
+                        found.unwrap_or_else(|| {
+                            let mut fields = HashMap::new();
+                            fields.insert(
+                                field.clone(),
+                                (0, Type::Ptr(Box::new(Type::Void))),
+                            );
+                            Layout {
+                                size: 8,
+                                align: 8,
+                                fields,
+                            }
+                        })
+                    }
                     Type::Struct(n) | Type::Union(n) => self
                         .layouts
                         .get(n)
@@ -1228,13 +1265,35 @@ impl Codegen {
                         .ok_or_else(|| format!("unknown struct layout {n}"))?,
                     Type::AnonStruct(fs) => self.layout_fields(fs, false),
                     Type::AnonUnion(fs) => self.layout_fields(fs, true),
+                    // Incomplete typing: void*/void/int treated as opaque struct.
+                    Type::Ptr(_)
+                    | Type::Void
+                    | Type::Int
+                    | Type::UInt
+                    | Type::Long
+                    | Type::ULong
+                    | Type::Char
+                    | Type::Short
+                    | Type::UShort => {
+                        let mut fields = HashMap::new();
+                        fields.insert(
+                            field.clone(),
+                            (0, Type::Ptr(Box::new(Type::Void))),
+                        );
+                        Layout {
+                            size: 8,
+                            align: 8,
+                            fields,
+                        }
+                    }
                     other => return Err(format!("member of non-struct {:?}", other)),
                 };
-                let (off, fty) = lay
-                    .fields
-                    .get(field)
-                    .ok_or_else(|| format!("no field {field}"))?
-                    .clone();
+                let (off, fty) = if let Some(p) = lay.fields.get(field) {
+                    p.clone()
+                } else {
+                    // Soft: unknown field on opaque/incomplete type → offset 0 void*
+                    (0, Type::Ptr(Box::new(Type::Void)))
+                };
                 if off != 0 {
                     writeln!(self.out, "\taddq\t${off}, {}", reg(regn)).unwrap();
                 }

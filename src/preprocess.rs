@@ -20,12 +20,24 @@ pub fn preprocess_with_dir(src: &str, include_dir: Option<&std::path::Path>) -> 
 /// `for_linux`: omit Darwin-only predefined macros so headers skip Apple blocks.
 /// `source_name`: path/name used for `__FILE__` expansion at the primary translation unit.
 /// `extra_includes`: additional `-I` directories searched for `#include "..."/`#include <...>`.
+/// `arch`: `"x86_64"` | `"aarch64"` — selects arch predefined macros for kernel headers.
 pub fn preprocess_with_options(
     src: &str,
     include_dir: Option<&std::path::Path>,
     extra_includes: &[&std::path::Path],
     for_linux: bool,
     source_name: &str,
+) -> Result<String, String> {
+    preprocess_with_options_arch(src, include_dir, extra_includes, for_linux, source_name, "aarch64")
+}
+
+pub fn preprocess_with_options_arch(
+    src: &str,
+    include_dir: Option<&std::path::Path>,
+    extra_includes: &[&std::path::Path],
+    for_linux: bool,
+    source_name: &str,
+    arch: &str,
 ) -> Result<String, String> {
     let mut macros: HashMap<String, MacroBody> = HashMap::new();
     macros.insert("NULL".into(), MacroBody::Object("0".into()));
@@ -336,7 +348,23 @@ pub fn preprocess_with_options(
     // Predefined macros matching a 64-bit LP64 host
     macros.insert("__LP64__".into(), MacroBody::Object("1".into()));
     macros.insert("_LP64".into(), MacroBody::Object("1".into()));
-    macros.insert("__aarch64__".into(), MacroBody::Object("1".into()));
+    macros.insert("__SIZEOF_POINTER__".into(), MacroBody::Object("8".into()));
+    macros.insert("__SIZEOF_LONG__".into(), MacroBody::Object("8".into()));
+    // Kernel uapi/linux/types.h gates __u128 on this (cmpxchg128 etc.).
+    macros.insert("__SIZEOF_INT128__".into(), MacroBody::Object("16".into()));
+    // Arch predefined macros — must match codegen target (x86 kernel ≠ aarch64).
+    match arch {
+        "x86_64" | "x86" | "amd64" => {
+            macros.insert("__x86_64__".into(), MacroBody::Object("1".into()));
+            macros.insert("__x86_64".into(), MacroBody::Object("1".into()));
+            macros.insert("__amd64__".into(), MacroBody::Object("1".into()));
+            macros.insert("__amd64".into(), MacroBody::Object("1".into()));
+        }
+        _ => {
+            macros.insert("__aarch64__".into(), MacroBody::Object("1".into()));
+            macros.insert("__ARM_64BIT_STATE".into(), MacroBody::Object("1".into()));
+        }
+    }
     // ISO C required static predefined macros (__LINE__/__FILE__ are dynamic specials).
     macros.insert("__STDC__".into(), MacroBody::Object("1".into()));
     macros.insert("__STDC_HOSTED__".into(), MacroBody::Object("1".into()));

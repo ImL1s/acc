@@ -63,12 +63,17 @@ pub fn compile(opts: &CompileOptions) -> Result<(), String> {
         prefixed.push_str(&format!("#include \"{}\"\n", abs.display()));
     }
     prefixed.push_str(&src);
-    let src = crate::preprocess::preprocess_with_options(
+    let arch = match opts.target {
+        Target::X86_64 => "x86_64",
+        Target::Aarch64 => "aarch64",
+    };
+    let src = crate::preprocess::preprocess_with_options_arch(
         &prefixed,
         inc_dir,
         &extra,
         for_linux,
         source_name,
+        arch,
     )?;
     if let Some(path) = std::env::var_os("GGCC_DUMP_PP") {
         let _ = fs::write(&path, &src);

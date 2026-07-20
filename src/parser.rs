@@ -697,6 +697,42 @@ impl Parser {
                 if self.eat(TokenKind::LBrace) {
                     let mut next_val = 0i64;
                     while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        if self.eat(TokenKind::Comma) {
+                            continue;
+                        }
+                        // PP may expand enumerator names that were also #define'd:
+                        // `enum sock_type { SOCK_STREAM = 1 }` → `{ 1 = 1 }`.
+                        if matches!(
+                            self.peek_kind(),
+                            TokenKind::IntLit(_) | TokenKind::CharLit(_)
+                        ) {
+                            if let TokenKind::IntLit(n) = self.peek_kind().clone() {
+                                self.bump();
+                                next_val = n;
+                            } else if let TokenKind::CharLit(n) = self.peek_kind().clone() {
+                                self.bump();
+                                next_val = n;
+                            }
+                            if self.eat(TokenKind::Assign) {
+                                let e = self.parse_assign()?;
+                                if let Some(v) = self.eval_enum_const(&e) {
+                                    next_val = v;
+                                }
+                            }
+                            next_val += 1;
+                            if self.eat(TokenKind::Comma) {
+                                continue;
+                            }
+                            if matches!(
+                                self.peek_kind(),
+                                TokenKind::Ident(_)
+                                    | TokenKind::IntLit(_)
+                                    | TokenKind::CharLit(_)
+                            ) {
+                                continue;
+                            }
+                            break;
+                        }
                         if let TokenKind::Ident(id) = self.peek_kind().clone() {
                             self.bump();
                             // Residue function-like macro not expanded by PP, e.g.
@@ -720,13 +756,18 @@ impl Parser {
                                 is_static: false,
                             });
                             next_val += 1;
+                        } else {
+                            break;
                         }
                         if self.eat(TokenKind::Comma) {
                             continue;
                         }
                         // Unexpanded macro residues may omit commas between
                         // `__BPF_ENUM_FN(a,1,) __BPF_ENUM_FN(b,2,)` entries.
-                        if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+                        if matches!(
+                            self.peek_kind(),
+                            TokenKind::Ident(_) | TokenKind::IntLit(_) | TokenKind::CharLit(_)
+                        ) {
                             continue;
                         }
                         break;
@@ -793,11 +834,51 @@ impl Parser {
         let mut items = Vec::new();
         let mut next_val = 0i64;
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            // Skip empty slots / extra commas.
+            if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            // PP may expand enumerator names that were also #define'd:
+            // `enum sock_type { SOCK_STREAM = 1 }` → `{ 1 = 1 }` after PP.
+            // Accept IntLit / CharLit as nameless enumerators and keep counting.
+            if matches!(
+                self.peek_kind(),
+                TokenKind::IntLit(_) | TokenKind::CharLit(_)
+            ) {
+                if let TokenKind::IntLit(n) = self.peek_kind().clone() {
+                    self.bump();
+                    next_val = n;
+                } else if let TokenKind::CharLit(n) = self.peek_kind().clone() {
+                    self.bump();
+                    next_val = n;
+                }
+                if self.eat(TokenKind::Assign) {
+                    let e = self.parse_assign()?;
+                    if let Some(v) = self.eval_enum_const(&e) {
+                        next_val = v;
+                    }
+                }
+                next_val += 1;
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+                if matches!(
+                    self.peek_kind(),
+                    TokenKind::Ident(_) | TokenKind::IntLit(_) | TokenKind::CharLit(_)
+                ) {
+                    continue;
+                }
+                break;
+            }
             let id = if let TokenKind::Ident(s) = self.peek_kind().clone() {
                 self.bump();
                 s
             } else {
-                return Err("enum enumerator name expected".into());
+                return Err(format!(
+                    "enum enumerator name expected at {}:{}",
+                    self.peek().line,
+                    self.peek().col
+                ));
             };
             // Unexpanded function-like macro residue: `NAME(args)`
             if self.at(&TokenKind::LParen) {
@@ -822,7 +903,10 @@ impl Parser {
                 continue;
             }
             // Unexpanded macro residues may omit commas between entries.
-            if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            if matches!(
+                self.peek_kind(),
+                TokenKind::Ident(_) | TokenKind::IntLit(_) | TokenKind::CharLit(_)
+            ) {
                 continue;
             }
             break;
@@ -1582,16 +1666,58 @@ impl Parser {
                     self.expect(TokenKind::Assign)?;
                     fields.push((Some(field), self.parse_initializer()?));
                 } else if self.eat(TokenKind::LBracket) {
-                    // designated array index [n] = expr
-                    let idx = if let TokenKind::IntLit(n) = self.peek_kind().clone() {
+                    // designated array index [n] = expr, [ENUM] = expr,
+                    // GNU range [lo ... hi] = expr
+                    let idx_str = if let TokenKind::IntLit(n) = self.peek_kind().clone() {
                         self.bump();
-                        n
+                        n.to_string()
+                    } else if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                        self.bump();
+                        // optional parenthesized form already handled by expr path
+                        if let Some(v) = self.enum_values.get(&s) {
+                            v.to_string()
+                        } else {
+                            // soft: unknown enumerator → 0
+                            "0".into()
+                        }
+                    } else if matches!(
+                        self.peek_kind(),
+                        TokenKind::LParen
+                            | TokenKind::Sizeof
+                            | TokenKind::Minus
+                            | TokenKind::Tilde
+                            | TokenKind::Bang
+                    ) {
+                        // constant expression index
+                        let e = self.parse_assign()?;
+                        self.eval_enum_const(&e)
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "0".into())
                     } else {
-                        return Err("array designator index".into());
+                        // soft: skip tokens until ] / ...
+                        while !self.at(&TokenKind::RBracket)
+                            && !self.at(&TokenKind::Ellipsis)
+                            && !self.at(&TokenKind::Eof)
+                        {
+                            self.bump();
+                        }
+                        "0".into()
                     };
+                    // GNU range designator [lo ... hi]
+                    if self.eat(TokenKind::Ellipsis) {
+                        // skip hi (int / enum / expr)
+                        if matches!(
+                            self.peek_kind(),
+                            TokenKind::IntLit(_) | TokenKind::Ident(_)
+                        ) {
+                            self.bump();
+                        } else if !self.at(&TokenKind::RBracket) {
+                            let _ = self.parse_assign();
+                        }
+                    }
                     self.expect(TokenKind::RBracket)?;
                     self.expect(TokenKind::Assign)?;
-                    fields.push((Some(idx.to_string()), self.parse_initializer()?));
+                    fields.push((Some(idx_str), self.parse_initializer()?));
                 } else {
                     fields.push((None, self.parse_initializer()?));
                 }

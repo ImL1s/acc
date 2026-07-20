@@ -726,29 +726,32 @@ impl Codegen {
         self.emit_text_section();
         writeln!(self.out, "\t.p2align\t2").unwrap();
 
+        // Unified symbol set so Func and Global never double-emit a label.
+        let mut emitted_syms = std::collections::HashSet::new();
         for item in &prog.items {
             if let Item::Func(f) = item {
                 // Skip static function bodies except main: kernel headers inject
                 // thousands of static inlines; kbuild offset TUs only need main.
-                if f.body.is_some() && (!f.is_static || f.name == "main") {
+                if f.body.is_some()
+                    && (!f.is_static || f.name == "main")
+                    && emitted_syms.insert(f.name.clone())
+                {
                     self.emit_function(f, &typedefs)?;
                 }
             }
         }
 
-        // Globals (dedupe by name: keep first with init, else first)
-        let mut emitted_globals = std::collections::HashSet::new();
-        // Prefer initialized definitions
+        // Globals (dedupe by name; skip if already emitted as Func)
         for item in &prog.items {
             if let Item::Global(g) = item {
-                if g.init.is_some() && emitted_globals.insert(g.name.clone()) {
+                if g.init.is_some() && emitted_syms.insert(g.name.clone()) {
                     self.emit_global(g)?;
                 }
             }
         }
         for item in &prog.items {
             if let Item::Global(g) = item {
-                if emitted_globals.insert(g.name.clone()) {
+                if emitted_syms.insert(g.name.clone()) {
                     self.emit_global(g)?;
                 }
             }
@@ -2365,6 +2368,31 @@ impl Codegen {
                         .ok_or_else(|| format!("unknown struct layout {n}"))?,
                     Type::AnonStruct(fs) => self.layout_fields(fs, false),
                     Type::AnonUnion(fs) => self.layout_fields(fs, true),
+                    // Incomplete typing: void*/void/int treated as opaque struct.
+                    Type::Ptr(_)
+                    | Type::Void
+                    | Type::Int
+                    | Type::UInt
+                    | Type::Long
+                    | Type::ULong
+                    | Type::Char
+                    | Type::Short
+                    | Type::UShort => {
+                        let mut fields = HashMap::new();
+                        fields.insert(
+                            field.clone(),
+                            FieldPlace {
+                                offset: 0,
+                                ty: Type::Ptr(Box::new(Type::Void)),
+                                bit: None,
+                            },
+                        );
+                        Layout {
+                            size: 8,
+                            align: 8,
+                            fields,
+                        }
+                    }
                     other => return Err(format!("member of non-struct {:?} .{}", other, field)),
                 };
                 let place = lay
