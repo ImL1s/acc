@@ -102,6 +102,10 @@ pub struct Codegen {
     func_name: String,
     pending_case_labs: std::collections::VecDeque<String>,
     os: TargetOs,
+    /// FP-relative offset of x0..x7 save area for the current variadic function (0 = none).
+    va_regsave_off: i64,
+    /// Number of fixed (named) integer/pointer params before `...`.
+    va_fixed_n: usize,
 }
 
 impl Codegen {
@@ -125,6 +129,8 @@ impl Codegen {
             func_name: String::new(),
             pending_case_labs: std::collections::VecDeque::new(),
             os,
+            va_regsave_off: 0,
+            va_fixed_n: 0,
         }
     }
 
@@ -917,10 +923,12 @@ impl Codegen {
         self.stack_size = 0;
         self.break_stack.clear();
         self.continue_stack.clear();
+        self.va_regsave_off = 0;
+        self.va_fixed_n = 0;
 
         let body = f.body.as_ref().unwrap();
 
-        // Measure total frame: params + locals (array params decay to pointers)
+        // Measure total frame: params + optional va_regsave + locals
         for (pname, pty) in &f.params {
             if pname.is_empty() {
                 continue;
@@ -931,6 +939,10 @@ impl Codegen {
             };
             let _ = self.alloc_local(pname, &pty);
         }
+        // Variadic: reserve 64 bytes for x0..x7 save (after params, before body locals).
+        if f.variadic {
+            self.stack_size = Self::align_up(self.stack_size, 16) + 64;
+        }
         let mut measure = self.locals.clone();
         let mut measure_size = self.stack_size;
         self.measure_stmts(body, &mut measure, &mut measure_size, typedefs);
@@ -939,6 +951,18 @@ impl Codegen {
         // Reset and emit for real
         self.locals.clear();
         self.stack_size = 0;
+
+        let mut fixed_gp = 0usize;
+        for (_, pty) in f.params.iter() {
+            let pty = match pty {
+                Type::Array(e, _) => Type::Ptr(e.clone()),
+                other => other.clone(),
+            };
+            if !matches!(pty, Type::Float | Type::Double) {
+                fixed_gp += 1;
+            }
+        }
+        self.va_fixed_n = if f.variadic { fixed_gp.min(8) } else { 0 };
 
         let sym = self.c_sym(&f.name);
         writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
@@ -954,13 +978,14 @@ impl Codegen {
             }
         }
 
+        // Allocate named params first (same order as measure).
+        let mut param_offs: Vec<(i64, Type, u8)> = Vec::new(); // off, ty, reg_or_255
         let mut igpr = 0u8;
         let mut fpr = 0u8;
         for (pname, pty) in f.params.iter() {
             if pname.is_empty() {
                 continue;
             }
-            // Array parameters decay to pointers.
             let pty = match pty {
                 Type::Array(e, _) => Type::Ptr(e.clone()),
                 other => other.clone(),
@@ -968,18 +993,53 @@ impl Codegen {
             let off = self.alloc_local(pname, &pty);
             if matches!(pty, Type::Float | Type::Double) {
                 if fpr < 8 {
-                    if matches!(pty, Type::Float) {
-                        // sN holds float; promote bits to d then store via store_ty
-                        writeln!(self.out, "\tfcvt\td{fpr}, s{fpr}").unwrap();
-                    }
-                    writeln!(self.out, "\tfmov\tx0, d{fpr}").unwrap();
-                    self.emit_fp_addr(off, 9);
-                    self.store_ty(&pty, 9, 0);
+                    param_offs.push((off, pty, 128 + fpr)); // mark float reg
                     fpr += 1;
                 }
             } else if igpr < 8 {
-                self.store_to_offset(off, &Type::Long, igpr);
+                param_offs.push((off, pty, igpr));
                 igpr += 1;
+            }
+        }
+
+        // Variadic: reserve save area, spill x0-x7, then materialize named params from it.
+        if f.variadic {
+            self.stack_size = Self::align_up(self.stack_size, 16) + 64;
+            self.va_regsave_off = -self.stack_size; // x0 at this offset
+            for r in 0u8..8 {
+                let off = self.va_regsave_off + (r as i64) * 8;
+                self.emit_fp_addr(off, 17);
+                writeln!(self.out, "\tstr\tx{r}, [x17]").unwrap();
+            }
+            for (off, pty, reg) in &param_offs {
+                if *reg < 8 {
+                    let save_off = self.va_regsave_off + (*reg as i64) * 8;
+                    self.emit_fp_addr(save_off, 17);
+                    writeln!(self.out, "\tldr\tx16, [x17]").unwrap();
+                    self.store_to_offset(*off, &Type::Long, 16);
+                } else if *reg >= 128 {
+                    let freg = *reg - 128;
+                    if matches!(pty, Type::Float) {
+                        writeln!(self.out, "\tfcvt\td{freg}, s{freg}").unwrap();
+                    }
+                    writeln!(self.out, "\tfmov\tx0, d{freg}").unwrap();
+                    self.emit_fp_addr(*off, 9);
+                    self.store_ty(pty, 9, 0);
+                }
+            }
+        } else {
+            for (off, pty, reg) in &param_offs {
+                if *reg < 8 {
+                    self.store_to_offset(*off, &Type::Long, *reg);
+                } else if *reg >= 128 {
+                    let freg = *reg - 128;
+                    if matches!(pty, Type::Float) {
+                        writeln!(self.out, "\tfcvt\td{freg}, s{freg}").unwrap();
+                    }
+                    writeln!(self.out, "\tfmov\tx0, d{freg}").unwrap();
+                    self.emit_fp_addr(*off, 9);
+                    self.store_ty(pty, 9, 0);
+                }
             }
         }
 
@@ -2192,6 +2252,44 @@ impl Codegen {
                 }
             }
             Expr::Assign { left, right } => {
+                // Probe left type first for aggregate copy.
+                let lty_probe = self.typeof_expr(left, typedefs);
+                let lsz = self.type_size(&lty_probe);
+                let is_agg = lsz > 8
+                    && matches!(
+                        lty_probe,
+                        Type::Struct(_)
+                            | Type::Union(_)
+                            | Type::AnonStruct(_)
+                            | Type::AnonUnion(_)
+                            | Type::Array(_, _)
+                    );
+                // Aggregate assign via memcpy when RHS is *p (common: *va_arg(...)).
+                if is_agg {
+                    if let Expr::Unary {
+                        op: UnaryOp::Deref,
+                        expr,
+                    } = right.as_ref()
+                    {
+                        // Prefer size of *expr type when known (avoids wrong Member sizes).
+                        let rty = self.typeof_expr(expr, typedefs);
+                        let copy_sz = match &rty {
+                            Type::Ptr(inner) => self.type_size(inner).max(1),
+                            _ => lsz,
+                        };
+                        self.emit_expr_rval(expr, 0, typedefs)?;
+                        writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                        let lty = self.emit_lvalue_addr(left, 9, typedefs)?;
+                        writeln!(self.out, "\tldr\tx1, [sp], #16").unwrap(); // src
+                        writeln!(self.out, "\tmov\tx0, x9").unwrap(); // dst
+                        self.emit_imm(copy_sz, 2);
+                        writeln!(self.out, "\tbl\t{}", self.c_sym("memcpy")).unwrap();
+                        if dest != 0 {
+                            writeln!(self.out, "\tmov\tx{dest}, x9").unwrap();
+                        }
+                        return Ok(lty);
+                    }
+                }
                 // Spill RHS to stack: PostInc/PostDec also use x12 as a temp.
                 let rty = self.emit_expr_rval(right, 0, typedefs)?;
                 writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
@@ -2293,6 +2391,40 @@ impl Codegen {
                 Ok(lty)
             }
             Expr::Call { name, args } => {
+                // Variadic intrinsics (from expanded va_start / va_arg macros).
+                if name == "__ggcc_va_start" {
+                    if self.va_regsave_off == 0 {
+                        return Err("va_start outside variadic function".into());
+                    }
+                    // Cursor = &regsave[fixed_n]
+                    let off = self.va_regsave_off + (self.va_fixed_n as i64) * 8;
+                    self.emit_fp_addr(off, dest);
+                    return Ok(Type::Ptr(Box::new(Type::Char)));
+                }
+                if name == "__ggcc_va_arg" {
+                    // args: &ap  (pointer to va_list / char*)
+                    // Returns the current cursor (for *(type*)cursor); advances ap by 8.
+                    if args.is_empty() {
+                        return Err("__ggcc_va_arg needs &ap".into());
+                    }
+                    let ap_lvalue = match &args[0] {
+                        Expr::Unary {
+                            op: UnaryOp::Addr,
+                            expr,
+                        } => expr.as_ref(),
+                        other => other,
+                    };
+                    self.emit_lvalue_addr(ap_lvalue, 9, typedefs)?;
+                    // x9 = &ap; x0 = ap (cursor to return)
+                    writeln!(self.out, "\tldr\tx0, [x9]").unwrap();
+                    // ap += 8
+                    writeln!(self.out, "\tadd\tx10, x0, #8").unwrap();
+                    writeln!(self.out, "\tstr\tx10, [x9]").unwrap();
+                    if dest != 0 {
+                        writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
+                    }
+                    return Ok(Type::Ptr(Box::new(Type::Void)));
+                }
                 if name == "__indirect__" {
                     if args.is_empty() {
                         return Err("indirect call missing callee".into());

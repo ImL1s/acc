@@ -25,6 +25,8 @@ pub struct Function {
     pub name: String,
     pub ret: Type,
     pub params: Vec<(String, Type)>,
+    /// True if the prototype ends with `...` (variadic).
+    pub variadic: bool,
     pub body: Option<Vec<Stmt>>, // None = declaration only
 }
 

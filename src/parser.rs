@@ -612,11 +612,13 @@ impl Parser {
         }
     }
 
-    /// Parse parameter list including leading '(' already consumed. Returns params.
-    fn parse_param_list_body(&mut self) -> Result<Vec<(String, Type)>, String> {
+    /// Parse parameter list including leading '(' already consumed.
+    /// Returns (params, is_variadic).
+    fn parse_param_list_body(&mut self) -> Result<(Vec<(String, Type)>, bool), String> {
         let mut params = Vec::new();
+        let mut variadic = false;
         if self.at(&TokenKind::RParen) {
-            return Ok(params);
+            return Ok((params, false));
         }
         let bare_void = self.at(&TokenKind::Void)
             && matches!(
@@ -625,10 +627,11 @@ impl Parser {
             );
         if bare_void {
             self.bump();
-            return Ok(params);
+            return Ok((params, false));
         }
         loop {
             if self.eat(TokenKind::Ellipsis) {
+                variadic = true;
                 break;
             }
             let pb = self.parse_type_specifier()?;
@@ -636,21 +639,22 @@ impl Parser {
             params.push((pn, pt));
             if self.eat(TokenKind::Comma) {
                 if self.eat(TokenKind::Ellipsis) {
+                    variadic = true;
                     break;
                 }
                 continue;
             }
             break;
         }
-        Ok(params)
+        Ok((params, variadic))
     }
 
     /// Parse declarator: pointers, name / nested (*name), arrays, function suffix.
-    /// Returns (name, type, outermost function params if this declarator is a function).
+    /// Returns (name, type, outermost function params + variadic if this is a function).
     fn parse_declarator(
         &mut self,
         base: Type,
-    ) -> Result<(String, Type, Option<Vec<(String, Type)>>), String> {
+    ) -> Result<(String, Type, Option<(Vec<(String, Type)>, bool)>), String> {
         let mut ty = base;
         while self.eat(TokenKind::Star) {
             // pointer qualifiers: *const / *volatile / *restrict
@@ -732,7 +736,7 @@ impl Parser {
         // - `(*name)(params)` → pointer-to-function variable (no func params)
         // - `(*name(params))(params2)` → function returning function pointer
         //   (params bubbled from inner; params2 is return type sugar)
-        let mut func_params: Option<Vec<(String, Type)>> = None;
+        let mut func_params: Option<(Vec<(String, Type)>, bool)> = None;
         if !nested && self.at(&TokenKind::LParen) {
             self.bump();
             let params = self.parse_param_list_body()?;
@@ -801,13 +805,14 @@ impl Parser {
                 self.peek().col
             ));
         }
-        if let Some(params) = func_params {
+        if let Some((params, variadic)) = func_params {
             // Function prototype or definition
             if self.eat(TokenKind::Semicolon) {
                 return Ok(vec![Item::Func(Function {
                     name,
                     ret: ty,
                     params,
+                    variadic,
                     body: None,
                 })]);
             }
@@ -817,6 +822,7 @@ impl Parser {
                     name,
                     ret: ty,
                     params,
+                    variadic,
                     body: Some(body),
                 })]);
             }
@@ -826,15 +832,17 @@ impl Parser {
                     name,
                     ret: ty.clone(),
                     params,
+                    variadic,
                     body: None,
                 })];
                 loop {
                     let (n2, t2, fp2) = self.parse_declarator(base.clone())?;
-                    if let Some(p2) = fp2 {
+                    if let Some((p2, v2)) = fp2 {
                         items.push(Item::Func(Function {
                             name: n2,
                             ret: base.clone(),
                             params: p2,
+                            variadic: v2,
                             body: None,
                         }));
                         let _ = t2;

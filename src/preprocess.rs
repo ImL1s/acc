@@ -347,12 +347,13 @@ pub fn preprocess_with_options(
         macros.insert("linux".into(), MacroBody::Object("1".into()));
         macros.insert("__linux".into(), MacroBody::Object("1".into()));
     }
-    // stdarg stubs — enough for parse/codegen of va_arg(ap, T) forms
+    // stdarg: expand to intrinsics handled in codegen (__ggcc_va_*).
+    // va_list is a char* cursor into the register-save area of a variadic fn.
     macros.insert(
         "va_start".into(),
         MacroBody::Function {
             params: vec!["ap".into(), "last".into()],
-            body: "((void)0)".into(),
+            body: "((void)(last), (ap) = __ggcc_va_start())".into(),
             variadic: false,
         },
     );
@@ -360,7 +361,8 @@ pub fn preprocess_with_options(
         "va_arg".into(),
         MacroBody::Function {
             params: vec!["ap".into(), "type".into()],
-            body: "(*(type*)(0))".into(),
+            // type is substituted textually (may include `*`).
+            body: "(*(type*)__ggcc_va_arg(&(ap)))".into(),
             variadic: false,
         },
     );
@@ -368,7 +370,7 @@ pub fn preprocess_with_options(
         "va_end".into(),
         MacroBody::Function {
             params: vec!["ap".into()],
-            body: "((void)0)".into(),
+            body: "((void)(ap))".into(),
             variadic: false,
         },
     );
@@ -376,7 +378,7 @@ pub fn preprocess_with_options(
         "va_copy".into(),
         MacroBody::Function {
             params: vec!["d".into(), "s".into()],
-            body: "((void)0)".into(),
+            body: "((d) = (s))".into(),
             variadic: false,
         },
     );
@@ -446,7 +448,7 @@ pub fn preprocess_with_options(
          typedef unsigned char uint8_t;\n\
          typedef signed char int8_t;\n\
          typedef unsigned long uint64_t;\n\
-         typedef void *va_list;\n\
+         typedef char *va_list;\n\
          /* errno: one definition via common symbol in codegen if needed */\n\
          extern int __ggcc_errno;\n\
          typedef long off_t;\n\
