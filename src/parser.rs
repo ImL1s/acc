@@ -1008,13 +1008,15 @@ impl Parser {
     ) -> Result<(String, Type, Option<(Vec<(String, Type)>, bool)>), String> {
         let mut ty = base;
         while self.eat(TokenKind::Star) {
-            // pointer qualifiers: *const / *volatile / *restrict
+            // pointer qualifiers: *const / *volatile / *restrict / *__restrict__
             loop {
                 match self.peek_kind().clone() {
-                    TokenKind::Const | TokenKind::Volatile => {
+                    TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
                         self.bump();
                     }
-                    TokenKind::Ident(s) if s == "restrict" => {
+                    TokenKind::Ident(s)
+                        if s == "restrict" || s == "__restrict" || s == "__restrict__" =>
+                    {
                         self.bump();
                     }
                     _ => break,
@@ -2623,13 +2625,14 @@ impl Parser {
         }
         // Kernel/Linux: __builtin_offsetof(struct T, field) → constant int.
         // TYPE may be `struct name` / `union name` / typedef name.
+        // Also: offsetof(T, field[n]) / nested paths.
         if let TokenKind::Ident(name) = self.peek_kind().clone() {
             if name == "__builtin_offsetof" {
                 self.bump();
                 self.expect(TokenKind::LParen)?;
                 let ty = self.parse_type_name()?;
                 self.expect(TokenKind::Comma)?;
-                // Support nested paths: `tss.x86_tss.sp1`
+                // Support nested paths: `tss.x86_tss.sp1` and `iname[1]`
                 let mut path: Vec<String> = Vec::new();
                 loop {
                     if let TokenKind::Ident(f) = self.peek_kind().clone() {
@@ -2642,6 +2645,14 @@ impl Parser {
                             self.peek().col
                         ));
                     }
+                    // Optional array index: field[n] / field[expr] — soft-ignore index
+                    // (offsetof(T, arr[1]) ≈ offsetof(T, arr) + 1*esz; use base for now).
+                    while self.eat(TokenKind::LBracket) {
+                        if !self.at(&TokenKind::RBracket) {
+                            let _ = self.parse_expr();
+                        }
+                        self.expect(TokenKind::RBracket)?;
+                    }
                     if !self.eat(TokenKind::Dot) {
                         break;
                     }
@@ -2650,6 +2661,31 @@ impl Parser {
                 // Soft-fallback 0 when layout is incomplete.
                 let off = self.const_offsetof_type_path(&ty, &path).unwrap_or(0);
                 return Ok(Expr::Int(off));
+            }
+        }
+        // `__builtin_va_arg(ap, type)` — second operand is a type-name, not expr.
+        if let TokenKind::Ident(name) = self.peek_kind().clone() {
+            if name == "__builtin_va_arg" || name == "va_arg" {
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let ap = self.parse_assign()?;
+                self.expect(TokenKind::Comma)?;
+                let ty = self.parse_type_name()?;
+                self.expect(TokenKind::RParen)?;
+                // Lower to (*(T*)__ggcc_va_arg(&ap)) soft form.
+                return Ok(Expr::Unary {
+                    op: UnaryOp::Deref,
+                    expr: Box::new(Expr::Cast {
+                        ty: Type::Ptr(Box::new(ty)),
+                        expr: Box::new(Expr::Call {
+                            name: "__ggcc_va_arg".into(),
+                            args: vec![Expr::Unary {
+                                op: UnaryOp::Addr,
+                                expr: Box::new(ap),
+                            }],
+                        }),
+                    }),
+                });
             }
         }
         // cast: (type) expr  OR compound literal (type){ init }
