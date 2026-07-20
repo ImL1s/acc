@@ -424,6 +424,34 @@ pub fn preprocess_with_options_arch(
         ] {
             macros.insert(q.into(), MacroBody::Object("".into()));
         }
+        // EXPORT_SYMBOL* expand to multi-line asm/section soup that our asm
+        // parser cannot consume; kbuild linking does not need them for .o
+        // generation under Stage C fail-drive (symbols stay global via .globl).
+        for exp in [
+            "EXPORT_SYMBOL",
+            "EXPORT_SYMBOL_GPL",
+            "EXPORT_SYMBOL_NS",
+            "EXPORT_SYMBOL_NS_GPL",
+            "EXPORT_SYMBOL_GPL_FUTURE",
+            "EXPORT_UNUSED_SYMBOL",
+            "EXPORT_UNUSED_SYMBOL_GPL",
+            "EXPORT_DATA_SYMBOL",
+            "EXPORT_DATA_SYMBOL_GPL",
+            "__EXPORT_SYMBOL",
+            "EXPORT_STATIC_CALL",
+            "EXPORT_STATIC_CALL_GPL",
+            "EXPORT_STATIC_CALL_TRAMP",
+            "EXPORT_STATIC_CALL_TRAMP_GPL",
+        ] {
+            macros.insert(
+                exp.into(),
+                MacroBody::Function {
+                    params: vec!["sym".into()],
+                    body: "/*export*/".into(),
+                    variadic: true,
+                },
+            );
+        }
     }
     // stdarg: expand to intrinsics handled in codegen (__ggcc_va_*).
     // va_list is a char* cursor into the register-save area of a variadic fn.
@@ -578,7 +606,94 @@ pub fn preprocess_with_options_arch(
         true,
         source_name,
     )?;
+    if for_linux {
+        out = strip_kernel_export_residue(&out);
+    }
     Ok(out)
+}
+
+/// Headers redefine EXPORT_SYMBOL* to asm soup our frontend cannot parse.
+/// After full PP, drop remaining call-like uses so TUs still emit .o for Stage C.
+fn strip_kernel_export_residue(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Match EXPORT_SYMBOL... identifier then balanced (...)
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let name = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            let is_export = matches!(
+                name,
+                "EXPORT_SYMBOL"
+                    | "EXPORT_SYMBOL_GPL"
+                    | "EXPORT_SYMBOL_NS"
+                    | "EXPORT_SYMBOL_NS_GPL"
+                    | "EXPORT_SYMBOL_GPL_FUTURE"
+                    | "EXPORT_UNUSED_SYMBOL"
+                    | "EXPORT_UNUSED_SYMBOL_GPL"
+                    | "EXPORT_DATA_SYMBOL"
+                    | "EXPORT_DATA_SYMBOL_GPL"
+                    | "__EXPORT_SYMBOL"
+                    | "EXPORT_STATIC_CALL"
+                    | "EXPORT_STATIC_CALL_GPL"
+                    | "EXPORT_STATIC_CALL_TRAMP"
+                    | "EXPORT_STATIC_CALL_TRAMP_GPL"
+            );
+            if is_export {
+                // skip whitespace
+                while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b'(' {
+                    // skip balanced parens
+                    let mut depth = 0i32;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                i += 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                continue;
+                            }
+                            b'"' => {
+                                i += 1;
+                                while i < bytes.len() && bytes[i] != b'"' {
+                                    if bytes[i] == b'\\' {
+                                        i += 1;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    // optional trailing semicolon
+                    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                        i += 1;
+                    }
+                    if i < bytes.len() && bytes[i] == b';' {
+                        i += 1;
+                    }
+                    out.push_str("/*export*/ ");
+                    continue;
+                }
+            }
+            out.push_str(name);
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// Dynamic special macros that depend on expansion site (not stored in the table).
