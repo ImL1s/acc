@@ -1504,6 +1504,13 @@ impl Codegen {
                 }
                 self.measure_stmt(body, locals, stack, typedefs);
             }
+            // SQLite VdbeExec is a giant switch with many case-local decls;
+            // skipping these under-counted the frame (e.g. 400B) while emit
+            // used offsets past -800 → stack smash / Btree* = 0x8.
+            Stmt::Switch { body, .. } => self.measure_stmt(body, locals, stack, typedefs),
+            Stmt::Case { body, .. } | Stmt::Default(body) => {
+                self.measure_stmt(body, locals, stack, typedefs)
+            }
             _ => {}
         }
     }
