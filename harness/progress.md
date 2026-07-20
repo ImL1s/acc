@@ -5,39 +5,31 @@
 | Gate | Status |
 |------|--------|
 | C3 multiarch | PASS |
-| C5 double-run | PASS (stale — re-run after C2) |
+| C5 double-run | PASS (stale) |
 | C4 clean-room | held |
 | **C2** | **BLOCKED** |
 | **C1** | **BLOCKED** |
 
-### C2 smoke ladder (Docker Linux, ggcc-produced .s only)
+### C2 smoke ladder (Docker Linux, ggcc .s only)
 | Step | Result |
 |------|--------|
-| amalgamation → asm → link | PASS |
-| libversion | **PASS** `3.45.3` |
-| initialize | **PASS** |
-| open `:memory:` | **PASS** |
-| close | **PASS** |
-| exec `""` | **PASS** |
-| exec `";"` | **PASS** `rc=0` |
-| exec `SELECT 1` | **FAIL** `rc=20` SQLITE_MISMATCH (datatype mismatch) — no SIGSEGV |
-| CREATE/INSERT | **FAIL** schema/rootpage / later SEGV |
+| amalgamation link | PASS |
+| libversion / init / open / close | PASS |
+| exec `""` / `";"` | **PASS** |
+| exec `SELECT 1` | **FAIL** rc=20 SQLITE_MISMATCH |
+| CREATE/INSERT | FAIL (schema) |
 
-### Key fixes landed (this session + prior)
-- Multi-pass `collect_layouts` (YYMINORTYPE size)
-- AAPCS64 small struct ABI (Token ≤16B in 2 GPRs)
-- `signed char` → `Type::SChar` + `ldrsb x`
-- **`.hword` for 2-byte static data** (lemon `yy_action`/`yy_lookahead` were `.long` → wrong shift/reduce → ExprDelete crash)
+### Root causes fixed this session
+1. `.hword` for `unsigned short` static tables (lemon yy_*)
+2. multipass struct layout; Token 16B ABI; `signed char` / `ldrsb x`
+3. **Bitfield packing** (layout + access)
 
-### Evidence
-- `{SCRATCH}/stage_c_projects.log` updated with post-hword ladder
-- GDB: after hword, only 2 `sqlite3Parser` calls (SEMI+EOF); no parser SEGV
-
-### Next
-1. Fix VDBE path so `SELECT 1` returns rows (MEM_Int / affinity / MustBeInt)
-2. CREATE TABLE + INSERT + SELECT round-trip
-3. Full SQLite tests or Redis; C1 kernel; C5 re-run
+### SELECT 1 diagnosis (open)
+- prepare succeeds; EXPLAIN shows **wrong bytecode**:
+  `Null; MustBeInt; IfNot; Integer; ResultRow; DecrJumpZero`  
+  vs correct `Integer; ResultRow; Halt`
+- Looks like limit-register path runs despite `SelectNew` getting `pLimit=NULL`
+- Next: why `p->pLimit` is non-NULL by `computeLimitRegisters`
 
 ### blocked_reason
-C2: SQL parser no longer crashes; `SELECT 1` still SQLITE_MISMATCH — not full-project green.  
-C1: no boot proof.
+C2: parser no longer crashes; SELECT 1 still wrong VDBE (MISMATCH). C1: no boot.
