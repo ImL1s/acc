@@ -8,27 +8,37 @@
 | **C5** double-run | **PASS** 207/207 identical (held) |
 | C4 clean-room | held |
 | **C2** | SQLite amalgamation smoke PASS; no testfixture |
-| **C1** | **PROGRESS** — prepare + many TUs green on amd64; no bzImage yet |
+| **C1** | **PROGRESS** — ~165 kernel .o on amd64; no bzImage/QEMU |
 
-### C1 Linux 6.9 (Docker `--platform linux/amd64`, image `ggcc-linux-amd64`)
+### C1 Linux 6.9 (Docker `ggcc-linux-amd64`)
 
-**Green (recent):**
-- prepare0 (bounds/asm-offsets/devicetable-offsets) rebuildable
-- `init/main.o`, `init/do_mounts.o`, `arch/x86/entry/vdso/vma.o`
-- `mm/mempool.o`, `drivers/base/core.o`
-- enum IntLit enumerators (`SOCK_STREAM` → `1=1` after PP)
-- soft `->` / member on incomplete types (Int/Void/void*)
-- `__int128` / `__SIZEOF_INT128__` + arch macros (`__x86_64__` for -m x86_64)
-- Func/Global symbol dedupe (no double `.globl`)
-- array designators: enum index + GNU `[lo ... hi]`
+**Green (evidence):**
+- prepare0 rebuildable (bounds/asm-offsets/devicetable-offsets)
+- init: main.o, do_mounts.o, calibrate.o, noinitramfs.o
+- vdso: vma.o
+- mm: mempool.o, filemap.o
+- lib: string.o, vsprintf.o, hexdump.o (+ many more)
+- drivers/base: core.o + built-in.a
+- ~165 non-tools `.o` objects mid-tree
 
-**Still failing (fail-drive):**
-- various TUs: `expected type`, lvalue, too many indirect args, etc.
-- **no** `bzImage` / QEMU boot yet
+**Language fixes landed this session (commits):**
+- enum IntLit enumerators after PP (`1=1`)
+- soft `->`/member on Int/Void/void*
+- `__int128` + `__SIZEOF_INT128__` + arch predefs (`__x86_64__`)
+- Func/Global symbol dedupe
+- `__restrict__` pointer quals
+- `__builtin_va_arg` / offsetof(`field[n]`)
+- indirect calls >6 SysV args
+- kernel `__user`/`__rcu`/… empty markers
 
-**Platform:** Host Docker default is aarch64; use `ggcc-linux-amd64` for x86_64 kernel.
+**Still failing (sample):**
+- fs/namei.o, fs/exec.o — expected type on huge PP lines
+- kernel/sched/*.o — expected type
+- arch/x86/entry/vdso/extable.o, events/*.o
+- residual asm local labels (`1:`) on some TUs
+- **no** bzImage / QEMU
 
 ### blocked_reason
-C1: more kernel TUs after do_mounts/vdso; no bootable image.  
+C1: dozens more TUs after ~165 objects; no boot.  
 C2: testfixture/Redis not run.  
 **Goal NOT complete.**
