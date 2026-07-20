@@ -788,15 +788,75 @@ fn preprocess_into(
         let line_no = i;
 
         // Join physical lines until macro-arg parentheses balance (C allows
-        // multi-line invocations without backslash).
+        // multi-line invocations without backslash). Kernel `struct_group(...)`
+        // spans `#ifdef` blocks; process those directives instead of stopping.
         let mut logical = trimmed.to_string();
         while paren_balance_outside_strings(&logical) > 0 && i < lines.len() {
-            let next = strip_line_comment_keep_string(lines[i]).trim().to_string();
+            let next_raw = strip_line_comment_keep_string(lines[i]);
+            let next = next_raw.trim().to_string();
             i += 1;
             if next.starts_with('#') {
-                // directive mid-invocation — stop joining
-                i -= 1;
-                break;
+                // Apply conditional directives so later members of the still-open
+                // invocation are correctly included/excluded.
+                let dir = next.trim_start_matches('#').trim_start();
+                if dir.starts_with("ifdef") {
+                    let name = dir["ifdef".len()..].trim();
+                    let parent = is_active(&cond_stack);
+                    let cur = parent && macro_is_defined(name, macros);
+                    cond_stack.push(CondFrame {
+                        parent_active: parent,
+                        branch_taken: cur,
+                        active: cur,
+                    });
+                } else if dir.starts_with("ifndef") {
+                    let name = dir["ifndef".len()..].trim();
+                    let parent = is_active(&cond_stack);
+                    let cur = parent && !macro_is_defined(name, macros);
+                    cond_stack.push(CondFrame {
+                        parent_active: parent,
+                        branch_taken: cur,
+                        active: cur,
+                    });
+                } else if dir.starts_with("if")
+                    && !dir.starts_with("ifdef")
+                    && !dir.starts_with("ifndef")
+                {
+                    let expr = dir["if".len()..].trim();
+                    let parent = is_active(&cond_stack);
+                    let v = eval_pp_expr(expr, macros, line_no, source_name).unwrap_or(0);
+                    let cur = parent && v != 0;
+                    cond_stack.push(CondFrame {
+                        parent_active: parent,
+                        branch_taken: cur,
+                        active: cur,
+                    });
+                } else if dir.starts_with("elif") {
+                    if let Some(frame) = cond_stack.last_mut() {
+                        if frame.branch_taken {
+                            frame.active = false;
+                        } else {
+                            let expr = dir["elif".len()..].trim();
+                            let v =
+                                eval_pp_expr(expr, macros, line_no, source_name).unwrap_or(0);
+                            let cur = frame.parent_active && v != 0;
+                            frame.branch_taken = cur;
+                            frame.active = cur;
+                        }
+                    }
+                } else if dir.starts_with("else") {
+                    if let Some(frame) = cond_stack.last_mut() {
+                        let cur = frame.parent_active && !frame.branch_taken;
+                        frame.branch_taken = frame.branch_taken || cur;
+                        frame.active = cur;
+                    }
+                } else if dir.starts_with("endif") {
+                    cond_stack.pop();
+                }
+                // Other directives mid-arg: ignore
+                continue;
+            }
+            if !is_active(&cond_stack) {
+                continue;
             }
             logical.push(' ');
             logical.push_str(&next);
@@ -1584,6 +1644,12 @@ fn parse_macro_args(text: &str, mut i: usize) -> Result<(Vec<String>, usize), St
         }
         cur.push(c);
         i += 1;
+    }
+    // Soft recovery: kernel headers sometimes leave multi-line / nested
+    // invocations that our line-joiner misses. Treat EOF as closing `)`.
+    if !cur.is_empty() || !args.is_empty() {
+        args.push(cur.trim().to_string());
+        return Ok((args, i));
     }
     Err("unterminated macro args".into())
 }

@@ -1694,19 +1694,52 @@ impl Codegen {
                     return Ok(Type::Int);
                 }
 
-                // SysV: integer args in rdi,rsi,rdx,rcx,r8,r9 (incl. variadic).
-                if args.len() > 6 {
-                    return Err("too many args (x86_64 backend supports ≤6)".into());
-                }
+                // SysV: first 6 integer args in rdi,rsi,rdx,rcx,r8,r9; rest on stack.
                 let n = args.len();
-                for a in args {
-                    self.emit_expr_rval(a, 0, typedefs)?;
-                    writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
-                    writeln!(self.out, "\tmovq\t%rax, (%rsp)").unwrap();
+                let nreg = n.min(6);
+                let nstack = n.saturating_sub(6);
+                // Evaluate left-to-right into 8-byte slots (arg0 at high addr).
+                // Layout after push: (%rsp)=arg[n-1], ..., ((n-1)*8)(%rsp)=arg[0]
+                // Use 8-byte slots for stack-arg ABI density.
+                let spill = (n as i64) * 8;
+                let spill_aligned = (spill + 15) & !15; // 16-byte align before call
+                if spill_aligned > 0 {
+                    writeln!(self.out, "\tsubq\t${spill_aligned}, %rsp").unwrap();
                 }
-                for i in (0..n).rev() {
-                    writeln!(self.out, "\tmovq\t(%rsp), {}", ARG_REGS[i]).unwrap();
-                    writeln!(self.out, "\taddq\t$16, %rsp").unwrap();
+                for (i, a) in args.iter().enumerate() {
+                    self.emit_expr_rval(a, 0, typedefs)?;
+                    // arg i at offset (n-1-i)*8 from rsp... store arg i at i*8 from bottom
+                    // bottom = rsp + spill_aligned - spill; arg i at bottom + i*8
+                    let off = spill_aligned - spill + (i as i64) * 8;
+                    writeln!(self.out, "\tmovq\t%rax, {off}(%rsp)").unwrap();
+                }
+                // Load reg args
+                for i in 0..nreg {
+                    let off = spill_aligned - spill + (i as i64) * 8;
+                    writeln!(self.out, "\tmovq\t{off}(%rsp), {}", ARG_REGS[i]).unwrap();
+                }
+                // Stack args must be at 0(%rsp)=arg6, 8(%rsp)=arg7, ...
+                // Currently arg6 is at bottom+6*8. Move stack args to top of rsp.
+                if nstack > 0 {
+                    // Compact: copy args[6..] to the beginning of the spill area, then
+                    // shrink rsp so they sit at (%rsp).
+                    for i in 0..nstack {
+                        let src = spill_aligned - spill + ((6 + i) as i64) * 8;
+                        let dst = (i as i64) * 8;
+                        if src != dst {
+                            writeln!(self.out, "\tmovq\t{src}(%rsp), %rax").unwrap();
+                            writeln!(self.out, "\tmovq\t%rax, {dst}(%rsp)").unwrap();
+                        }
+                    }
+                    let stack_bytes = ((nstack as i64) * 8 + 15) & !15;
+                    // Drop the unused part of the frame above stack args
+                    let drop = spill_aligned - stack_bytes;
+                    if drop > 0 {
+                        writeln!(self.out, "\taddq\t${drop}, %rsp").unwrap();
+                    }
+                } else if spill_aligned > 0 {
+                    // No stack args: free the whole spill before call (regs hold values).
+                    writeln!(self.out, "\taddq\t${spill_aligned}, %rsp").unwrap();
                 }
 
                 let s = sym(name);
@@ -1715,23 +1748,25 @@ impl Codegen {
                     "printf" | "sprintf" | "snprintf" | "fprintf" | "scanf" | "sscanf"
                 );
                 if self.locals.contains_key(name) || self.globals.contains_key(name) {
-                    // Function-pointer variable: re-spill arg regs, load callee, restore args.
-                    for i in 0..n {
-                        writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
-                        writeln!(self.out, "\tmovq\t{}, (%rsp)", ARG_REGS[i]).unwrap();
+                    // Function-pointer: preserve reg args while loading callee.
+                    for i in 0..nreg {
+                        writeln!(self.out, "\tpushq\t{}", ARG_REGS[i]).unwrap();
                     }
                     let _ = self.emit_expr_rval(&Expr::Var(name.clone()), 16, typedefs)?;
-                    for i in (0..n).rev() {
-                        writeln!(self.out, "\tmovq\t(%rsp), {}", ARG_REGS[i]).unwrap();
-                        writeln!(self.out, "\taddq\t$16, %rsp").unwrap();
+                    for i in (0..nreg).rev() {
+                        writeln!(self.out, "\tpopq\t{}", ARG_REGS[i]).unwrap();
                     }
                     writeln!(self.out, "\tcallq\t*%r9").unwrap();
                 } else {
                     if is_varargs {
-                        // Darwin/SysV varargs: %al = number of vector registers used.
                         writeln!(self.out, "\txorb\t%al, %al").unwrap();
                     }
                     writeln!(self.out, "\tcallq\t{s}").unwrap();
+                }
+                // Pop stack args after call
+                if nstack > 0 {
+                    let stack_bytes = ((nstack as i64) * 8 + 15) & !15;
+                    writeln!(self.out, "\taddq\t${stack_bytes}, %rsp").unwrap();
                 }
                 if dest != 0 {
                     writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();

@@ -4,40 +4,31 @@
 
 | Gate | Status |
 |------|--------|
-| **C3** multiarch | **PASS** 40/40 (held; re-run after language churn if needed) |
+| **C3** multiarch | **PASS** 40/40 (held; re-run after language churn) |
 | **C5** double-run | **PASS** 207/207 identical (held; re-run after language churn) |
 | C4 clean-room | held (wrapper refuses gcc on .c) |
-| **C2** | **PROGRESS** — SQLite amalgamation API smoke PASS; no testfixture |
-| **C1** | **PROGRESS** — past first kbuild .c; still blocked before boot |
+| **C2** | **PROGRESS** — SQLite amalgamation smoke PASS; no testfixture |
+| **C1** | **PROGRESS** — kbuild prepare headers green; real kernel .c failing |
 
-### C1 Linux 6.9 (Docker, evidence in SCRATCH)
+### C1 Linux 6.9 (Docker, SCRATCH evidence)
 
-**Working (fresh Docker + wrapper + ggcc):**
-- Kconfig probes (cc-version / as-version) OK
+**prepare / kbuild headers (fresh):**
 - `scripts/mod/empty.o` OK
-- `scripts/mod/devicetable-offsets.s` OK → `scripts/mod/devicetable-offsets.h` generated
-- `kernel/bounds.s` OK → `include/generated/bounds.h` generated  
-  (e.g. `NR_PAGEFLAGS 22`, `MAX_NR_ZONES 2`; `SPINLOCK_SIZE` still wrong/0 — sizeof layout gap)
+- `scripts/mod/devicetable-offsets.h` OK
+- `include/generated/bounds.h` OK (`NR_PAGEFLAGS`, `MAX_NR_ZONES`, …)
+- `include/generated/asm-offsets.h` OK (PT_*, CPUINFO_*, …) — some soft-zero offsets remain
+- `usr/built-in.a` AR OK
+- `scripts/checksyscalls.sh` CALL OK
 
-**Blocked on:**
-- `arch/x86/kernel/asm-offsets.c` — still fail-driving through ~97k-line PP of arch/headers  
-  last class of errors: GNU C (asm goto, nested designators, bitfields, statement-exprs, …)  
-  **no** `bzImage` / QEMU boot yet
-
-**Language fixes landed this pass (non-exhaustive):**
-- GNU type sugar: `__signed__` / `__unsigned__` / `__const__` / `__volatile__`
-- `-include` + CWD include resolution; wrapper forwards `-include` and `-Wp,-MMD`
-- Macro blue-paint (no recursive `inline` explosion)
-- `typeof` / `_Generic` / `__builtin_va_list` / `__builtin_types_compatible_p` / `__builtin_expect` / `__builtin_constant_p`
-- Statement expressions `({…})`, empty asm `""`, named asm operands, asm goto/inline, resilient ALTERNATIVE skip
-- Enum values from prior enumerators; case ranges; trailing commas; nested designators
-- Soft fallbacks: non-const `"i"` asm, incomplete offsetof, undefined locals in header inlines
+**Blocked on real kernel C (post-prepare):**
+- `init/main.c` / `init/do_mounts.c`: `ERROR: unterminated macro args` (preprocessor)
+- `arch/x86/entry/vdso/vma.c`: `ERROR: -> on non-pointer Int` (codegen typeof/layout)
+- **no** `bzImage` / QEMU boot
 
 ### C2 SQLite
-- amalgamation compile + link + run smoke: CREATE/INSERT/SELECT/… **PASS**
-- official testfixture / Redis: **not run**
+- amalgamation API smoke PASS; official testfixture / Redis **not run**
 
 ### blocked_reason
-C1: full tinyconfig build + QEMU boot not achieved; stuck mid `asm-offsets` language surface.  
-C2: full SQLite testfixture / Redis suite not executed.  
+C1: past prepare headers; first real kernel TUs fail (PP macro args + pointer typeof).  
+C2: full SQLite testfixture / Redis not executed.  
 **Goal NOT complete.**

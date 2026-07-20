@@ -286,6 +286,14 @@ impl Parser {
                 items.push(self.parse_struct_or_union_item()?);
                 continue;
             }
+            // File-scope asm (kernel export symbols, sections, etc.)
+            if matches!(
+                self.peek_kind(),
+                TokenKind::Ident(s) if s == "asm" || s == "__asm" || s == "__asm__"
+            ) {
+                let _ = self.parse_asm_stmt()?;
+                continue;
+            }
             items.extend(self.parse_decl_or_func(file_static)?);
         }
         // Flush enum constants discovered inside type specs (e.g. struct { enum { X } x; })
@@ -412,12 +420,91 @@ impl Parser {
         }
     }
 
+    /// If PP glued a typedef type to a field name (`__u8pkt_type`), peel them apart.
+    fn peel_glued_type_name(&self, s: &str) -> Option<(Type, String)> {
+        // Longest typedef prefix match so `__u16` wins over `__u1` if both exist.
+        let mut best: Option<(usize, Type)> = None;
+        for (name, ty) in &self.typedef_map {
+            if s.starts_with(name.as_str()) && s.len() > name.len() {
+                let rest = &s[name.len()..];
+                // Rest must look like an identifier continuation.
+                if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && best.as_ref().map(|(n, _)| name.len() > *n).unwrap_or(true)
+                {
+                    best = Some((name.len(), ty.clone()));
+                }
+            }
+        }
+        // Also peel common fixed-width C types if not already typedef'd.
+        for (prefix, ty) in [
+            ("__u8", Type::Char),
+            ("__s8", Type::SChar),
+            ("__u16", Type::UShort),
+            ("__s16", Type::Short),
+            ("__u32", Type::UInt),
+            ("__s32", Type::Int),
+            ("__u64", Type::ULong),
+            ("__s64", Type::Long),
+            ("u8", Type::Char),
+            ("u16", Type::UShort),
+            ("u32", Type::UInt),
+            ("u64", Type::ULong),
+        ] {
+            if s.starts_with(prefix) && s.len() > prefix.len() {
+                let rest = &s[prefix.len()..];
+                if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && best.as_ref().map(|(n, _)| prefix.len() > *n).unwrap_or(true)
+                {
+                    best = Some((prefix.len(), ty));
+                }
+            }
+        }
+        best.map(|(n, ty)| (ty, s[n..].to_string()))
+    }
+
     fn parse_fields(&mut self) -> Result<Vec<Field>, String> {
         let mut fields = Vec::new();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             // Empty field: `struct { void *lock;; }` (double semicolon from macros).
             if self.eat(TokenKind::Semicolon) {
                 continue;
+            }
+            // Glued type+name from PP macro expansion: `__u8pkt_type:3`
+            if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                if !self.typedefs.iter().any(|t| t == &s) {
+                    if let Some((base, name)) = self.peel_glued_type_name(&s) {
+                        self.bump();
+                        let bit_width = if self.eat(TokenKind::Colon) {
+                            let w = match self.parse_assign()? {
+                                Expr::Int(n) => n.max(0) as u32,
+                                other => self.eval_enum_const(&other).unwrap_or(1).max(0) as u32,
+                            };
+                            Some(w)
+                        } else {
+                            None
+                        };
+                        // Optional array: name[N]
+                        let mut ty = base;
+                        while self.eat(TokenKind::LBracket) {
+                            let nsz = if let TokenKind::IntLit(v) = self.peek_kind().clone() {
+                                self.bump();
+                                v
+                            } else {
+                                0
+                            };
+                            self.expect(TokenKind::RBracket)?;
+                            ty = Type::Array(Box::new(ty), nsz);
+                        }
+                        fields.push(Field {
+                            name,
+                            ty,
+                            bit_width,
+                        });
+                        // More glued fields may follow with commas (rare) or just `;`
+                        let _ = self.eat(TokenKind::Semicolon);
+                        continue;
+                    }
+                }
             }
             let base = self.parse_type_specifier()?;
             // Anonymous struct/union field: `union { int c; int d; };`
@@ -612,6 +699,11 @@ impl Parser {
                     while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
                         if let TokenKind::Ident(id) = self.peek_kind().clone() {
                             self.bump();
+                            // Residue function-like macro not expanded by PP, e.g.
+                            // `__BPF_ENUM_FN(set_hash, 48,)` — skip `(...)` and keep name.
+                            if self.at(&TokenKind::LParen) {
+                                let _ = self.skip_balanced_parens();
+                            }
                             if self.eat(TokenKind::Assign) {
                                 let e = self.parse_assign()?;
                                 if let Some(v) = self.eval_enum_const(&e) {
@@ -630,6 +722,11 @@ impl Parser {
                             next_val += 1;
                         }
                         if self.eat(TokenKind::Comma) {
+                            continue;
+                        }
+                        // Unexpanded macro residues may omit commas between
+                        // `__BPF_ENUM_FN(a,1,) __BPF_ENUM_FN(b,2,)` entries.
+                        if matches!(self.peek_kind(), TokenKind::Ident(_)) {
                             continue;
                         }
                         break;
@@ -702,6 +799,10 @@ impl Parser {
             } else {
                 return Err("enum enumerator name expected".into());
             };
+            // Unexpanded function-like macro residue: `NAME(args)`
+            if self.at(&TokenKind::LParen) {
+                let _ = self.skip_balanced_parens();
+            }
             if self.eat(TokenKind::Assign) {
                 let e = self.parse_assign()?;
                 if let Some(v) = self.eval_enum_const(&e) {
@@ -718,6 +819,10 @@ impl Parser {
             }));
             next_val += 1;
             if self.eat(TokenKind::Comma) {
+                continue;
+            }
+            // Unexpanded macro residues may omit commas between entries.
+            if matches!(self.peek_kind(), TokenKind::Ident(_)) {
                 continue;
             }
             break;
@@ -1624,7 +1729,8 @@ impl Parser {
             return Ok(Stmt::Asm { lines: Vec::new() });
         }
 
-        // Optional : outputs : inputs : clobbers
+        // Optional : outputs : inputs : clobbers [ : goto-labels ]
+        // (asm goto has a 4th colon section for label names)
         let mut imm_vals: Vec<i64> = Vec::new();
         if self.eat(TokenKind::Colon) {
             // outputs — skip "constraint" (expr) list (usually empty for DEFINE)
@@ -1640,11 +1746,37 @@ impl Parser {
                             break;
                         }
                     }
+                    // asm goto labels: `: lab1, lab2`
+                    if self.eat(TokenKind::Colon) {
+                        while let TokenKind::Ident(_) = self.peek_kind().clone() {
+                            self.bump();
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
-        self.expect(TokenKind::RParen)?;
-        self.expect(TokenKind::Semicolon)?;
+        // Soft: if still not at `)`, skip to matching close (broken ALTERNATIVE residue).
+        if !self.at(&TokenKind::RParen) {
+            let mut depth = 1i32;
+            while depth > 0 && !self.at(&TokenKind::Eof) {
+                if self.at(&TokenKind::LParen) {
+                    depth += 1;
+                } else if self.at(&TokenKind::RParen) {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.bump();
+                        break;
+                    }
+                }
+                self.bump();
+            }
+        } else {
+            self.expect(TokenKind::RParen)?;
+        }
+        let _ = self.eat(TokenKind::Semicolon);
 
         // Substitute %0, %1, ... with immediate values; %% → %
         let mut out = String::new();
