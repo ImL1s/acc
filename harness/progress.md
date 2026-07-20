@@ -1,7 +1,7 @@
 # Progress (NO-DOWNGRADE)
 
 ## Stage A — PASS
-## Stage B — PASS (202/220, 3 projects)
+## Stage B — PASS (~202/220 + 3 projects)
 ## Stage C — PARTIAL — **NOT complete**
 
 | Gate | Status |
@@ -9,25 +9,21 @@
 | C5 | PASS |
 | C3 | PASS |
 | C4 | held |
-| C2 | **BLOCKED** — `sqlite3.c` → asm → `.o` → link OK; **libversion smoke PASS** (`3.45.3`/`3045003`); open/exec still SIGSEGV; full suite not green |
-| C1 | **BLOCKED** — Docker/kernel scripts ready, no boot |
+| C2 | **BLOCKED** — amalgamation → `.s`→`.o`→link; **libversion PASS** (`3.45.3`); va_list real; **sqlite3_open still SIGSEGV** |
+| C1 | **BLOCKED** — Docker/kernel scripts only |
 
-### C2 evidence (`{SCRATCH}/stage_c_projects.log`)
-- Full amalgamation frontend→codegen EXIT 0 (~12MB `.s`)
-- Docker assemble+link with system `cc` on `.s` only
-- `smoke_ver`: **PASS** after Linux AAPCS64 printf fix
-- `smoke_open`: SIGSEGV (runtime correctness remaining)
-- VERDICT: still **BLOCKED** for Stage C2 full criteria (need full SQLite tests or Redis + second project)
+### Recent (2026-07-20 night)
+- **Root cause of early open crash:** `va_arg` was `(*(T*)0)` — fixed with AAPCS64 reg-save + `__ggcc_va_start`/`__ggcc_va_arg`
+- **Struct assign:** `*ptr` → memcpy for aggregates (sqlite3_config MALLOC/MUTEX)
+- **Still failing:** open path SIGSEGV (likely more ABI/global/layout issues after init)
 
-### Session highlights
-- git init + plan + worktree-ready harness
-- Bitwise compound assign, storage keywords, hex LL, POSIX/PP stubs
-- Call-arg comma fix; large frame offsets; Darwin vs Linux varargs ABI
-- Kernel docker wrapper scripts (prep only)
+### Evidence
+- `{SCRATCH}/stage_c_projects.log` — VERDICT BLOCKED + partial smokes
+- git: `feat: real va_list...`
 
 ### Next
-1. Fix sqlite3_open path (memory/init/globals)
-2. Full test or Redis as second large project  
-3. C1 kernel first compile failure under wrapper
+1. GDB open crash after va_list fix → next null/fnptr/layout bug
+2. Green `sqlite_smoke_ok` then full tests / Redis
+3. C1 kernel compile under wrapper
 
-**Do not claim done until C1+C2 hard gates green.**
+**Do not claim done until C1+C2 green.**

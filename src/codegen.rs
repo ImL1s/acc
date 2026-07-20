@@ -846,10 +846,20 @@ impl Codegen {
                 }
             }
             Expr::Var(v) => {
+                // Function designator or other global → address
                 writeln!(self.out, "\t.quad\t{}", self.c_sym(v)).unwrap();
+            }
+            Expr::String(s) => {
+                // const char * field = "literal"
+                let id = self.intern_str(s);
+                writeln!(self.out, "\t.quad\tl_str_{id}").unwrap();
             }
             Expr::InitList { fields } => {
                 self.emit_init_list_data(ty, fields)?;
+            }
+            Expr::Cast { expr, .. } => {
+                // Peel casts of string/function for static init
+                return self.emit_scalar_data(ty, expr);
             }
             _ => {
                 writeln!(self.out, "\t.zero\t{}", self.type_size(ty)).unwrap();
