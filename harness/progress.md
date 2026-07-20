@@ -4,31 +4,28 @@
 
 | Gate | Status |
 |------|--------|
-| C3 multiarch | PASS |
-| C5 double-run | PASS (stale — re-run pending) |
+| **C3** multiarch | **PASS** 40/40 (fresh) |
+| **C5** double-run | **PASS** 207/207 identical (fresh; 13 known fails) |
 | C4 clean-room | held |
-| **C2** | **IN PROGRESS** — CREATE/INSERT/SELECT + REAL text green |
-| **C1** | **BLOCKED** |
+| **C2** | **PROGRESS** — SQLite amalgamation runs CREATE/JOIN/GROUP/TX/REAL; full testfixture not run |
+| **C1** | **BLOCKED** — no QEMU boot |
 
-### C2 smoke (Docker Linux, ggcc .s only)
-| Step | Result |
-|------|--------|
-| open / `SELECT 1` | **PASS** |
-| CREATE + INSERT + SELECT int | **PASS** |
-| master cell vs gcc | **PASS** |
-| REAL column_double + column_text | **PASS** (1.5, 0.5, 2.25, 3.0) |
-| full C2 suite / Redis | pending |
+### C2 SQLite (Docker Linux, ggcc .s only)
+| Evidence | Result |
+|----------|--------|
+| `sqlite3.c` → ggcc -S | EXIT 0 (~586k asm lines) |
+| API smoke 27 checks | **PASS** |
+| JOIN/GROUP/ATTACH 11 checks | **PASS** |
+| Official testfixture / Redis | **not run** |
 
-### Root causes fixed (this continue)
-1. x19 not preserved → MakeRecord nHdr → CORRUPT
-2. u64→double bitcast / typeof(-float) → REAL Inf
-3. **sibling Decl name reuse** → rr[2] overlapped exp → 1.5e+g70
-4. **variadic float in dN vs GP va_list** → mprintf %g wrong
+### C5 c-testsuite 00001–00220
+- run1 & run2: pass=207 fail=13, pass/fail sets **identical**
+- fails: 00129,00162,00175,00200,00204–00206,00213,00214,00216,00218–00220
+- rate ≈ **94.1%** (Stage B ≥90% still holds)
 
-### Next
-- Full C2 harness log (SQLite tests / Redis)
-- C1 kernel QEMU; C5 re-run
-- Known residual: multi-float args to **libc** printf (d1+) may still be wrong
+### C3 multiarch subset
+- aarch64+x86_64 × 20 IDs = 40/40 PASS
 
 ### blocked_reason
-C2 full suite not green yet. C1 no boot. Goal NOT complete.
+C2: no full SQLite testfixture / Redis suite log. C1: Linux 6.9 QEMU boot not achieved.
+**Goal NOT complete.**
