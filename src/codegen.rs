@@ -1613,18 +1613,20 @@ impl Codegen {
             self.store_ty(ty, 17, reg);
             return;
         }
-        // Stack slots are 8-byte; always store full x-reg so high bits are
-        // defined (str wN leaves upper 4 bytes as stale garbage → broken
-        // 64-bit reloads of int locals, e.g. nName after strlen).
+        // Stack slots are 8-byte for scalars; store full x so high bits are clear.
+        // (load_from_offset uses ldrsw for Int, but Long/Ptr need clean high bits.)
         if (-256..256).contains(&off) {
             match self.type_size(ty) {
                 1 => {
-                    // zero-extend byte into slot
                     writeln!(self.out, "\tand\tx{reg}, x{reg}, #0xff").unwrap();
                     writeln!(self.out, "\tstr\tx{reg}, [x29, #{off}]").unwrap();
                 }
                 2 => {
                     writeln!(self.out, "\tand\tx{reg}, x{reg}, #0xffff").unwrap();
+                    writeln!(self.out, "\tstr\tx{reg}, [x29, #{off}]").unwrap();
+                }
+                4 => {
+                    writeln!(self.out, "\tmov\tw{reg}, w{reg}").unwrap(); // zero-extend
                     writeln!(self.out, "\tstr\tx{reg}, [x29, #{off}]").unwrap();
                 }
                 _ => writeln!(self.out, "\tstr\tx{reg}, [x29, #{off}]").unwrap(),
@@ -1640,39 +1642,49 @@ impl Codegen {
                     writeln!(self.out, "\tand\tx{reg}, x{reg}, #0xffff").unwrap();
                     writeln!(self.out, "\tstr\tx{reg}, [x17]").unwrap();
                 }
+                4 => {
+                    writeln!(self.out, "\tmov\tw{reg}, w{reg}").unwrap();
+                    writeln!(self.out, "\tstr\tx{reg}, [x17]").unwrap();
+                }
                 _ => writeln!(self.out, "\tstr\tx{reg}, [x17]").unwrap(),
             }
         }
     }
 
     fn load_from_offset(&mut self, off: i64, ty: &Type, reg: u8) {
-        // Float/double must go through fcvt paths; integer stack slots are 8-byte.
+        // Float/double must go through fcvt paths; integer stack slots are 8-byte
+        // but may only have low 32 bits defined — use width-correct loads.
         if matches!(ty, Type::Float | Type::Double) {
             self.emit_fp_addr(off, 17);
             self.load_ty(ty, 17, reg);
             return;
         }
-        let use_x = matches!(
-            ty,
-            Type::Char | Type::Short | Type::Int | Type::Long | Type::Ptr(_)
-        );
         if (-256..256).contains(&off) {
-            if use_x {
-                writeln!(self.out, "\tldr\tx{reg}, [x29, #{off}]").unwrap();
-            } else {
-                match self.type_size(ty) {
+            match ty {
+                Type::Char => writeln!(self.out, "\tldrb\tw{reg}, [x29, #{off}]").unwrap(),
+                Type::Short => writeln!(self.out, "\tldrsh\tw{reg}, [x29, #{off}]").unwrap(),
+                Type::Int => {
+                    // sign-extend 32→64 so high bits are never stale garbage
+                    writeln!(self.out, "\tldrsw\tx{reg}, [x29, #{off}]").unwrap();
+                }
+                Type::Long | Type::Ptr(_) => {
+                    writeln!(self.out, "\tldr\tx{reg}, [x29, #{off}]").unwrap();
+                }
+                _ => match self.type_size(ty) {
                     1 => writeln!(self.out, "\tldrb\tw{reg}, [x29, #{off}]").unwrap(),
                     2 => writeln!(self.out, "\tldrsh\tw{reg}, [x29, #{off}]").unwrap(),
                     4 => writeln!(self.out, "\tldrsw\tx{reg}, [x29, #{off}]").unwrap(),
                     _ => writeln!(self.out, "\tldr\tx{reg}, [x29, #{off}]").unwrap(),
-                }
+                },
             }
         } else {
             self.emit_fp_addr(off, 17);
-            if use_x {
-                writeln!(self.out, "\tldr\tx{reg}, [x17]").unwrap();
-            } else {
-                self.load_ty(ty, 17, reg);
+            match ty {
+                Type::Int => writeln!(self.out, "\tldrsw\tx{reg}, [x17]").unwrap(),
+                Type::Char => writeln!(self.out, "\tldrb\tw{reg}, [x17]").unwrap(),
+                Type::Short => writeln!(self.out, "\tldrsh\tw{reg}, [x17]").unwrap(),
+                Type::Long | Type::Ptr(_) => writeln!(self.out, "\tldr\tx{reg}, [x17]").unwrap(),
+                _ => self.load_ty(ty, 17, reg),
             }
         }
     }
@@ -1914,19 +1926,11 @@ impl Codegen {
                 writeln!(self.out, "\tfmov\td0, x{val_reg}").unwrap();
                 writeln!(self.out, "\tstr\td0, [x{addr_reg}]").unwrap();
             }
+            // Precise widths for struct/memory fields (must not clobber neighbors).
             _ => match self.type_size(ty) {
                 1 => writeln!(self.out, "\tstrb\tw{val_reg}, [x{addr_reg}]").unwrap(),
                 2 => writeln!(self.out, "\tstrh\tw{val_reg}, [x{addr_reg}]").unwrap(),
-                4 => {
-                    // Zero-extend before 8-byte store when writing stack-sized
-                    // slots: callers often `ldr x` reloads. For true 4-byte
-                    // struct fields this over-writes 4 padding/next bytes —
-                    // acceptable for LP64-aligned structs (int fields pad to 8
-                    // in our layout_fields when following a pointer rule…).
-                    // Prefer full-slot store to kill high garbage.
-                    writeln!(self.out, "\tmov\tw{val_reg}, w{val_reg}").unwrap();
-                    writeln!(self.out, "\tstr\tx{val_reg}, [x{addr_reg}]").unwrap();
-                }
+                4 => writeln!(self.out, "\tstr\tw{val_reg}, [x{addr_reg}]").unwrap(),
                 _ => writeln!(self.out, "\tstr\tx{val_reg}, [x{addr_reg}]").unwrap(),
             },
         }
@@ -2372,9 +2376,13 @@ impl Codegen {
             }
             Expr::CompoundAssign { op, left, right } => {
                 // left = left op right (pointer += n scales)
+                // Spill left value before evaluating right — right-hand Binary/calls
+                // reuse x9 and would clobber `pColl` in `pColl += enc-1`.
                 let lty = self.emit_lvalue_addr(left, 19, typedefs)?;
                 self.load_ty(&lty, 19, 9);
+                writeln!(self.out, "\tstr\tx9, [sp, #-16]!").unwrap();
                 self.emit_expr_rval(right, 10, typedefs)?;
+                writeln!(self.out, "\tldr\tx9, [sp], #16").unwrap();
                 let floaty = matches!(lty, Type::Float | Type::Double);
                 if floaty {
                     writeln!(self.out, "\tfmov\td0, x9").unwrap();

@@ -1,43 +1,38 @@
 # Progress (NO-DOWNGRADE)
 
-## Stage A — PASS
-## Stage B — PASS (~202/220 + 3 projects)
-## Stage C — PARTIAL — **NOT complete**
+## Stage A — PASS | Stage B — PASS | Stage C — **NOT complete**
 
 | Gate | Status |
 |------|--------|
 | C5 | PASS |
 | C3 | PASS |
 | C4 | held |
-| **C2** | **BLOCKED** |
-| **C1** | **BLOCKED** |
+| C2 | **BLOCKED** (major progress) |
+| C1 | **BLOCKED** |
 
-### C2 detail
-| Step | Result |
-|------|--------|
-| `sqlite3.c` → frontend → `.s` | PASS (~12MB) |
-| Docker assemble `.o` + link | PASS |
-| `sqlite3_libversion` smoke | **PASS** `3.45.3` / `3045003` |
-| `sqlite3_initialize` / `open` | **FAIL** SIGSEGV / pthread abort |
-| Full SQLite tests / Redis | not run |
+### C2 evidence
+| Check | Result |
+|-------|--------|
+| amalgamation → `.s`→`.o`→link | PASS |
+| `sqlite3_libversion` | **PASS** `3.45.3` / `3045003` |
+| `sqlite3_initialize` | **PASS** `rc=0` |
+| `sqlite3_open(":memory:")` | **FAIL** SIGSEGV (`createCollation` / `FindCollSeq`) |
+| full SQLite tests / Redis | not started |
 
-### Root causes fixed this stretch
-1. **`va_arg` was null-deref** → real AAPCS64 reg-save + `__ggcc_va_start`/`__ggcc_va_arg`
-2. **Struct `*p` assign** only stored 8 bytes → `memcpy` for aggregates
-3. **Static `const char*` fields** emitted `.zero` → `.quad l_str_*`
-4. Linux vs Darwin **printf varargs ABI**
-5. Large **FP offsets**, call-arg comma, bitwise compound assign, etc.
+### Fixes landed
+- Real `va_list` (AAPCS64 reg save)
+- Struct assign via `memcpy`
+- Static string fields in struct inits
+- Int locals: full 8-byte stores (killed high-bit garbage)
+- Linux printf ABI, frame offsets, etc.
 
-### Still broken (open path)
-- Crash in/around `sqlite3InsertBuiltinFuncs` / later pthread
-- GDB: corrupt stack frames (SP discipline / frame size?)
-- Evidence: `{SCRATCH}/stage_c_projects.log`, `open_gdb*.txt`, `init_test.txt`
-
-### C1
-Docker kernel scripts + `ggcc_cc_wrapper` ready; no bootable kernel.
+### Next
+1. Fix `createCollation` / `sqlite3FindCollSeq` crash on open
+2. `sqlite_smoke_ok` then full tests or Redis
+3. C1 kernel boot
 
 ### blocked_reason
-C2: amalgamation links and libversion works, but initialize/open runtime incorrect — full project tests not green.  
-C1: no QEMU boot proof.
+C2: initialize works; open still crashes — full project tests not green.  
+C1: no boot proof.
 
-**Do not claim complete. Do not rebrand Stage B as complete.**
+**Never claim complete without C1+C2 green.**

@@ -1575,7 +1575,10 @@ impl Codegen {
             Expr::CompoundAssign { op, left, right } => {
                 let lty = self.emit_lvalue_addr(left, 19, typedefs)?;
                 self.load_ty(&lty, 19, 9);
+                // Spill left value; right-hand eval reuses temps.
+                writeln!(self.out, "\tpushq\t%r10").unwrap();
                 self.emit_expr_rval(right, 10, typedefs)?;
+                writeln!(self.out, "\tpopq\t%r10").unwrap();
                 match op {
                     BinOp::Add => {
                         if let Type::Ptr(inner) = &lty {
