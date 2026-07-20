@@ -235,7 +235,7 @@ impl Codegen {
             Type::Void => 0,
             // Promote stack slots for char/int to 8 for ABI-simple stack frames
             // (struct field layout still uses precise sizes below via field_size).
-            Type::Char => 1,
+            Type::Char | Type::SChar => 1,
             Type::Short => 2,
             Type::Int => 4,
             Type::Long => 8,
@@ -257,6 +257,7 @@ impl Codegen {
         // Locals always get 8-byte slots for scalars to keep x29 offsets friendly.
         match ty {
             Type::Char
+            | Type::SChar
             | Type::Short
             | Type::Int
             | Type::Long
@@ -271,7 +272,7 @@ impl Codegen {
     fn type_align(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 1,
-            Type::Char => 1,
+            Type::Char | Type::SChar => 1,
             Type::Short => 2,
             Type::Int | Type::Float => 4,
             Type::Long | Type::Double | Type::Ptr(_) => 8,
@@ -1785,7 +1786,10 @@ impl Codegen {
         if (-256..256).contains(&off) {
             match ty {
                 Type::Char => writeln!(self.out, "\tldrb\tw{reg}, [x29, #{off}]").unwrap(),
-                Type::Short => writeln!(self.out, "\tldrsh\tw{reg}, [x29, #{off}]").unwrap(),
+                // Sign-extend all the way to X (not W): `ldrsb w` zero-extends to x64
+                // and turns -2 into 0xfffffffe, breaking lemon yysize pointer math.
+                Type::SChar => writeln!(self.out, "\tldrsb\tx{reg}, [x29, #{off}]").unwrap(),
+                Type::Short => writeln!(self.out, "\tldrsh\tx{reg}, [x29, #{off}]").unwrap(),
                 Type::Int => {
                     // sign-extend 32→64 so high bits are never stale garbage
                     writeln!(self.out, "\tldrsw\tx{reg}, [x29, #{off}]").unwrap();
@@ -1795,7 +1799,7 @@ impl Codegen {
                 }
                 _ => match self.type_size(ty) {
                     1 => writeln!(self.out, "\tldrb\tw{reg}, [x29, #{off}]").unwrap(),
-                    2 => writeln!(self.out, "\tldrsh\tw{reg}, [x29, #{off}]").unwrap(),
+                    2 => writeln!(self.out, "\tldrsh\tx{reg}, [x29, #{off}]").unwrap(),
                     4 => writeln!(self.out, "\tldrsw\tx{reg}, [x29, #{off}]").unwrap(),
                     _ => writeln!(self.out, "\tldr\tx{reg}, [x29, #{off}]").unwrap(),
                 },
@@ -1805,7 +1809,8 @@ impl Codegen {
             match ty {
                 Type::Int => writeln!(self.out, "\tldrsw\tx{reg}, [x17]").unwrap(),
                 Type::Char => writeln!(self.out, "\tldrb\tw{reg}, [x17]").unwrap(),
-                Type::Short => writeln!(self.out, "\tldrsh\tw{reg}, [x17]").unwrap(),
+                Type::SChar => writeln!(self.out, "\tldrsb\tx{reg}, [x17]").unwrap(),
+                Type::Short => writeln!(self.out, "\tldrsh\tx{reg}, [x17]").unwrap(),
                 Type::Long | Type::Ptr(_) => writeln!(self.out, "\tldr\tx{reg}, [x17]").unwrap(),
                 _ => self.load_ty(ty, 17, reg),
             }
@@ -2028,9 +2033,12 @@ impl Codegen {
                 writeln!(self.out, "\tldr\td0, [x{addr_reg}]").unwrap();
                 writeln!(self.out, "\tfmov\tx{dest}, d0").unwrap();
             }
+            Type::SChar => {
+                writeln!(self.out, "\tldrsb\tx{dest}, [x{addr_reg}]").unwrap();
+            }
             _ => match self.type_size(ty) {
                 1 => writeln!(self.out, "\tldrb\tw{dest}, [x{addr_reg}]").unwrap(),
-                2 => writeln!(self.out, "\tldrsh\tw{dest}, [x{addr_reg}]").unwrap(),
+                2 => writeln!(self.out, "\tldrsh\tx{dest}, [x{addr_reg}]").unwrap(),
                 4 => writeln!(self.out, "\tldrsw\tx{dest}, [x{addr_reg}]").unwrap(),
                 _ => writeln!(self.out, "\tldr\tx{dest}, [x{addr_reg}]").unwrap(),
             },

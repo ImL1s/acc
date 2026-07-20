@@ -429,7 +429,13 @@ impl Parser {
             }
             TokenKind::Char => {
                 self.bump();
-                Type::Char
+                // `signed char` is a distinct type (1-byte signed). Plain/`unsigned char`
+                // stay as Char. Lemon tables use `signed char` with negative RHS counts.
+                if saw_signed && !saw_unsigned {
+                    Type::SChar
+                } else {
+                    Type::Char
+                }
             }
             TokenKind::Int => {
                 self.bump();

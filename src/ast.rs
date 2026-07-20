@@ -42,7 +42,10 @@ pub struct VarDecl {
 #[derive(Debug, Clone)]
 pub enum Type {
     Void,
+    /// Plain / unsigned char (zero-extended on load).
     Char,
+    /// `signed char` (sign-extended on load). Required for lemon `yyRuleInfoNRhs[]`.
+    SChar,
     Short,
     Int,
     Long,

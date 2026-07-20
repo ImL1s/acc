@@ -148,7 +148,7 @@ impl Codegen {
     fn type_size(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 0,
-            Type::Char => 1,
+            Type::Char | Type::SChar => 1,
             Type::Short => 2,
             Type::Int => 4,
             Type::Long => 8,
@@ -179,7 +179,7 @@ impl Codegen {
     fn type_align(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 1,
-            Type::Char => 1,
+            Type::Char | Type::SChar => 1,
             Type::Short => 2,
             Type::Int | Type::Float => 4,
             Type::Long | Type::Double | Type::Ptr(_) => 8,
