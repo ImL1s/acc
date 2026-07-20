@@ -50,8 +50,15 @@ pub enum Type {
     /// `signed char` (sign-extended on load). Required for lemon `yyRuleInfoNRhs[]`.
     SChar,
     Short,
+    /// `unsigned short` (zero-extended on load).
+    UShort,
     Int,
+    /// `unsigned` / `unsigned int` (zero-extended on load). Critical for SQLite
+    /// `Pgno` / `u32` page numbers (mxPgno = 0xfffffffe must not become -2).
+    UInt,
     Long,
+    /// `unsigned long` / `unsigned long long` / `u64`.
+    ULong,
     Float,
     Double,
     Ptr(Box<Type>),

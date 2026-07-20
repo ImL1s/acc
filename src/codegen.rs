@@ -244,9 +244,9 @@ impl Codegen {
             // Promote stack slots for char/int to 8 for ABI-simple stack frames
             // (struct field layout still uses precise sizes below via field_size).
             Type::Char | Type::SChar => 1,
-            Type::Short => 2,
-            Type::Int => 4,
-            Type::Long => 8,
+            Type::Short | Type::UShort => 2,
+            Type::Int | Type::UInt => 4,
+            Type::Long | Type::ULong => 8,
             Type::Float => 4,
             Type::Double => 8,
             Type::Ptr(_) => 8,
@@ -267,8 +267,11 @@ impl Codegen {
             Type::Char
             | Type::SChar
             | Type::Short
+            | Type::UShort
             | Type::Int
+            | Type::UInt
             | Type::Long
+            | Type::ULong
             | Type::Float
             | Type::Double
             | Type::Ptr(_) => 8,
@@ -281,9 +284,9 @@ impl Codegen {
         match ty {
             Type::Void => 1,
             Type::Char | Type::SChar => 1,
-            Type::Short => 2,
-            Type::Int | Type::Float => 4,
-            Type::Long | Type::Double | Type::Ptr(_) => 8,
+            Type::Short | Type::UShort => 2,
+            Type::Int | Type::UInt | Type::Float => 4,
+            Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
             Type::Array(e, _) => self.type_align(e),
             Type::Struct(n) | Type::Union(n) => self
                 .layouts
@@ -484,26 +487,14 @@ impl Codegen {
 
     fn layout_fields(&self, fields: &[Field], is_union: bool) -> Layout {
         let mut map = HashMap::new();
-        let mut off = 0i64;
         let mut max_align = 1i64;
         let mut max_size = 0i64;
-        // Current bitfield allocation unit (Itanium/AAPCS-style packing).
-        let mut unit_start = 0i64;
-        let mut unit_bits = 0u32; // capacity in bits
-        let mut bit_cursor = 0u32; // next free bit in unit
-        let mut in_unit = false;
-
-        let finish_unit = |off: &mut i64,
-                           in_unit: &mut bool,
-                           unit_start: i64,
-                           unit_bits: u32| {
-            if *in_unit {
-                let unit_bytes = (unit_bits as i64 + 7) / 8;
-                // unit occupies [unit_start, unit_start+unit_bytes)
-                *off = unit_start + unit_bytes;
-                *in_unit = false;
-            }
-        };
+        // GCC/aarch64-compatible bitfield packing (PCC_BITFIELD_TYPE_MATTERS):
+        // track free position in bits; a bitfield of declared type T/width W
+        // must not straddle a container of sizeof(T) bits. If it would, pad to
+        // the next container boundary. Non-bitfields round up to a byte, then
+        // align. This yields e.g. SQLite Column = 16 (not 24).
+        let mut offset_bits: u64 = 0;
 
         for f in fields {
             // Anonymous nested struct/union: promote fields into this layout.
@@ -516,9 +507,6 @@ impl Codegen {
                     _ => None,
                 };
                 if let Some(nested) = nested_opt {
-                    if !is_union {
-                        finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
-                    }
                     max_align = max_align.max(nested.align);
                     if is_union {
                         for (fnm, place) in &nested.fields {
@@ -533,18 +521,19 @@ impl Codegen {
                         }
                         max_size = max_size.max(nested.size);
                     } else {
-                        off = Self::align_up(off, nested.align);
+                        let mut byte_off = ((offset_bits + 7) / 8) as i64;
+                        byte_off = Self::align_up(byte_off, nested.align);
                         for (fnm, place) in &nested.fields {
                             map.insert(
                                 fnm.clone(),
                                 FieldPlace {
-                                    offset: off + place.offset,
+                                    offset: byte_off + place.offset,
                                     ty: place.ty.clone(),
                                     bit: place.bit,
                                 },
                             );
                         }
-                        off += nested.size;
+                        offset_bits = ((byte_off + nested.size) as u64) * 8;
                     }
                     continue;
                 }
@@ -552,7 +541,7 @@ impl Codegen {
 
             // Bit-field packing.
             if let Some(width) = f.bit_width {
-                let container_sz = self.type_size(&f.ty).max(1) as u32;
+                let container_sz = self.type_size(&f.ty).max(1) as u64;
                 let container_bits = container_sz * 8;
                 let al = self.type_align(&f.ty);
                 max_align = max_align.max(al);
@@ -575,47 +564,44 @@ impl Codegen {
 
                 // Zero-width: force alignment to next container boundary.
                 if width == 0 {
-                    finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
-                    off = Self::align_up(off, al);
-                    bit_cursor = 0;
-                    unit_bits = 0;
+                    let al_bits = (al as u64) * 8;
+                    if al_bits > 0 {
+                        offset_bits = ((offset_bits + al_bits - 1) / al_bits) * al_bits;
+                    }
                     continue;
                 }
 
-                // Need a new unit if none open, different size, or not enough bits.
-                let need_new = !in_unit
-                    || unit_bits != container_bits
-                    || bit_cursor + width > unit_bits;
-                if need_new {
-                    finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
-                    off = Self::align_up(off, al);
-                    unit_start = off;
-                    unit_bits = container_bits;
-                    bit_cursor = 0;
-                    in_unit = true;
+                let w = width as u64;
+                // If field would straddle a container boundary, pad to next container.
+                if container_bits > 0
+                    && (offset_bits % container_bits) + w > container_bits
+                {
+                    offset_bits =
+                        ((offset_bits + container_bits - 1) / container_bits) * container_bits;
                 }
+                let bit_pos = offset_bits;
+                // Container base: floor to container size from struct start.
+                let cont_index = bit_pos / container_bits;
+                let unit_start = (cont_index * container_sz) as i64;
+                let bit_in = (bit_pos % container_bits) as u32;
                 if !f.name.is_empty() {
                     map.insert(
                         f.name.clone(),
                         FieldPlace {
                             offset: unit_start,
                             ty: f.ty.clone(),
-                            bit: Some((bit_cursor, width)),
+                            bit: Some((bit_in, width)),
                         },
                     );
                 }
-                bit_cursor += width;
-                max_size = max_size.max(unit_start + container_sz as i64);
+                offset_bits = bit_pos + w;
+                // Track span for max_size (end of used storage in this container).
+                let end_byte = ((offset_bits + 7) / 8) as i64;
+                max_size = max_size.max(end_byte);
                 continue;
             }
 
-            // Ordinary field: close any open bit unit first.
-            if !is_union {
-                finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
-                bit_cursor = 0;
-                unit_bits = 0;
-            }
-
+            // Ordinary field.
             let sz = self.type_size(&f.ty);
             let al = self.type_align(&f.ty);
             max_align = max_align.max(al);
@@ -632,27 +618,26 @@ impl Codegen {
                 }
                 max_size = max_size.max(sz);
             } else {
-                off = Self::align_up(off, al);
+                let mut byte_off = ((offset_bits + 7) / 8) as i64;
+                byte_off = Self::align_up(byte_off, al);
                 if !f.name.is_empty() {
                     map.insert(
                         f.name.clone(),
                         FieldPlace {
-                            offset: off,
+                            offset: byte_off,
                             ty: f.ty.clone(),
                             bit: None,
                         },
                     );
                 }
-                off += sz;
+                offset_bits = ((byte_off + sz) as u64) * 8;
             }
-        }
-        if !is_union {
-            finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
         }
         let size = if is_union {
             Self::align_up(max_size, max_align.max(1))
         } else {
-            Self::align_up(off, max_align.max(1))
+            let byte_off = ((offset_bits + 7) / 8) as i64;
+            Self::align_up(byte_off, max_align.max(1))
         };
         Layout {
             size,
@@ -1320,11 +1305,15 @@ impl Codegen {
             }
         }
 
-        // Allocate named params. reg = first GPR, or 128+fpr for float.
-        // nregs = how many consecutive GPRs (1 or 2 for small aggregates).
-        let mut param_offs: Vec<(i64, Type, u8, u8)> = Vec::new(); // off, ty, reg, nregs
+        // Allocate named params.
+        // reg: 0..7 = GPR, 128+fpr = float, 255 = incoming stack slot.
+        // For stack args (AAPCS64): first is at [x29, #16] after stp fp,lr.
+        // nregs: 1 or 2 for small aggregates.
+        // stack_x29: x29-relative offset of first 8-byte slot when reg==255.
+        let mut param_offs: Vec<(i64, Type, u8, u8, i64)> = Vec::new(); // off, ty, reg, nregs, stack_x29
         let mut igpr = 0u8;
         let mut fpr = 0u8;
+        let mut stack_x29 = 16i64; // first stack arg above saved fp/lr
         for (pname, pty) in f.params.iter() {
             if pname.is_empty() {
                 continue;
@@ -1336,17 +1325,28 @@ impl Codegen {
             let off = self.alloc_local(pname, &pty);
             if matches!(pty, Type::Float | Type::Double) {
                 if fpr < 8 {
-                    param_offs.push((off, pty, 128 + fpr, 1));
+                    param_offs.push((off, pty, 128 + fpr, 1, 0));
                     fpr += 1;
+                } else {
+                    // float stack args: treat as 8-byte slot for now
+                    param_offs.push((off, pty, 255, 1, stack_x29));
+                    stack_x29 += 8;
                 }
             } else if let Some(nr) = self.small_agg_nregs(&pty) {
                 if igpr + nr <= 8 {
-                    param_offs.push((off, pty, igpr, nr));
+                    param_offs.push((off, pty, igpr, nr, 0));
                     igpr += nr;
+                } else {
+                    param_offs.push((off, pty, 255, nr, stack_x29));
+                    stack_x29 += 8 * (nr as i64);
                 }
             } else if igpr < 8 {
-                param_offs.push((off, pty, igpr, 1));
+                param_offs.push((off, pty, igpr, 1, 0));
                 igpr += 1;
+            } else {
+                // 9th+ integer/pointer argument: on caller's stack.
+                param_offs.push((off, pty, 255, 1, stack_x29));
+                stack_x29 += 8;
             }
         }
 
@@ -1359,12 +1359,20 @@ impl Codegen {
                 self.emit_fp_addr(off, 17);
                 writeln!(self.out, "\tstr\tx{r}, [x17]").unwrap();
             }
-            for (off, pty, reg, nregs) in &param_offs {
+            for (off, pty, reg, nregs, stack_off) in &param_offs {
                 if *reg < 8 {
                     for r in 0..*nregs {
                         let save_off = self.va_regsave_off + ((*reg + r) as i64) * 8;
                         self.emit_fp_addr(save_off, 17);
                         writeln!(self.out, "\tldr\tx16, [x17]").unwrap();
+                        let dest_off = *off + (r as i64) * 8;
+                        self.store_to_offset(dest_off, &Type::Long, 16);
+                    }
+                } else if *reg == 255 {
+                    // Incoming stack arg relative to x29
+                    for r in 0..*nregs {
+                        let src = *stack_off + (r as i64) * 8;
+                        writeln!(self.out, "\tldr\tx16, [x29, #{src}]").unwrap();
                         let dest_off = *off + (r as i64) * 8;
                         self.store_to_offset(dest_off, &Type::Long, 16);
                     }
@@ -1379,7 +1387,7 @@ impl Codegen {
                 }
             }
         } else {
-            for (off, pty, reg, nregs) in &param_offs {
+            for (off, pty, reg, nregs, stack_off) in &param_offs {
                 if *reg < 8 {
                     if *nregs > 1 {
                         // Small aggregate: store consecutive GPRs into local slot.
@@ -1387,6 +1395,19 @@ impl Codegen {
                         self.store_small_agg_from_regs(9, *nregs, *reg);
                     } else {
                         self.store_to_offset(*off, &Type::Long, *reg);
+                    }
+                } else if *reg == 255 {
+                    // 9th+ arg: load from caller's stack frame via x29.
+                    if *nregs > 1 {
+                        for r in 0..*nregs {
+                            let src = *stack_off + (r as i64) * 8;
+                            writeln!(self.out, "\tldr\tx16, [x29, #{src}]").unwrap();
+                            let dest_off = *off + (r as i64) * 8;
+                            self.store_to_offset(dest_off, &Type::Long, 16);
+                        }
+                    } else {
+                        writeln!(self.out, "\tldr\tx16, [x29, #{}]", stack_off).unwrap();
+                        self.store_to_offset(*off, pty, 16);
                     }
                 } else if *reg >= 128 {
                     let freg = *reg - 128;
@@ -2055,11 +2076,14 @@ impl Codegen {
                 // and turns -2 into 0xfffffffe, breaking lemon yysize pointer math.
                 Type::SChar => writeln!(self.out, "\tldrsb\tx{reg}, [x29, #{off}]").unwrap(),
                 Type::Short => writeln!(self.out, "\tldrsh\tx{reg}, [x29, #{off}]").unwrap(),
+                Type::UShort => writeln!(self.out, "\tldrh\tw{reg}, [x29, #{off}]").unwrap(),
                 Type::Int => {
                     // sign-extend 32→64 so high bits are never stale garbage
                     writeln!(self.out, "\tldrsw\tx{reg}, [x29, #{off}]").unwrap();
                 }
-                Type::Long | Type::Ptr(_) => {
+                // Zero-extend unsigned 32-bit (Pgno/u32): 0xfffffffe must stay positive.
+                Type::UInt => writeln!(self.out, "\tldr\tw{reg}, [x29, #{off}]").unwrap(),
+                Type::Long | Type::ULong | Type::Ptr(_) => {
                     writeln!(self.out, "\tldr\tx{reg}, [x29, #{off}]").unwrap();
                 }
                 _ => match self.type_size(ty) {
@@ -2073,10 +2097,14 @@ impl Codegen {
             self.emit_fp_addr(off, 17);
             match ty {
                 Type::Int => writeln!(self.out, "\tldrsw\tx{reg}, [x17]").unwrap(),
+                Type::UInt => writeln!(self.out, "\tldr\tw{reg}, [x17]").unwrap(),
                 Type::Char => writeln!(self.out, "\tldrb\tw{reg}, [x17]").unwrap(),
                 Type::SChar => writeln!(self.out, "\tldrsb\tx{reg}, [x17]").unwrap(),
                 Type::Short => writeln!(self.out, "\tldrsh\tx{reg}, [x17]").unwrap(),
-                Type::Long | Type::Ptr(_) => writeln!(self.out, "\tldr\tx{reg}, [x17]").unwrap(),
+                Type::UShort => writeln!(self.out, "\tldrh\tw{reg}, [x17]").unwrap(),
+                Type::Long | Type::ULong | Type::Ptr(_) => {
+                    writeln!(self.out, "\tldr\tx{reg}, [x17]").unwrap()
+                }
                 _ => self.load_ty(ty, 17, reg),
             }
         }
@@ -2313,6 +2341,22 @@ impl Codegen {
             }
             Type::SChar => {
                 writeln!(self.out, "\tldrsb\tx{dest}, [x{addr_reg}]").unwrap();
+            }
+            Type::UShort => {
+                writeln!(self.out, "\tldrh\tw{dest}, [x{addr_reg}]").unwrap();
+            }
+            Type::UInt => {
+                // zero-extend u32 → x (ldr w clears upper 32)
+                writeln!(self.out, "\tldr\tw{dest}, [x{addr_reg}]").unwrap();
+            }
+            Type::ULong => {
+                writeln!(self.out, "\tldr\tx{dest}, [x{addr_reg}]").unwrap();
+            }
+            Type::Int => {
+                writeln!(self.out, "\tldrsw\tx{dest}, [x{addr_reg}]").unwrap();
+            }
+            Type::Short => {
+                writeln!(self.out, "\tldrsh\tx{dest}, [x{addr_reg}]").unwrap();
             }
             _ => match self.type_size(ty) {
                 1 => writeln!(self.out, "\tldrb\tw{dest}, [x{addr_reg}]").unwrap(),
@@ -2645,35 +2689,54 @@ impl Codegen {
                         writeln!(self.out, "\tmsub\tx{dest}, x11, x10, x9").unwrap();
                         Ok(Type::Int)
                     }
-                    BinOp::Eq => {
-                        // 32-bit compare for int-ish values so 0xffffffff matches ~0
-                        writeln!(self.out, "\tcmp\tw9, w10").unwrap();
-                        writeln!(self.out, "\tcset\tx{dest}, eq").unwrap();
-                        Ok(Type::Int)
-                    }
-                    BinOp::Ne => {
-                        writeln!(self.out, "\tcmp\tw9, w10").unwrap();
-                        writeln!(self.out, "\tcset\tx{dest}, ne").unwrap();
-                        Ok(Type::Int)
-                    }
-                    BinOp::Lt => {
-                        writeln!(self.out, "\tcmp\tw9, w10").unwrap();
-                        writeln!(self.out, "\tcset\tx{dest}, lt").unwrap();
-                        Ok(Type::Int)
-                    }
-                    BinOp::Gt => {
-                        writeln!(self.out, "\tcmp\tw9, w10").unwrap();
-                        writeln!(self.out, "\tcset\tx{dest}, gt").unwrap();
-                        Ok(Type::Int)
-                    }
-                    BinOp::Le => {
-                        writeln!(self.out, "\tcmp\tw9, w10").unwrap();
-                        writeln!(self.out, "\tcset\tx{dest}, le").unwrap();
-                        Ok(Type::Int)
-                    }
-                    BinOp::Ge => {
-                        writeln!(self.out, "\tcmp\tw9, w10").unwrap();
-                        writeln!(self.out, "\tcset\tx{dest}, ge").unwrap();
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                        // Use 64-bit cmp when either operand is long/pointer (or wider
+                        // than 32-bit). 32-bit-only cmp truncates constants like
+                        // 4294967296LL to 0 and breaks sqlite3GetUInt32:
+                        //   if (v > 4294967296LL)  // was always true for v=1
+                        let wide = matches!(
+                            lty,
+                            Type::Long
+                                | Type::ULong
+                                | Type::Ptr(_)
+                                | Type::Array(_, _)
+                        ) || matches!(
+                            rty,
+                            Type::Long
+                                | Type::ULong
+                                | Type::Ptr(_)
+                                | Type::Array(_, _)
+                        );
+                        // Always 64-bit when either side may hold a zero-extended u32
+                        // (Pgno/mxPgno) so 0xfffffffe is not compared as -2 via ldrsw.
+                        let unsignedish = matches!(
+                            lty,
+                            Type::UInt | Type::ULong | Type::UShort | Type::Char
+                        ) || matches!(
+                            rty,
+                            Type::UInt | Type::ULong | Type::UShort | Type::Char
+                        );
+                        if wide || unsignedish {
+                            writeln!(self.out, "\tcmp\tx9, x10").unwrap();
+                        } else {
+                            // 32-bit compare for signed int-ish values
+                            writeln!(self.out, "\tcmp\tw9, w10").unwrap();
+                        }
+                        // Unsigned relational conditions for unsigned operands.
+                        let cond = match (op, unsignedish) {
+                            (BinOp::Eq, _) => "eq",
+                            (BinOp::Ne, _) => "ne",
+                            (BinOp::Lt, true) => "lo",
+                            (BinOp::Gt, true) => "hi",
+                            (BinOp::Le, true) => "ls",
+                            (BinOp::Ge, true) => "hs",
+                            (BinOp::Lt, false) => "lt",
+                            (BinOp::Gt, false) => "gt",
+                            (BinOp::Le, false) => "le",
+                            (BinOp::Ge, false) => "ge",
+                            _ => unreachable!(),
+                        };
+                        writeln!(self.out, "\tcset\tx{dest}, {cond}").unwrap();
                         Ok(Type::Int)
                     }
                     BinOp::BitAnd => {

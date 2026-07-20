@@ -149,9 +149,9 @@ impl Codegen {
         match ty {
             Type::Void => 0,
             Type::Char | Type::SChar => 1,
-            Type::Short => 2,
-            Type::Int => 4,
-            Type::Long => 8,
+            Type::Short | Type::UShort => 2,
+            Type::Int | Type::UInt => 4,
+            Type::Long | Type::ULong => 8,
             Type::Float => 4,
             Type::Double => 8,
             Type::Ptr(_) => 8,
@@ -165,9 +165,13 @@ impl Codegen {
     fn stack_slot_size(&self, ty: &Type) -> i64 {
         match ty {
             Type::Char
+            | Type::SChar
             | Type::Short
+            | Type::UShort
             | Type::Int
+            | Type::UInt
             | Type::Long
+            | Type::ULong
             | Type::Float
             | Type::Double
             | Type::Ptr(_) => 8,
@@ -180,9 +184,9 @@ impl Codegen {
         match ty {
             Type::Void => 1,
             Type::Char | Type::SChar => 1,
-            Type::Short => 2,
-            Type::Int | Type::Float => 4,
-            Type::Long | Type::Double | Type::Ptr(_) => 8,
+            Type::Short | Type::UShort => 2,
+            Type::Int | Type::UInt | Type::Float => 4,
+            Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
             Type::Array(e, _) => self.type_align(e),
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.align).unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false).align,

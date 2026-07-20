@@ -446,7 +446,6 @@ impl Parser {
             }
             break;
         }
-        let _ = (saw_unsigned, saw_signed);
         let ty = match self.peek_kind().clone() {
             TokenKind::Void => {
                 self.bump();
@@ -464,7 +463,11 @@ impl Parser {
             }
             TokenKind::Int => {
                 self.bump();
-                Type::Int
+                if saw_unsigned {
+                    Type::UInt
+                } else {
+                    Type::Int
+                }
             }
             TokenKind::Long => {
                 self.bump();
@@ -474,13 +477,21 @@ impl Parser {
                 } else {
                     let _ = self.eat(TokenKind::Long);
                     let _ = self.eat(TokenKind::Int);
-                    Type::Long
+                    if saw_unsigned {
+                        Type::ULong
+                    } else {
+                        Type::Long
+                    }
                 }
             }
             TokenKind::Short => {
                 self.bump();
                 let _ = self.eat(TokenKind::Int);
-                Type::Short
+                if saw_unsigned {
+                    Type::UShort
+                } else {
+                    Type::Short
+                }
             }
             TokenKind::Float => {
                 self.bump();
@@ -491,7 +502,9 @@ impl Parser {
                 Type::Double
             }
             // bare `unsigned;` / `unsigned x;` → unsigned int
-            _ if saw_unsigned || saw_signed => Type::Int,
+            // bare `signed;` → signed int
+            _ if saw_unsigned => Type::UInt,
+            _ if saw_signed => Type::Int,
             TokenKind::Struct => self.parse_struct_type(false)?,
             TokenKind::Union => self.parse_struct_type(true)?,
             TokenKind::Enum => {
@@ -801,6 +814,54 @@ impl Parser {
         }
     }
 
+    /// Sizeof for constant-expression evaluation at parse time (array bounds).
+    /// Pointers are 8; structs/unions fall back to 8 (only used when size is
+    /// not yet known — `sizeof(T*)` is fine and is what SQLite BITVEC macros need).
+    fn const_type_size(ty: &Type) -> Option<i64> {
+        Some(match ty {
+            Type::Void => 0,
+            Type::Char | Type::SChar => 1,
+            Type::Short | Type::UShort => 2,
+            Type::Int | Type::UInt | Type::Float => 4,
+            Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
+            Type::Array(e, n) => {
+                if *n <= 0 {
+                    return None;
+                }
+                Self::const_type_size(e)? * n
+            }
+            // Incomplete/unknown named aggregates: pointer-sized fallback is
+            // wrong for `sizeof(struct X)` but correct for nothing we need in
+            // array bounds that also use `sizeof(X*)` only. Prefer None so we
+            // don't silently emit wrong [8] arrays.
+            Type::Struct(_) | Type::Union(_) => return None,
+            Type::AnonStruct(fs) => {
+                // Rough C layout for simple const eval (no bitfields).
+                let mut off = 0i64;
+                let mut al = 1i64;
+                for f in fs {
+                    let sz = Self::const_type_size(&f.ty)?;
+                    let a = match &f.ty {
+                        Type::Char | Type::SChar => 1,
+                        Type::Short | Type::UShort => 2,
+                        Type::Int | Type::UInt | Type::Float => 4,
+                        _ => 8,
+                    };
+                    al = al.max(a);
+                    off = ((off + a - 1) / a) * a + sz;
+                }
+                ((off + al - 1) / al) * al
+            }
+            Type::AnonUnion(fs) => {
+                let mut m = 0i64;
+                for f in fs {
+                    m = m.max(Self::const_type_size(&f.ty)?);
+                }
+                m
+            }
+        })
+    }
+
     fn const_array_len(e: &Expr) -> Option<i64> {
         match e {
             Expr::Int(n) | Expr::Char(n) => Some(*n),
@@ -816,10 +877,32 @@ impl Parser {
                     BinOp::Sub => l.wrapping_sub(r),
                     BinOp::Mul => l.wrapping_mul(r),
                     BinOp::Div if r != 0 => l / r,
+                    BinOp::Mod if r != 0 => l % r,
                     _ => return None,
                 })
             }
             Expr::Cast { expr, .. } => Self::const_array_len(expr),
+            Expr::SizeofType(ty) => Self::const_type_size(ty),
+            Expr::SizeofExpr(ex) => {
+                // sizeof(expr): only handle simple cases / types-as-expr failures
+                // by re-evaluating if the expr itself is a constant sizeof tree.
+                match ex.as_ref() {
+                    Expr::SizeofType(ty) | Expr::Cast { ty, .. } => Self::const_type_size(ty),
+                    other => Self::const_array_len(other),
+                }
+            }
+            Expr::Cond {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                let c = Self::const_array_len(cond)?;
+                if c != 0 {
+                    Self::const_array_len(then_e)
+                } else {
+                    Self::const_array_len(else_e)
+                }
+            }
             _ => None,
         }
     }
