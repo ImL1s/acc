@@ -66,10 +66,18 @@ impl TargetOs {
 }
 
 #[derive(Clone)]
+struct FieldPlace {
+    offset: i64,
+    ty: Type,
+    /// For bit-fields: (bit_offset within container at `offset`, width in bits).
+    bit: Option<(u32, u32)>,
+}
+
+#[derive(Clone)]
 struct Layout {
     size: i64,
     align: i64,
-    fields: HashMap<String, (i64, Type)>, // offset, type
+    fields: HashMap<String, FieldPlace>,
 }
 
 #[derive(Clone)]
@@ -339,14 +347,167 @@ impl Codegen {
         }
     }
 
+    /// Look up field placement for `base.field` / `base->field`.
+    fn member_place(
+        &self,
+        base: &Expr,
+        field: &str,
+        arrow: bool,
+        typedefs: &HashMap<String, Type>,
+    ) -> Option<FieldPlace> {
+        let bt = if arrow {
+            match self.typeof_expr(base, typedefs) {
+                Type::Ptr(i) => *i,
+                t => t,
+            }
+        } else {
+            self.typeof_expr(base, typedefs)
+        };
+        match bt {
+            Type::Struct(n) | Type::Union(n) => self
+                .layouts
+                .get(&n)
+                .and_then(|l| l.fields.get(field).cloned()),
+            Type::AnonStruct(fs) => {
+                let lay = self.layout_fields(&fs, false);
+                lay.fields.get(field).cloned()
+            }
+            Type::AnonUnion(fs) => {
+                let lay = self.layout_fields(&fs, true);
+                lay.fields.get(field).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    /// Load bitfield at [x{addr_reg}] into x{dest}. Container type is `ty`.
+    fn load_bitfield(
+        &mut self,
+        addr_reg: u8,
+        ty: &Type,
+        bit_off: u32,
+        bit_width: u32,
+        dest: u8,
+    ) {
+        // Load container (unsigned for bit extract).
+        let sz = self.type_size(ty);
+        match sz {
+            1 => writeln!(self.out, "\tldrb\tw{dest}, [x{addr_reg}]").unwrap(),
+            2 => writeln!(self.out, "\tldrh\tw{dest}, [x{addr_reg}]").unwrap(),
+            4 => writeln!(self.out, "\tldr\tw{dest}, [x{addr_reg}]").unwrap(),
+            _ => writeln!(self.out, "\tldr\tx{dest}, [x{addr_reg}]").unwrap(),
+        }
+        if bit_off > 0 {
+            writeln!(self.out, "\tlsr\tx{dest}, x{dest}, #{bit_off}").unwrap();
+        }
+        if bit_width < 64 {
+            let mask = if bit_width >= 32 {
+                // mask low bit_width bits
+                if bit_width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bit_width) - 1
+                }
+            } else {
+                (1u64 << bit_width) - 1
+            };
+            // Use and with immediate when possible
+            if mask <= 0xfff {
+                writeln!(self.out, "\tand\tx{dest}, x{dest}, #{mask}").unwrap();
+            } else {
+                self.emit_imm(mask as i64, 16);
+                writeln!(self.out, "\tand\tx{dest}, x{dest}, x16").unwrap();
+            }
+        }
+        // Leave zero-extended. (Most SQLite bitfields are unsigned flags 0/1.)
+        let _ = ty;
+    }
+
+    /// Store x{val_reg} into bitfield at FP-relative `base_off` (or absolute via helper).
+    fn store_bitfield(
+        &mut self,
+        base_off: i64,
+        ty: &Type,
+        bit_off: u32,
+        bit_width: u32,
+        val_reg: u8,
+    ) -> Result<(), String> {
+        // addr in x9
+        self.emit_fp_addr(base_off, 9);
+        self.store_bitfield_at(9, ty, bit_off, bit_width, val_reg);
+        Ok(())
+    }
+
+    fn store_bitfield_at(
+        &mut self,
+        addr_reg: u8,
+        ty: &Type,
+        bit_off: u32,
+        bit_width: u32,
+        val_reg: u8,
+    ) {
+        let sz = self.type_size(ty);
+        // load container into x16
+        match sz {
+            1 => writeln!(self.out, "\tldrb\tw16, [x{addr_reg}]").unwrap(),
+            2 => writeln!(self.out, "\tldrh\tw16, [x{addr_reg}]").unwrap(),
+            4 => writeln!(self.out, "\tldr\tw16, [x{addr_reg}]").unwrap(),
+            _ => writeln!(self.out, "\tldr\tx16, [x{addr_reg}]").unwrap(),
+        }
+        let mask = if bit_width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bit_width) - 1
+        };
+        // clear field bits: container &= ~(mask << bit_off)
+        let clear = !(mask << bit_off);
+        self.emit_imm(clear as i64, 17);
+        writeln!(self.out, "\tand\tx16, x16, x17").unwrap();
+        // insert: container |= (val & mask) << bit_off
+        if mask <= 0xfff {
+            writeln!(self.out, "\tand\tx15, x{val_reg}, #{mask}").unwrap();
+        } else {
+            self.emit_imm(mask as i64, 15);
+            writeln!(self.out, "\tand\tx15, x{val_reg}, x15").unwrap();
+        }
+        if bit_off > 0 {
+            writeln!(self.out, "\tlsl\tx15, x15, #{bit_off}").unwrap();
+        }
+        writeln!(self.out, "\torr\tx16, x16, x15").unwrap();
+        match sz {
+            1 => writeln!(self.out, "\tstrb\tw16, [x{addr_reg}]").unwrap(),
+            2 => writeln!(self.out, "\tstrh\tw16, [x{addr_reg}]").unwrap(),
+            4 => writeln!(self.out, "\tstr\tw16, [x{addr_reg}]").unwrap(),
+            _ => writeln!(self.out, "\tstr\tx16, [x{addr_reg}]").unwrap(),
+        }
+    }
+
     fn layout_fields(&self, fields: &[Field], is_union: bool) -> Layout {
         let mut map = HashMap::new();
         let mut off = 0i64;
         let mut max_align = 1i64;
         let mut max_size = 0i64;
+        // Current bitfield allocation unit (Itanium/AAPCS-style packing).
+        let mut unit_start = 0i64;
+        let mut unit_bits = 0u32; // capacity in bits
+        let mut bit_cursor = 0u32; // next free bit in unit
+        let mut in_unit = false;
+
+        let finish_unit = |off: &mut i64,
+                           in_unit: &mut bool,
+                           unit_start: i64,
+                           unit_bits: u32| {
+            if *in_unit {
+                let unit_bytes = (unit_bits as i64 + 7) / 8;
+                // unit occupies [unit_start, unit_start+unit_bytes)
+                *off = unit_start + unit_bytes;
+                *in_unit = false;
+            }
+        };
+
         for f in fields {
             // Anonymous nested struct/union: promote fields into this layout.
-            if f.name.is_empty() {
+            if f.name.is_empty() && f.bit_width.is_none() {
                 let nested_opt = match &f.ty {
                     Type::AnonStruct(fs) => Some(self.layout_fields(fs, false)),
                     Type::AnonUnion(fs) => Some(self.layout_fields(fs, true)),
@@ -355,37 +516,138 @@ impl Codegen {
                     _ => None,
                 };
                 if let Some(nested) = nested_opt {
+                    if !is_union {
+                        finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
+                    }
                     max_align = max_align.max(nested.align);
                     if is_union {
-                        for (fnm, (_, fty)) in &nested.fields {
-                            map.insert(fnm.clone(), (0, fty.clone()));
+                        for (fnm, place) in &nested.fields {
+                            map.insert(
+                                fnm.clone(),
+                                FieldPlace {
+                                    offset: 0,
+                                    ty: place.ty.clone(),
+                                    bit: place.bit,
+                                },
+                            );
                         }
                         max_size = max_size.max(nested.size);
                     } else {
                         off = Self::align_up(off, nested.align);
-                        for (fnm, (fo, fty)) in &nested.fields {
-                            map.insert(fnm.clone(), (off + fo, fty.clone()));
+                        for (fnm, place) in &nested.fields {
+                            map.insert(
+                                fnm.clone(),
+                                FieldPlace {
+                                    offset: off + place.offset,
+                                    ty: place.ty.clone(),
+                                    bit: place.bit,
+                                },
+                            );
                         }
                         off += nested.size;
                     }
                     continue;
                 }
             }
+
+            // Bit-field packing.
+            if let Some(width) = f.bit_width {
+                let container_sz = self.type_size(&f.ty).max(1) as u32;
+                let container_bits = container_sz * 8;
+                let al = self.type_align(&f.ty);
+                max_align = max_align.max(al);
+
+                if is_union {
+                    // In a union, each bitfield starts at offset 0.
+                    if !f.name.is_empty() && width > 0 {
+                        map.insert(
+                            f.name.clone(),
+                            FieldPlace {
+                                offset: 0,
+                                ty: f.ty.clone(),
+                                bit: Some((0, width)),
+                            },
+                        );
+                    }
+                    max_size = max_size.max(container_sz as i64);
+                    continue;
+                }
+
+                // Zero-width: force alignment to next container boundary.
+                if width == 0 {
+                    finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
+                    off = Self::align_up(off, al);
+                    bit_cursor = 0;
+                    unit_bits = 0;
+                    continue;
+                }
+
+                // Need a new unit if none open, different size, or not enough bits.
+                let need_new = !in_unit
+                    || unit_bits != container_bits
+                    || bit_cursor + width > unit_bits;
+                if need_new {
+                    finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
+                    off = Self::align_up(off, al);
+                    unit_start = off;
+                    unit_bits = container_bits;
+                    bit_cursor = 0;
+                    in_unit = true;
+                }
+                if !f.name.is_empty() {
+                    map.insert(
+                        f.name.clone(),
+                        FieldPlace {
+                            offset: unit_start,
+                            ty: f.ty.clone(),
+                            bit: Some((bit_cursor, width)),
+                        },
+                    );
+                }
+                bit_cursor += width;
+                max_size = max_size.max(unit_start + container_sz as i64);
+                continue;
+            }
+
+            // Ordinary field: close any open bit unit first.
+            if !is_union {
+                finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
+                bit_cursor = 0;
+                unit_bits = 0;
+            }
+
             let sz = self.type_size(&f.ty);
             let al = self.type_align(&f.ty);
             max_align = max_align.max(al);
             if is_union {
                 if !f.name.is_empty() {
-                    map.insert(f.name.clone(), (0, f.ty.clone()));
+                    map.insert(
+                        f.name.clone(),
+                        FieldPlace {
+                            offset: 0,
+                            ty: f.ty.clone(),
+                            bit: None,
+                        },
+                    );
                 }
                 max_size = max_size.max(sz);
             } else {
                 off = Self::align_up(off, al);
                 if !f.name.is_empty() {
-                    map.insert(f.name.clone(), (off, f.ty.clone()));
+                    map.insert(
+                        f.name.clone(),
+                        FieldPlace {
+                            offset: off,
+                            ty: f.ty.clone(),
+                            bit: None,
+                        },
+                    );
                 }
                 off += sz;
             }
+        }
+        if !is_union {
+            finish_unit(&mut off, &mut in_unit, unit_start, unit_bits);
         }
         let size = if is_union {
             Self::align_up(max_size, max_align.max(1))
@@ -826,19 +1088,21 @@ impl Codegen {
             }
         }
         let mut ordered: Vec<_> = lay.fields.iter().collect();
-        ordered.sort_by_key(|(_, (off, _))| *off);
+        ordered.sort_by_key(|(_, p)| p.offset);
         let mut pos = 0i64;
         let mut pos_i = 0usize;
         let mut i = 0;
         while i < ordered.len() {
-            let (fname, (off, fty)) = ordered[i];
-            if pos < *off {
+            let (fname, place) = ordered[i];
+            let off = place.offset;
+            let fty = &place.ty;
+            if pos < off {
                 writeln!(self.out, "\t.zero\t{}", off - pos).unwrap();
-                pos = *off;
+                pos = off;
             }
             // Group union members that share the same offset — one storage slot.
             let mut j = i + 1;
-            while j < ordered.len() && ordered[j].1 .0 == *off {
+            while j < ordered.len() && ordered[j].1.offset == off {
                 j += 1;
             }
             let e = if let Some(ex) = by_name.get(fname) {
@@ -1852,9 +2116,9 @@ impl Codegen {
                     }
                 }
                 let mut ordered: Vec<_> = lay.fields.iter().collect();
-                ordered.sort_by_key(|(_, (off, _))| *off);
+                ordered.sort_by_key(|(_, p)| p.offset);
                 let mut pos_i = 0usize;
-                for (fname, (foff, fty)) in ordered {
+                for (fname, place) in ordered {
                     let e = if let Some(ex) = by_name.get(fname) {
                         Some(*ex)
                     } else if pos_i < positional.len() {
@@ -1866,7 +2130,11 @@ impl Codegen {
                     };
                     if let Some(e) = e {
                         self.emit_expr_rval(e, 0, typedefs)?;
-                        self.store_to_offset(base_off + *foff, fty, 0);
+                        if let Some((bo, bw)) = place.bit {
+                            self.store_bitfield(base_off + place.offset, &place.ty, bo, bw, 0)?;
+                        } else {
+                            self.store_to_offset(base_off + place.offset, &place.ty, 0);
+                        }
                     }
                 }
             }
@@ -1990,7 +2258,11 @@ impl Codegen {
                             let mut fields = HashMap::new();
                             fields.insert(
                                 field.clone(),
-                                (0i64, Type::Ptr(Box::new(Type::Void))),
+                                FieldPlace {
+                                    offset: 0,
+                                    ty: Type::Ptr(Box::new(Type::Void)),
+                                    bit: None,
+                                },
                             );
                             Layout {
                                 size: 8,
@@ -2008,15 +2280,20 @@ impl Codegen {
                     Type::AnonUnion(fs) => self.layout_fields(fs, true),
                     other => return Err(format!("member of non-struct {:?} .{}", other, field)),
                 };
-                let (off, fty) = lay
+                let place = lay
                     .fields
                     .get(field)
                     .ok_or_else(|| format!("no field {field}"))?
                     .clone();
-                if off != 0 {
-                    writeln!(self.out, "\tadd\tx{reg}, x{reg}, #{off}").unwrap();
+                // Bitfields are not addressable as pure lvalues in C; we still return
+                // the container address so assign/load paths can special-case via
+                // typeof + a bitfield store helper. Non-bitfield: address of field.
+                if place.offset != 0 {
+                    writeln!(self.out, "\tadd\tx{reg}, x{reg}, #{}", place.offset).unwrap();
                 }
-                Ok(fty)
+                // Stash bitfield info on a side channel? For now return container type;
+                // load path for Member uses typeof and layout again.
+                Ok(place.ty)
             }
             _ => Err("expression is not an lvalue".into()),
         }
@@ -2498,6 +2775,28 @@ impl Codegen {
                         return Ok(lty);
                     }
                 }
+                // Bitfield assignment: a.bf = expr
+                if let Expr::Member {
+                    base,
+                    field,
+                    arrow,
+                } = left.as_ref()
+                {
+                    if let Some(place) = self.member_place(base, field, *arrow, typedefs) {
+                        if let Some((bo, bw)) = place.bit {
+                            self.emit_expr_rval(right, 0, typedefs)?;
+                            writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                            let _ = self.emit_lvalue_addr(left, 9, typedefs)?;
+                            writeln!(self.out, "\tldr\tx0, [sp], #16").unwrap();
+                            self.store_bitfield_at(9, &place.ty, bo, bw, 0);
+                            if dest != 0 {
+                                // reload extracted value
+                                self.load_bitfield(9, &place.ty, bo, bw, dest);
+                            }
+                            return Ok(place.ty);
+                        }
+                    }
+                }
                 // Spill RHS to stack: PostInc/PostDec also use x12 as a temp.
                 let rty = self.emit_expr_rval(right, 0, typedefs)?;
                 writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
@@ -2941,6 +3240,22 @@ impl Codegen {
                 Ok(ret_ty)
             }
             Expr::Index { .. } | Expr::Member { .. } => {
+                // Bitfield member: extract bits rather than loading full container.
+                if let Expr::Member {
+                    base,
+                    field,
+                    arrow,
+                } = e
+                {
+                    if let Some(place) = self.member_place(base, field, *arrow, typedefs) {
+                        if let Some((bo, bw)) = place.bit {
+                            // Address of container
+                            let _ = self.emit_lvalue_addr(e, 9, typedefs)?;
+                            self.load_bitfield(9, &place.ty, bo, bw, dest);
+                            return Ok(place.ty);
+                        }
+                    }
+                }
                 let ty = self.emit_lvalue_addr(e, 9, typedefs)?;
                 // Array lvalues decay to pointer (address), not a loaded value.
                 // Needed for multi-dim: arr[i][j] where arr[i] has type T[N].
@@ -3212,7 +3527,7 @@ impl Codegen {
                     Type::Struct(n) | Type::Union(n) => self
                         .layouts
                         .get(&n)
-                        .and_then(|l| l.fields.get(field).map(|(_, t)| t.clone()))
+                        .and_then(|l| l.fields.get(field).map(|p| p.ty.clone()))
                         .unwrap_or(Type::Int),
                     _ => Type::Int,
                 }

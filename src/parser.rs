@@ -351,16 +351,41 @@ impl Parser {
                 fields.push(Field {
                     name: String::new(),
                     ty: base,
+                    bit_width: None,
                 });
+                continue;
+            }
+            // Unnamed bit-field: `unsigned : 3;` / `int : 0;`
+            if self.eat(TokenKind::Colon) {
+                let w = match self.parse_expr()? {
+                    Expr::Int(n) => n.max(0) as u32,
+                    _ => 0,
+                };
+                fields.push(Field {
+                    name: String::new(),
+                    ty: base,
+                    bit_width: Some(w),
+                });
+                self.expect(TokenKind::Semicolon)?;
                 continue;
             }
             loop {
                 let (name, ty, _) = self.parse_declarator(base.clone())?;
-                // Bit-field: `unsigned flags : 1;` — ignore width for layout (use base type size)
-                if self.eat(TokenKind::Colon) {
-                    let _width = self.parse_expr()?;
-                }
-                fields.push(Field { name, ty });
+                // Bit-field: `unsigned flags : 1;`
+                let bit_width = if self.eat(TokenKind::Colon) {
+                    let w = match self.parse_expr()? {
+                        Expr::Int(n) => n.max(0) as u32,
+                        _ => 1,
+                    };
+                    Some(w)
+                } else {
+                    None
+                };
+                fields.push(Field {
+                    name,
+                    ty,
+                    bit_width,
+                });
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }

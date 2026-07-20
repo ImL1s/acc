@@ -18,6 +18,9 @@ pub enum Item {
 pub struct Field {
     pub name: String,
     pub ty: Type,
+    /// Bit-field width when declared as `T name : N;`. `None` = ordinary field.
+    /// Width 0 is a zero-width bit-field (alignment marker only).
+    pub bit_width: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
