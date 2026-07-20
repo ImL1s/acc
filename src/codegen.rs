@@ -561,16 +561,15 @@ impl Codegen {
             match init {
                 Expr::Int(n) | Expr::Char(n) => {
                     self.emit_data_section();
-                    writeln!(self.out, "\t.p2align\t3").unwrap();
+                    let al = self.type_align(&g.ty).max(1).min(8);
+                    writeln!(self.out, "\t.p2align\t{}", al.trailing_zeros()).unwrap();
                     writeln!(self.out, "{sym}:").unwrap();
                     if matches!(g.ty, Type::Float) {
                         writeln!(self.out, "\t.float\t{}", *n as f32).unwrap();
                     } else if matches!(g.ty, Type::Double) {
                         writeln!(self.out, "\t.double\t{}", *n as f64).unwrap();
-                    } else if size <= 4 {
-                        writeln!(self.out, "\t.long\t{n}").unwrap();
                     } else {
-                        writeln!(self.out, "\t.quad\t{n}").unwrap();
+                        self.emit_int_directive(size, *n);
                     }
                 }
                 Expr::Float(f) => {
@@ -706,16 +705,15 @@ impl Codegen {
                     match expr.as_ref() {
                         Expr::Int(n) | Expr::Char(n) => {
                             self.emit_data_section();
-                            writeln!(self.out, "\t.p2align\t3").unwrap();
+                            let al = self.type_align(&g.ty).max(1).min(8);
+                            writeln!(self.out, "\t.p2align\t{}", al.trailing_zeros()).unwrap();
                             writeln!(self.out, "{sym}:").unwrap();
                             if matches!(g.ty, Type::Float) {
                                 writeln!(self.out, "\t.float\t{}", *n as f32).unwrap();
                             } else if matches!(g.ty, Type::Double) {
                                 writeln!(self.out, "\t.double\t{}", *n as f64).unwrap();
-                            } else if size <= 4 {
-                                writeln!(self.out, "\t.long\t{n}").unwrap();
                             } else {
-                                writeln!(self.out, "\t.quad\t{n}").unwrap();
+                                self.emit_int_directive(size, *n);
                             }
                         }
                         Expr::Float(f) => {
@@ -739,13 +737,10 @@ impl Codegen {
                 other => {
                     if let Some(n) = Self::const_i64(other) {
                         self.emit_data_section();
-                        writeln!(self.out, "\t.p2align\t3").unwrap();
+                        let al = self.type_align(&g.ty).max(1).min(8);
+                        writeln!(self.out, "\t.p2align\t{}", al.trailing_zeros()).unwrap();
                         writeln!(self.out, "{sym}:").unwrap();
-                        if size <= 4 {
-                            writeln!(self.out, "\t.long\t{n}").unwrap();
-                        } else {
-                            writeln!(self.out, "\t.quad\t{n}").unwrap();
-                        }
+                        self.emit_int_directive(size, n);
                     } else {
                         self.emit_bss_section();
                         writeln!(self.out, "\t.p2align\t3").unwrap();
@@ -879,17 +874,23 @@ impl Codegen {
         Ok(())
     }
 
+    /// Emit a static integer of the given byte size (1/2/4/8).
+    fn emit_int_directive(&mut self, size: i64, n: i64) {
+        match size {
+            1 => writeln!(self.out, "\t.byte\t{n}").unwrap(),
+            // Critical: short/unsigned short tables (lemon yy_action, yy_lookahead)
+            // must be 2-byte elements. Emitting .long broke all parser indexing.
+            2 => writeln!(self.out, "\t.hword\t{n}").unwrap(),
+            4 => writeln!(self.out, "\t.long\t{n}").unwrap(),
+            _ => writeln!(self.out, "\t.quad\t{n}").unwrap(),
+        }
+    }
+
     fn emit_scalar_data(&mut self, ty: &Type, e: &Expr) -> Result<(), String> {
         // Fold simple constant expressions for static storage duration.
         if let Some(n) = Self::const_i64(e) {
             let sz = self.type_size(ty);
-            if sz <= 1 {
-                writeln!(self.out, "\t.byte\t{n}").unwrap();
-            } else if sz <= 4 {
-                writeln!(self.out, "\t.long\t{n}").unwrap();
-            } else {
-                writeln!(self.out, "\t.quad\t{n}").unwrap();
-            }
+            self.emit_int_directive(sz, n);
             return Ok(());
         }
         match e {
