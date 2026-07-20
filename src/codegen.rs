@@ -100,6 +100,8 @@ pub struct Codegen {
     break_stack: Vec<String>,
     continue_stack: Vec<String>,
     func_name: String,
+    /// Return type of the function currently being emitted.
+    func_ret: Type,
     pending_case_labs: std::collections::VecDeque<String>,
     os: TargetOs,
     /// FP-relative offset of x0..x7 save area for the current variadic function (0 = none).
@@ -127,6 +129,7 @@ impl Codegen {
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
             func_name: String::new(),
+            func_ret: Type::Void,
             pending_case_labs: std::collections::VecDeque::new(),
             os,
             va_regsave_off: 0,
@@ -283,6 +286,58 @@ impl Codegen {
         }
     }
 
+    fn is_struct_or_union_ty(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Struct(_) | Type::Union(_) | Type::AnonStruct(_) | Type::AnonUnion(_)
+        )
+    }
+
+    /// AAPCS64: struct/union ≤16 bytes returned/passed in 1–2 GPRs (xN, xN+1).
+    /// Arrays are NOT included — they decay to pointers (1 GPR).
+    fn small_agg_nregs(&self, ty: &Type) -> Option<u8> {
+        if !Self::is_struct_or_union_ty(ty) {
+            return None;
+        }
+        let sz = self.type_size(ty);
+        if sz == 0 {
+            return None;
+        }
+        if sz <= 8 {
+            Some(1)
+        } else if sz <= 16 {
+            Some(2)
+        } else {
+            None
+        }
+    }
+
+    /// Store x{reg}.. into memory at [x{addr_reg}] for a small aggregate.
+    fn store_small_agg_from_regs(&mut self, addr_reg: u8, nregs: u8, first_reg: u8) {
+        for r in 0..nregs {
+            let reg = first_reg + r;
+            let off = (r as i64) * 8;
+            if off == 0 {
+                writeln!(self.out, "\tstr\tx{reg}, [x{addr_reg}]").unwrap();
+            } else {
+                writeln!(self.out, "\tstr\tx{reg}, [x{addr_reg}, #{off}]").unwrap();
+            }
+        }
+    }
+
+    /// Load small aggregate at [x{addr_reg}] into x{first_reg}..
+    fn load_small_agg_to_regs(&mut self, addr_reg: u8, nregs: u8, first_reg: u8) {
+        for r in 0..nregs {
+            let reg = first_reg + r;
+            let off = (r as i64) * 8;
+            if off == 0 {
+                writeln!(self.out, "\tldr\tx{reg}, [x{addr_reg}]").unwrap();
+            } else {
+                writeln!(self.out, "\tldr\tx{reg}, [x{addr_reg}, #{off}]").unwrap();
+            }
+        }
+    }
+
     fn layout_fields(&self, fields: &[Field], is_union: bool) -> Layout {
         let mut map = HashMap::new();
         let mut off = 0i64;
@@ -344,13 +399,15 @@ impl Codegen {
     }
 
     fn collect_layouts(&mut self, prog: &Program) {
-        // From parser-discovered named layouts (inline + file scope)
-        for (name, is_union, fields) in &prog.type_layouts {
-            let lay = self.layout_fields(fields, *is_union);
-            self.layouts.insert(name.clone(), lay);
-        }
-        // multi-pass for nested names / items
-        for _ in 0..3 {
+        // Multi-pass: type_layouts comes from a HashMap and may list a union/struct
+        // before its nested named members. A single pass leaves unknown Struct(n)
+        // at the 8-byte fallback (see type_size), so sizeof(union) collapses
+        // (e.g. SQLite YYMINORTYPE became 8 instead of 16 → lemon stack smash).
+        for _ in 0..12 {
+            for (name, is_union, fields) in &prog.type_layouts {
+                let lay = self.layout_fields(fields, *is_union);
+                self.layouts.insert(name.clone(), lay);
+            }
             for item in &prog.items {
                 match item {
                     Item::StructDef { name, fields } => {
@@ -929,6 +986,7 @@ impl Codegen {
         typedefs: &HashMap<String, Type>,
     ) -> Result<(), String> {
         self.func_name = f.name.clone();
+        self.func_ret = f.ret.clone();
         self.locals.clear();
         self.stack_size = 0;
         self.break_stack.clear();
@@ -964,13 +1022,19 @@ impl Codegen {
         self.locals.clear();
         self.stack_size = 0;
 
+        // Count fixed GPRs consumed (small aggregates take 1–2 regs).
         let mut fixed_gp = 0usize;
         for (_, pty) in f.params.iter() {
             let pty = match pty {
                 Type::Array(e, _) => Type::Ptr(e.clone()),
                 other => other.clone(),
             };
-            if !matches!(pty, Type::Float | Type::Double) {
+            if matches!(pty, Type::Float | Type::Double) {
+                continue;
+            }
+            if let Some(nr) = self.small_agg_nregs(&pty) {
+                fixed_gp += nr as usize;
+            } else {
                 fixed_gp += 1;
             }
         }
@@ -990,8 +1054,9 @@ impl Codegen {
             }
         }
 
-        // Allocate named params first (same order as measure).
-        let mut param_offs: Vec<(i64, Type, u8)> = Vec::new(); // off, ty, reg_or_255
+        // Allocate named params. reg = first GPR, or 128+fpr for float.
+        // nregs = how many consecutive GPRs (1 or 2 for small aggregates).
+        let mut param_offs: Vec<(i64, Type, u8, u8)> = Vec::new(); // off, ty, reg, nregs
         let mut igpr = 0u8;
         let mut fpr = 0u8;
         for (pname, pty) in f.params.iter() {
@@ -1005,11 +1070,16 @@ impl Codegen {
             let off = self.alloc_local(pname, &pty);
             if matches!(pty, Type::Float | Type::Double) {
                 if fpr < 8 {
-                    param_offs.push((off, pty, 128 + fpr)); // mark float reg
+                    param_offs.push((off, pty, 128 + fpr, 1));
                     fpr += 1;
                 }
+            } else if let Some(nr) = self.small_agg_nregs(&pty) {
+                if igpr + nr <= 8 {
+                    param_offs.push((off, pty, igpr, nr));
+                    igpr += nr;
+                }
             } else if igpr < 8 {
-                param_offs.push((off, pty, igpr));
+                param_offs.push((off, pty, igpr, 1));
                 igpr += 1;
             }
         }
@@ -1023,12 +1093,15 @@ impl Codegen {
                 self.emit_fp_addr(off, 17);
                 writeln!(self.out, "\tstr\tx{r}, [x17]").unwrap();
             }
-            for (off, pty, reg) in &param_offs {
+            for (off, pty, reg, nregs) in &param_offs {
                 if *reg < 8 {
-                    let save_off = self.va_regsave_off + (*reg as i64) * 8;
-                    self.emit_fp_addr(save_off, 17);
-                    writeln!(self.out, "\tldr\tx16, [x17]").unwrap();
-                    self.store_to_offset(*off, &Type::Long, 16);
+                    for r in 0..*nregs {
+                        let save_off = self.va_regsave_off + ((*reg + r) as i64) * 8;
+                        self.emit_fp_addr(save_off, 17);
+                        writeln!(self.out, "\tldr\tx16, [x17]").unwrap();
+                        let dest_off = *off + (r as i64) * 8;
+                        self.store_to_offset(dest_off, &Type::Long, 16);
+                    }
                 } else if *reg >= 128 {
                     let freg = *reg - 128;
                     if matches!(pty, Type::Float) {
@@ -1040,9 +1113,15 @@ impl Codegen {
                 }
             }
         } else {
-            for (off, pty, reg) in &param_offs {
+            for (off, pty, reg, nregs) in &param_offs {
                 if *reg < 8 {
-                    self.store_to_offset(*off, &Type::Long, *reg);
+                    if *nregs > 1 {
+                        // Small aggregate: store consecutive GPRs into local slot.
+                        self.emit_fp_addr(*off, 9);
+                        self.store_small_agg_from_regs(9, *nregs, *reg);
+                    } else {
+                        self.store_to_offset(*off, &Type::Long, *reg);
+                    }
                 } else if *reg >= 128 {
                     let freg = *reg - 128;
                     if matches!(pty, Type::Float) {
@@ -1255,6 +1334,26 @@ impl Codegen {
                         self.emit_local_init_list(off, &ty, fields, typedefs)?;
                         return Ok(());
                     }
+                    // Small aggregate init: value in x0[,x1] (call) or via memcpy from lvalue.
+                    if let Some(nr) = self.small_agg_nregs(&ty) {
+                        if matches!(init, Expr::Call { .. }) {
+                            self.emit_expr_rval(init, 0, typedefs)?;
+                            self.emit_fp_addr(off, 9);
+                            self.store_small_agg_from_regs(9, nr, 0);
+                        } else if self.emit_lvalue_addr(init, 0, typedefs).is_ok() {
+                            writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                            self.emit_fp_addr(off, 9);
+                            writeln!(self.out, "\tldr\tx1, [sp], #16").unwrap();
+                            writeln!(self.out, "\tmov\tx0, x9").unwrap();
+                            self.emit_imm(self.type_size(&ty), 2);
+                            writeln!(self.out, "\tbl\t{}", self.c_sym("memcpy")).unwrap();
+                        } else {
+                            self.emit_expr_rval(init, 0, typedefs)?;
+                            self.emit_fp_addr(off, 9);
+                            self.store_small_agg_from_regs(9, nr, 0);
+                        }
+                        return Ok(());
+                    }
                     self.emit_expr_rval(init, 0, typedefs)?;
                     if matches!(ty, Type::Float | Type::Double) {
                         let rty = self.typeof_expr(init, typedefs);
@@ -1287,7 +1386,31 @@ impl Codegen {
             }
             Stmt::Return(e) => {
                 if let Some(ex) = e {
-                    self.emit_expr_rval(ex, 0, typedefs)?;
+                    let rty = self.func_ret.clone();
+                    if let Some(nr) = self.small_agg_nregs(&rty) {
+                        // AAPCS64: composite ≤16 bytes in x0[, x1].
+                        if self.emit_lvalue_addr(ex, 9, typedefs).is_ok() {
+                            self.load_small_agg_to_regs(9, nr, 0);
+                        } else {
+                            // Non-lvalue (e.g. call): evaluate then re-pack from a temp.
+                            // Allocate a temp on the frame for the returned bits.
+                            let tmp = {
+                                self.stack_size =
+                                    Self::align_up(self.stack_size + self.type_size(&rty).max(8), 8);
+                                -self.stack_size
+                            };
+                            // Best-effort: emit as scalar path then store x0 (and hope x1).
+                            self.emit_expr_rval(ex, 0, typedefs)?;
+                            self.emit_fp_addr(tmp, 9);
+                            writeln!(self.out, "\tstr\tx0, [x9]").unwrap();
+                            if nr >= 2 {
+                                writeln!(self.out, "\tstr\tx1, [x9, #8]").unwrap();
+                            }
+                            self.load_small_agg_to_regs(9, nr, 0);
+                        }
+                    } else {
+                        self.emit_expr_rval(ex, 0, typedefs)?;
+                    }
                 } else {
                     writeln!(self.out, "\tmov\tw0, #0").unwrap();
                 }
@@ -2308,6 +2431,29 @@ impl Codegen {
                             | Type::AnonUnion(_)
                             | Type::Array(_, _)
                     );
+                // a = f() where f returns a small aggregate in x0[,x1].
+                if is_agg {
+                    if let Expr::Call { name, args } = right.as_ref() {
+                        if let Some(nr) = self.small_agg_nregs(&lty_probe) {
+                            // Emit the call for its side-effects / return regs; ignore dest.
+                            let _ = self.emit_expr_rval(
+                                &Expr::Call {
+                                    name: name.clone(),
+                                    args: args.clone(),
+                                },
+                                0,
+                                typedefs,
+                            )?;
+                            // After call, x0/x1 hold the value (emit_expr_rval leaves them).
+                            let lty = self.emit_lvalue_addr(left, 9, typedefs)?;
+                            self.store_small_agg_from_regs(9, nr, 0);
+                            if dest != 0 {
+                                writeln!(self.out, "\tmov\tx{dest}, x9").unwrap();
+                            }
+                            return Ok(lty);
+                        }
+                    }
+                }
                 // Aggregate / struct assign via memcpy.
                 if is_agg {
                     let (src_ok, copy_sz) = match right.as_ref() {
@@ -2621,27 +2767,72 @@ impl Codegen {
                     .map(|f| f.params.iter().map(|(_, t)| t.clone()).collect())
                     .unwrap_or_default();
 
-                // AAPCS64 (simplified, mostly integer): x0..x7 then 8-byte stack slots.
-                // Spill every arg to 16-byte slots (top = args[0]), load regs, leave
-                // args[8..] in a packed outgoing region, then clean up.
+                // AAPCS64: small aggregates (≤16B) occupy 1–2 consecutive GPRs.
+                // Spill each logical half-register as a 16-byte slot (top = args[0]).
                 let n = args.len();
-                let n_reg = n.min(8);
-                let n_stack = n.saturating_sub(8);
-                for a in args.iter().rev() {
-                    self.emit_expr_rval(a, 0, typedefs)?;
-                    writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                let mut arg_nregs: Vec<u8> = Vec::with_capacity(n);
+                let mut arg_is_float: Vec<bool> = Vec::with_capacity(n);
+                let mut total_slots: i64 = 0;
+                for i in 0..n {
+                    let aty = self.typeof_expr(&args[i], typedefs);
+                    let pty = param_tys.get(i).cloned().unwrap_or(aty.clone());
+                    let is_f = matches!(pty, Type::Float | Type::Double)
+                        || (param_tys.is_empty() && matches!(aty, Type::Float | Type::Double));
+                    arg_is_float.push(is_f);
+                    let nr = if is_f {
+                        1
+                    } else {
+                        self.small_agg_nregs(&pty)
+                            .or_else(|| self.small_agg_nregs(&aty))
+                            .unwrap_or(1)
+                    };
+                    arg_nregs.push(nr);
+                    total_slots += nr as i64;
                 }
-                // Load first 8 into x0..x7 (ignore float specialisation for stack-arg path)
+
+                // Push right-to-left so args[0] ends at [sp].
+                for i in (0..n).rev() {
+                    let a = &args[i];
+                    let aty = self.typeof_expr(a, typedefs);
+                    let pty = param_tys.get(i).cloned().unwrap_or(aty.clone());
+                    let nr = arg_nregs[i];
+                    if !arg_is_float[i] && self.small_agg_nregs(&pty).or_else(|| self.small_agg_nregs(&aty)).is_some()
+                    {
+                        // Prefer lvalue load of full aggregate.
+                        if self.emit_lvalue_addr(a, 9, typedefs).is_ok() {
+                            if nr >= 2 {
+                                writeln!(self.out, "\tldr\tx0, [x9, #8]").unwrap();
+                                writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                            }
+                            writeln!(self.out, "\tldr\tx0, [x9]").unwrap();
+                            writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                        } else {
+                            // Non-lvalue aggregate: evaluate (may only fill x0) and pad.
+                            self.emit_expr_rval(a, 0, typedefs)?;
+                            if nr >= 2 {
+                                writeln!(self.out, "\tstr\tx1, [sp, #-16]!").unwrap();
+                            }
+                            writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                        }
+                    } else {
+                        self.emit_expr_rval(a, 0, typedefs)?;
+                        writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                    }
+                }
+
+                // Load into x0..x7 (and d0.. for floats). Extra slots beyond 8 GPRs
+                // stay on the stack as outgoing args (packed later if needed).
                 let mut igpr = 0u8;
                 let mut fpr = 0u8;
-                for i in 0..n_reg {
-                    let src = (i as i64) * 16;
-                    writeln!(self.out, "\tldr\tx16, [sp, #{src}]").unwrap();
-                    let pty = param_tys.get(i).cloned().unwrap_or(Type::Int);
+                let mut slot: i64 = 0;
+                let mut gpr_slots_used: i64 = 0;
+                for i in 0..n {
+                    let nr = arg_nregs[i] as i64;
                     let aty = self.typeof_expr(&args[i], typedefs);
-                    if matches!(pty, Type::Float | Type::Double)
-                        || (param_tys.is_empty() && matches!(aty, Type::Float | Type::Double))
-                    {
+                    let pty = param_tys.get(i).cloned().unwrap_or(aty.clone());
+                    if arg_is_float[i] {
+                        let src = slot * 16;
+                        writeln!(self.out, "\tldr\tx16, [sp, #{src}]").unwrap();
                         if !matches!(aty, Type::Float | Type::Double) {
                             writeln!(self.out, "\tscvtf\td{fpr}, x16").unwrap();
                         } else {
@@ -2651,89 +2842,77 @@ impl Codegen {
                             writeln!(self.out, "\tfcvt\ts{fpr}, d{fpr}").unwrap();
                         }
                         fpr += 1;
+                        slot += 1;
                     } else {
-                        if matches!(aty, Type::Float | Type::Double) {
-                            writeln!(self.out, "\tfmov\td0, x16").unwrap();
-                            writeln!(self.out, "\tfcvtzs\tx{igpr}, d0").unwrap();
-                        } else {
-                            writeln!(self.out, "\tmov\tx{igpr}, x16").unwrap();
+                        for r in 0..nr {
+                            if igpr < 8 {
+                                let src = (slot + r) * 16;
+                                writeln!(self.out, "\tldr\tx{igpr}, [sp, #{src}]").unwrap();
+                                if matches!(aty, Type::Float | Type::Double) && r == 0 {
+                                    writeln!(self.out, "\tfmov\td0, x{igpr}").unwrap();
+                                    writeln!(self.out, "\tfcvtzs\tx{igpr}, d0").unwrap();
+                                }
+                                igpr += 1;
+                                gpr_slots_used += 1;
+                            }
                         }
-                        igpr += 1;
+                        slot += nr;
                     }
                 }
-                // Pack stack args (if any): copy args[8..] into contiguous 8-byte slots
-                // at the eventual SP. After we free the 16-byte spill area for all n args,
-                // we re-push n_stack * 8 (aligned to 16) with those values.
-                let spill = (n as i64) * 16;
-                if n_stack > 0 {
-                    // save x0..x7 temporarily on a small area after spills
-                    for r in 0..n_reg {
+
+                let spill = total_slots * 16;
+                let n_stack_slots = (total_slots - gpr_slots_used).max(0);
+                if n_stack_slots > 0 {
+                    // Outgoing stack args: pack leftover spill slots into 8-byte region.
+                    for r in 0..igpr {
                         writeln!(self.out, "\tstr\tx{r}, [sp, #-16]!").unwrap();
                     }
-                    // stack args live at spill offsets 8*16, 9*16, ... relative to
-                    // spill base. Current SP is 16*n_reg below spill base.
-                    // spill base = sp + 16*n_reg (after saving regs).
-                    let stack_bytes = Self::align_up((n_stack * 8) as i64, 16);
+                    let stack_bytes = Self::align_up(n_stack_slots * 8, 16);
                     writeln!(self.out, "\tsub\tsp, sp, #{stack_bytes}").unwrap();
-                    for k in 0..n_stack {
-                        // original spill slot for arg (8+k): from current sp:
-                        // after: reg_save (n_reg*16) + stack_bytes, then spill of n args
-                        // arg i offset from original post-spill sp was i*16.
-                        // current sp = original_sp - n_reg*16 - stack_bytes
-                        // so arg (8+k) at original_sp + (8+k)*16 = current + n_reg*16 + stack_bytes + (8+k)*16
-                        let from = (n_reg as i64) * 16
+                    for k in 0..n_stack_slots {
+                        // Leftover slots start at spill index gpr_slots_used.
+                        let from = (igpr as i64) * 16
                             + stack_bytes
-                            + ((8 + k) as i64) * 16;
-                        let to = (k as i64) * 8;
+                            + (gpr_slots_used + k) * 16;
+                        let to = k * 8;
                         writeln!(self.out, "\tldr\tx16, [sp, #{from}]").unwrap();
                         writeln!(self.out, "\tstr\tx16, [sp, #{to}]").unwrap();
                     }
-                    // restore x0..x7 from above stack_bytes region
-                    for r in (0..n_reg).rev() {
-                        let off = stack_bytes + ((n_reg - 1 - r) as i64) * 16;
-                        // reg saves were pushed r=0 first, so r=0 is at highest address:
-                        // after push 0..n_reg-1: sp points to x{n_reg-1}
-                        // Actually we pushed r=0 then r=1 ..., so top is x{n_reg-1}.
-                        // after also sub stack_bytes, reg save for x{r} is at
-                        // stack_bytes + (n_reg-1-r)*16
+                    for r in (0..igpr).rev() {
+                        let off = stack_bytes + ((igpr - 1 - r) as i64) * 16;
                         writeln!(self.out, "\tldr\tx{r}, [sp, #{off}]").unwrap();
                     }
-                    // call with SP at stack args; after call free stack_bytes + reg_save + spill
                     writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
-                    let total = stack_bytes + (n_reg as i64) * 16 + spill;
+                    let total = stack_bytes + (igpr as i64) * 16 + spill;
                     writeln!(self.out, "\tadd\tsp, sp, #{total}").unwrap();
-                    if dest != 0 {
-                        writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
-                    }
-                    return Ok(Type::Int);
-                }
-                // no stack args: pop spill and call
-                if spill > 0 {
-                    writeln!(self.out, "\tadd\tsp, sp, #{spill}").unwrap();
-                }
-                if self.funcs.contains_key(name)
-                    || matches!(
-                        name.as_str(),
-                        "strlen"
-                            | "calloc"
-                            | "malloc"
-                            | "free"
-                            | "putchar"
-                            | "puts"
-                            | "exit"
-                            | "memcmp"
-                            | "memcpy"
-                            | "memset"
-                            | "strcmp"
-                            | "strcpy"
-                    )
-                {
-                    writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
-                } else if self.locals.contains_key(name) || self.globals.contains_key(name) {
-                    let _ = self.emit_expr_rval(&Expr::Var(name.clone()), 16, typedefs)?;
-                    writeln!(self.out, "\tblr\tx16").unwrap();
                 } else {
-                    writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
+                    if spill > 0 {
+                        writeln!(self.out, "\tadd\tsp, sp, #{spill}").unwrap();
+                    }
+                    if self.funcs.contains_key(name)
+                        || matches!(
+                            name.as_str(),
+                            "strlen"
+                                | "calloc"
+                                | "malloc"
+                                | "free"
+                                | "putchar"
+                                | "puts"
+                                | "exit"
+                                | "memcmp"
+                                | "memcpy"
+                                | "memset"
+                                | "strcmp"
+                                | "strcpy"
+                        )
+                    {
+                        writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
+                    } else if self.locals.contains_key(name) || self.globals.contains_key(name) {
+                        let _ = self.emit_expr_rval(&Expr::Var(name.clone()), 16, typedefs)?;
+                        writeln!(self.out, "\tblr\tx16").unwrap();
+                    } else {
+                        writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
+                    }
                 }
                 // float return in d0
                 let ret_ty = self
@@ -2745,6 +2924,8 @@ impl Codegen {
                     writeln!(self.out, "\tfmov\tx{dest}, d0").unwrap();
                     return Ok(Type::Double);
                 }
+                // Small aggregate return: x0[,x1] already hold the value.
+                // Leave them in place; scalar callers only consume x0.
                 if dest != 0 {
                     writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
                 }

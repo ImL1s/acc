@@ -250,11 +250,13 @@ impl Codegen {
     }
 
     fn collect_layouts(&mut self, prog: &Program) {
-        for (name, is_union, fields) in &prog.type_layouts {
-            let lay = self.layout_fields(fields, *is_union);
-            self.layouts.insert(name.clone(), lay);
-        }
-        for _ in 0..3 {
+        // Multi-pass: type_layouts HashMap order is unstable; nested named
+        // members must be sized before parent union/struct (else 8-byte fallback).
+        for _ in 0..12 {
+            for (name, is_union, fields) in &prog.type_layouts {
+                let lay = self.layout_fields(fields, *is_union);
+                self.layouts.insert(name.clone(), lay);
+            }
             for item in &prog.items {
                 match item {
                     Item::StructDef { name, fields } => {
