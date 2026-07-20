@@ -1216,6 +1216,15 @@ impl Codegen {
                 match ty {
                     Type::Ptr(inner) => Ok(*inner),
                     Type::Array(inner, _) => Ok(*inner),
+                    // Incomplete typing: integer used as pointer.
+                    Type::Int
+                    | Type::UInt
+                    | Type::Long
+                    | Type::ULong
+                    | Type::Short
+                    | Type::UShort
+                    | Type::Char
+                    | Type::Void => Ok(Type::Char),
                     other => Err(format!("cannot dereference {:?}", other)),
                 }
             }
@@ -1486,6 +1495,14 @@ impl Codegen {
                     let inner = match ty {
                         Type::Ptr(i) => *i,
                         Type::Array(i, _) => *i,
+                        Type::Int
+                        | Type::UInt
+                        | Type::Long
+                        | Type::ULong
+                        | Type::Short
+                        | Type::UShort
+                        | Type::Char
+                        | Type::Void => Type::Char,
                         other => return Err(format!("deref {:?}", other)),
                     };
                     self.load_ty(&inner, 9, dest);
