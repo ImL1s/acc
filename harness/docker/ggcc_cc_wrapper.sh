@@ -79,7 +79,16 @@ while [[ $i -lt $# ]]; do
       while [[ $_wp_i -lt ${#_wp_parts[@]} ]]; do
         _w="${_wp_parts[$_wp_i]}"
         case "$_w" in
-          -MMD|-MD|-M|-MM|-MG|-MP) deps=1 ;;
+          -MMD|-MD)
+            # gcc: -Wp,-MMD,path.d  → depfile is the next comma field
+            deps=1
+            _next="${_wp_parts[$((_wp_i+1))]:-}"
+            if [[ -n "$_next" && "$_next" != -* ]]; then
+              DEP_MF="$_next"
+              _wp_i=$((_wp_i+1))
+            fi
+            ;;
+          -M|-MM|-MG|-MP) deps=1 ;;
           -MF)
             _wp_i=$((_wp_i+1))
             DEP_MF="${_wp_parts[$_wp_i]:-}"
