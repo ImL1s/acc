@@ -228,8 +228,9 @@ is_probe_input() {
   [[ ${#c_sources[@]} -eq 0 ]]
 }
 
-# Dependency-only probes: do not invoke gcc on .c
-if [[ "$deps" -eq 1 && "$mode" == "preprocess" ]]; then
+# Dependency-only probes with no real inputs: empty output OK.
+# Real .S/.lds.S preprocess (vdso.lds, vmlinux.lds, realmode.lds) MUST run cpp.
+if [[ "$deps" -eq 1 && "$mode" == "preprocess" && ${#c_sources[@]} -eq 0 && ${#s_sources[@]} -eq 0 && ${#other_inputs[@]} -eq 0 ]]; then
   if [[ -n "$out" ]]; then
     : >"$out"
   fi
@@ -242,9 +243,38 @@ if [[ "$mode" == "preprocess" ]]; then
     echo "ggcc_cc_wrapper: BLOCKED -E on real .c not implemented; refusing gcc fallback for: ${c_sources[*]}" >&2
     exit 1
   fi
-  # Probe stdin /dev/null / no file: system preprocessor OK (defines __GNUC__)
-  # so Kconfig accepts the compiler name/version. Not used for kernel TUs.
-  exec "$SYSCC" -E "${passthru_sys[@]}" "${ignored[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+  # .lds.S / probes: system preprocessor (with -I/-D) + depfile for fixdep.
+  write_depfile_pp() {
+    local srcf="${1:-}"
+    [[ "$deps" -eq 1 || -n "$DEP_MF" ]] || return 0
+    local dfile
+    if [[ -n "$DEP_MF" ]]; then
+      dfile="$DEP_MF"
+    elif [[ -n "$out" ]]; then
+      local base dir
+      base="$(basename "$out")"
+      dir="$(dirname "$out")"
+      dfile="$dir/.${base}.d"
+    else
+      return 0
+    fi
+    mkdir -p "$(dirname "$dfile")" 2>/dev/null || true
+    printf '%s: %s\n' "${out:-out}" "${srcf:-}" >"$dfile"
+  }
+  set +e
+  if [[ -n "$out" ]]; then
+    "$SYSCC" -E "${passthru_sys[@]}" "${ignored[@]}" -o "$out" "${s_sources[@]}" "${other_inputs[@]}"
+  else
+    "$SYSCC" -E "${passthru_sys[@]}" "${ignored[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+  fi
+  ec=$?
+  set -e
+  if [[ ${#s_sources[@]} -ge 1 ]]; then
+    write_depfile_pp "${s_sources[0]}"
+  elif [[ -n "$out" ]]; then
+    write_depfile_pp ""
+  fi
+  exit "$ec"
 fi
 
 # Compile probe with no real .c and no real .S: /dev/null or as-version probes.
