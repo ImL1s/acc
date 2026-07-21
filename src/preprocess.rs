@@ -607,19 +607,219 @@ pub fn preprocess_with_options_arch(
         source_name,
     )?;
     if for_linux {
-        out = strip_kernel_export_residue(&out);
+        out = soften_kernel_pp_residue(&out);
+        out = soften_kernel_builtins(&out);
+        out = strip_expanded_export_soup(&out);
+        // Kernel headers glue entire functions onto one physical line after PP;
+        // break after `;` / `}` outside strings so lex/parse stay O(n).
+        out = break_glued_kernel_lines(&out);
     }
     Ok(out)
 }
 
-/// Headers redefine EXPORT_SYMBOL* to asm soup our frontend cannot parse.
-/// After full PP, drop remaining call-like uses so TUs still emit .o for Stage C.
-fn strip_kernel_export_residue(src: &str) -> String {
+/// After headers expand EXPORT_SYMBOL, residual soup looks like:
+///   extern typeof(f) f; static void *__UNIQUE_ID_... = &f; asm(".section "...);
+/// Drop those pieces so parse does not thrash on broken asm strings.
+fn strip_expanded_export_soup(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.contains("__UNIQUE_ID___addressable_")
+            || t.contains("__addressable_")
+            || (t.starts_with("asm(") && t.contains("export_symbol"))
+            || (t.starts_with("asm (") && t.contains("export_symbol"))
+            || (t.starts_with("extern typeof(") && t.contains(");") && !t.contains('{'))
+        {
+            // Do NOT emit `/*...*/` — may sit inside an open block comment and
+            // terminate it early (then `* We can't...` becomes code).
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Insert newlines after `;` and `}` when not inside string/char/block comments.
+fn break_glued_kernel_lines(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len() + src.len() / 32);
+    let mut i = 0usize;
+    let mut in_str = false;
+    let mut in_chr = false;
+    let mut in_block = false;
+    let mut in_line = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_line {
+            out.push(b as char);
+            if b == b'\n' {
+                in_line = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block {
+            out.push(b as char);
+            if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                out.push('/');
+                i += 2;
+                in_block = false;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_str {
+            out.push(b as char);
+            if b == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_chr {
+            out.push(b as char);
+            if b == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_chr = false;
+            }
+            i += 1;
+            continue;
+        }
+        // Enter comments / strings
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            out.push_str("/*");
+            i += 2;
+            in_block = true;
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            out.push_str("//");
+            i += 2;
+            in_line = true;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_str = true;
+                out.push('"');
+            }
+            b'\'' => {
+                in_chr = true;
+                out.push('\'');
+            }
+            b';' | b'}' => {
+                out.push(b as char);
+                // Don't double-newline if already followed by newline.
+                if i + 1 < bytes.len() && bytes[i + 1] != b'\n' {
+                    out.push('\n');
+                }
+            }
+            _ => out.push(b as char),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Skip balanced `(...)` starting at `i` pointing at `(`. Returns index after `)`.
+fn skip_balanced_parens(bytes: &[u8], mut i: usize) -> usize {
+    if i >= bytes.len() || bytes[i] != b'(' {
+        return i;
+    }
+    let mut depth = 0i32;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return i;
+                }
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Split top-level commas in a parameter list (no surrounding parens).
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let bytes = s.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                parts.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start <= s.len() {
+        let t = s[start..].trim();
+        if !t.is_empty() {
+            parts.push(t.to_string());
+        }
+    }
+    parts
+}
+
+/// Rewrite unexpanded `SYSCALL_DEFINEn(name, type, arg, ...)` into
+/// `long sys_name(type arg, ...)` so the following `{ body }` is a real def.
+/// Also strip EXPORT_SYMBOL* residue headers leave behind.
+fn soften_kernel_pp_residue(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
     let mut i = 0usize;
     while i < bytes.len() {
-        // Match EXPORT_SYMBOL... identifier then balanced (...)
         if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
             let start = i;
             i += 1;
@@ -644,46 +844,177 @@ fn strip_kernel_export_residue(src: &str) -> String {
                     | "EXPORT_STATIC_CALL_TRAMP"
                     | "EXPORT_STATIC_CALL_TRAMP_GPL"
             );
-            if is_export {
-                // skip whitespace
+            let is_syscall = matches!(
+                name,
+                "SYSCALL_DEFINE0"
+                    | "SYSCALL_DEFINE1"
+                    | "SYSCALL_DEFINE2"
+                    | "SYSCALL_DEFINE3"
+                    | "SYSCALL_DEFINE4"
+                    | "SYSCALL_DEFINE5"
+                    | "SYSCALL_DEFINE6"
+                    | "COMPAT_SYSCALL_DEFINE0"
+                    | "COMPAT_SYSCALL_DEFINE1"
+                    | "COMPAT_SYSCALL_DEFINE2"
+                    | "COMPAT_SYSCALL_DEFINE3"
+                    | "COMPAT_SYSCALL_DEFINE4"
+                    | "COMPAT_SYSCALL_DEFINE5"
+                    | "COMPAT_SYSCALL_DEFINE6"
+            );
+            if is_export || is_syscall {
                 while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                     i += 1;
                 }
                 if i < bytes.len() && bytes[i] == b'(' {
-                    // skip balanced parens
-                    let mut depth = 0i32;
-                    while i < bytes.len() {
-                        match bytes[i] {
-                            b'(' => depth += 1,
-                            b')' => {
-                                depth -= 1;
-                                i += 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                                continue;
-                            }
-                            b'"' => {
-                                i += 1;
-                                while i < bytes.len() && bytes[i] != b'"' {
-                                    if bytes[i] == b'\\' {
-                                        i += 1;
-                                    }
-                                    i += 1;
-                                }
-                            }
-                            _ => {}
+                    let args_start = i + 1;
+                    let after = skip_balanced_parens(bytes, i);
+                    let args_end = after.saturating_sub(1);
+                    let args_src = if args_end > args_start {
+                        std::str::from_utf8(&bytes[args_start..args_end]).unwrap_or("")
+                    } else {
+                        ""
+                    };
+                    i = after;
+                    if is_export {
+                        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                            i += 1;
                         }
-                        i += 1;
+                        if i < bytes.len() && bytes[i] == b';' {
+                            i += 1;
+                        }
+                        out.push(' ');
+                        continue;
                     }
-                    // optional trailing semicolon
-                    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
-                        i += 1;
+                    // SYSCALL_DEFINEn → long sys_name(...)
+                    let parts = split_top_level_commas(args_src);
+                    if parts.is_empty() {
+                        out.push_str("/*syscall*/ long sys_unknown(void) ");
+                        continue;
                     }
-                    if i < bytes.len() && bytes[i] == b';' {
-                        i += 1;
+                    let sys_name = parts[0].trim();
+                    let prefix = if name.starts_with("COMPAT_") {
+                        "compat_sys_"
+                    } else {
+                        "sys_"
+                    };
+                    if parts.len() == 1 {
+                        // SYSCALL_DEFINE0(name)
+                        out.push_str(&format!("long {prefix}{sys_name}(void) "));
+                        continue;
                     }
-                    out.push_str("/*export*/ ");
+                    // pairs: type, arg, type, arg, ...
+                    let mut params = Vec::new();
+                    let mut j = 1;
+                    while j + 1 < parts.len() {
+                        let ty = parts[j].trim();
+                        let arg = parts[j + 1].trim();
+                        // Drop leftover sparse markers in type text.
+                        let ty = ty
+                            .replace("__user", "")
+                            .replace("__kernel", "")
+                            .replace("__force", "")
+                            .replace("__rcu", "");
+                        params.push(format!("{} {}", ty.trim(), arg));
+                        j += 2;
+                    }
+                    // Odd leftover type without name
+                    if j < parts.len() {
+                        let ty = parts[j]
+                            .trim()
+                            .replace("__user", "")
+                            .replace("__kernel", "")
+                            .replace("__force", "");
+                        params.push(format!("{} _a{j}", ty.trim()));
+                    }
+                    out.push_str(&format!(
+                        "long {prefix}{sys_name}({}) ",
+                        params.join(", ")
+                    ));
+                    continue;
+                }
+            }
+            out.push_str(name);
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Soft-replace heavy GCC builtins left after kernel header expansion.
+/// These explode into multi-KB expressions that thrash the parser on large TUs.
+fn soften_kernel_builtins(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let name = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            let soft = match name {
+                // type compatibility → treat as true (1)
+                "__builtin_types_compatible_p" => Some("1"),
+                // constant_p → 0 (not constant) so dead-code paths stay simple
+                "__builtin_constant_p" => Some("0"),
+                // choose_expr(c,a,b) → a (first alternative); good enough for soft
+                "__builtin_choose_expr" => Some("__ggcc_choose"),
+                // expect(x,c) → (x)
+                "__builtin_expect" => Some("__ggcc_expect"),
+                // C11 _Generic is multi-assoc type switch; kernel uses it in
+                // READ_ONCE-style helpers. Soft → 0 to avoid parse thrash.
+                "_Generic" => Some("0"),
+                _ => None,
+            };
+            if let Some(rep) = soft {
+                // skip whitespace + (args)
+                while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b'(' {
+                    if rep == "__ggcc_choose" {
+                        // keep first non-condition arg: choose_expr(c, a, b) → (a)
+                        let args_start = i + 1;
+                        let after = skip_balanced_parens(bytes, i);
+                        let args_end = after.saturating_sub(1);
+                        let args =
+                            std::str::from_utf8(&bytes[args_start..args_end]).unwrap_or("");
+                        let parts = split_top_level_commas(args);
+                        let pick = if parts.len() >= 2 {
+                            parts[1].trim()
+                        } else if !parts.is_empty() {
+                            parts[0].trim()
+                        } else {
+                            "0"
+                        };
+                        out.push('(');
+                        out.push_str(pick);
+                        out.push(')');
+                        i = after;
+                        continue;
+                    }
+                    if rep == "__ggcc_expect" {
+                        // expect(x, c) → (x)
+                        let args_start = i + 1;
+                        let after = skip_balanced_parens(bytes, i);
+                        let args_end = after.saturating_sub(1);
+                        let args =
+                            std::str::from_utf8(&bytes[args_start..args_end]).unwrap_or("");
+                        let parts = split_top_level_commas(args);
+                        let pick = parts.first().map(|s| s.trim()).unwrap_or("0");
+                        out.push('(');
+                        out.push_str(pick);
+                        out.push(')');
+                        i = after;
+                        continue;
+                    }
+                    // types_compatible_p / constant_p → literal
+                    i = skip_balanced_parens(bytes, i);
+                    out.push_str(rep);
                     continue;
                 }
             }

@@ -1551,10 +1551,27 @@ impl Parser {
     }
 
     fn parse_decl_or_func(&mut self, file_static: bool) -> Result<Vec<Item>, String> {
-        // parse_type_specifier may also consume `static`
-        let more_static = self.at(&TokenKind::Static);
-        let is_static = file_static || more_static;
+        // Collect storage-class before/while type-specifier eats them.
+        let mut is_static = file_static;
+        let mut saw_inline = false;
+        loop {
+            if self.eat(TokenKind::Static) {
+                is_static = true;
+                continue;
+            }
+            if self.eat(TokenKind::Inline) {
+                saw_inline = true;
+                continue;
+            }
+            if self.eat(TokenKind::Extern) || self.eat(TokenKind::Register) || self.eat(TokenKind::Auto)
+            {
+                continue;
+            }
+            break;
+        }
         let base = self.parse_type_specifier()?;
+        // type_specifier may still consume residual static/inline interleaved
+        // with type keywords; re-check is unnecessary for body-skip heuristics.
         // Could be: type name(...) { }  or type name, name2;
         // Function params are part of the declarator (including multi-suffix forms).
         let (name, mut ty, func_params) = self.parse_declarator(base.clone())?;
@@ -1581,14 +1598,23 @@ impl Parser {
                 })]);
             }
             if self.at(&TokenKind::LBrace) {
-                let body = self.parse_block()?;
+                // Kernel headers inject thousands of static/inline helpers. Codegen
+                // already skips static non-main bodies; skip AST build for speed.
+                // Treat `inline` without static as skippable too (headers).
+                let skip_body = name != "main" && (is_static || saw_inline);
+                let body = if skip_body {
+                    self.skip_balanced_braces()?;
+                    None
+                } else {
+                    Some(self.parse_block()?)
+                };
                 return Ok(vec![Item::Func(Function {
                     name,
                     ret: ty,
                     params,
                     variadic,
-                    body: Some(body),
-                    is_static,
+                    body,
+                    is_static: is_static || saw_inline,
                 })]);
             }
             if self.eat(TokenKind::Comma) {
@@ -1834,6 +1860,37 @@ impl Parser {
                     self.bump();
                     break;
                 }
+            }
+            self.bump();
+        }
+        Ok(())
+    }
+
+    /// Skip a balanced `{...}` starting at the current token (must be `{`).
+    /// String/char literals are single tokens so braces inside them do not
+    /// affect depth (lexer already tokenized them).
+    fn skip_balanced_braces(&mut self) -> Result<(), String> {
+        self.expect(TokenKind::LBrace)?;
+        let mut depth = 1i32;
+        let mut steps = 0u64;
+        while depth > 0 && !self.at(&TokenKind::Eof) {
+            steps += 1;
+            // Safety: never walk the whole file forever on a broken brace match.
+            if steps > 50_000_000 {
+                return Err("skip_balanced_braces: too many tokens".into());
+            }
+            if self.at(&TokenKind::LBrace) {
+                depth += 1;
+                self.bump();
+                continue;
+            }
+            if self.at(&TokenKind::RBrace) {
+                depth -= 1;
+                self.bump();
+                if depth == 0 {
+                    break;
+                }
+                continue;
             }
             self.bump();
         }
