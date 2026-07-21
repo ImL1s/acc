@@ -4,24 +4,36 @@
 
 | Gate | Status |
 |------|--------|
-| C3 multiarch | PASS (held) |
-| C5 double-run | PASS (held) |
+| C3 multiarch | PASS (held; re-run after language churn) |
+| C5 double-run | PASS (held; re-run after language churn) |
 | C4 clean-room | held |
-| C2 | SQLite smoke only |
-| **C1** | **PROGRESS** — ~218 .o; **no bzImage/QEMU** |
+| C2 | SQLite amalgamation smoke only; **no testfixture** |
+| **C1** | **PROGRESS** — ~238 kernel .o; **no bzImage / QEMU** |
 
-### C1 greens (recent)
-- prepare0, init/*, vdso/vma, mm/*
-- **fs/namei.o, fs/exec.o**, ~38 fs/*.o
-- **kernel/time/hrtimer.o**, timer.o, jiffies.o, …
-- **drivers/char/random.o**, drivers/base/*
-- lib/string, vsprintf, hexdump, …
+### C1 greens (amd64 Docker)
+- prepare0 full
+- init/* (main, do_mounts, …)
+- fs: **namei.o, exec.o**, ~40+ fs/*.o
+- kernel/time: **timekeeping.o, hrtimer.o**, timer, jiffies, …
+- kernel: **cpu.o**
+- drivers: base/*, **char/random.o**
+- arch/x86/entry: vdso/vma, **vdso/extable**, **vsyscall_64**
+- lib: string, vsprintf, hexdump, …
 
-### Language fixes (session commits)
-SYSCALL_DEFINE, trace macros, _Generic soft, export soup, static body skip, range designators `[0...16-1]`, enum trailing vars, soft `->` on Struct
+### Language fixes (this long session)
+- enum IntLit, soft ->/member/deref, __int128, arch predefs
+- symbol dedupe, restrict, va_arg, offsetof[arr]
+- SYSCALL_DEFINE rewrite, TRACE/IDT macro soft, export soup strip
+- static/inline body skip, soft ({...})→0, typeof→long
+- designators: .field[n], [i][j]=, [0...n+1], enum trailing vars
 
-### Still red
-timekeeping, sched/core (timeout), rcu/tiny (timeout), arch events/vdso/extable, …
+### Still red / slow
+- kernel/sched/core.o, kernel/rcu/tiny.o (**native hang / QEMU timeout** — multi-min)
+- arch/x86/events/*.o
+- mm some TUs
 
 ### blocked_reason
-C1: no bzImage/boot. C2: no testfixture. **Goal NOT complete.**
+**C1:** no bootable bzImage yet (~238 .o, sched/rcu bottleneck).  
+**C2:** no SQLite testfixture / Redis.  
+**C5:** needs re-run after language churn.  
+**Goal NOT complete.**
