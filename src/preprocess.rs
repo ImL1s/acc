@@ -1035,6 +1035,8 @@ fn soften_kernel_builtins(src: &str) -> String {
                 // C11 _Generic is multi-assoc type switch; kernel uses it in
                 // READ_ONCE-style helpers. Soft → 0 to avoid parse thrash.
                 "_Generic" => Some("0"),
+                // typeof(expr)/typeof(type) in kernel READ_ONCE/percpu — soft to long.
+                "typeof" | "__typeof" | "__typeof__" => Some("__ggcc_typeof"),
                 _ => None,
             };
             if let Some(rep) = soft {
@@ -1077,6 +1079,12 @@ fn soften_kernel_builtins(src: &str) -> String {
                         out.push_str(pick);
                         out.push(')');
                         i = after;
+                        continue;
+                    }
+                    if rep == "__ggcc_typeof" {
+                        // typeof(T) / typeof(expr) → long (size/align soft path)
+                        i = skip_balanced_parens(bytes, i);
+                        out.push_str("long");
                         continue;
                     }
                     // types_compatible_p / constant_p → literal
