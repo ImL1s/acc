@@ -1775,21 +1775,35 @@ impl Parser {
             let mut fields = Vec::new();
             while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
                 if self.eat(TokenKind::Dot) {
-                    // Nested designators: `.p4d.pgd = expr` (kernel page-table types).
+                    // Nested designators: `.p4d.pgd = expr` and `.base[0] = expr`
+                    // (kernel timekeeping / page-table types).
                     let mut field = if let TokenKind::Ident(s) = self.peek_kind().clone() {
                         self.bump();
                         s
                     } else {
                         return Err("designated init field name".into());
                     };
-                    while self.eat(TokenKind::Dot) {
-                        if let TokenKind::Ident(s) = self.peek_kind().clone() {
-                            self.bump();
-                            // Keep innermost name for soft layout matching.
-                            field = s;
-                        } else {
-                            return Err("nested designated init field name".into());
+                    loop {
+                        if self.eat(TokenKind::Dot) {
+                            if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                                self.bump();
+                                // Keep innermost name for soft layout matching.
+                                field = s;
+                            } else {
+                                return Err("nested designated init field name".into());
+                            }
+                            continue;
                         }
+                        // `.field[n]` / `.field[lo ... hi]` — soft: keep field name,
+                        // consume index designator chain.
+                        if self.eat(TokenKind::LBracket) {
+                            while !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
+                                self.bump();
+                            }
+                            self.expect(TokenKind::RBracket)?;
+                            continue;
+                        }
+                        break;
                     }
                     self.expect(TokenKind::Assign)?;
                     fields.push((Some(field), self.parse_initializer()?));

@@ -893,7 +893,12 @@ fn soften_kernel_pp_residue(src: &str) -> String {
             ) || name.starts_with("TRACE_EVENT_")
                 || name.starts_with("DECLARE_EVENT_")
                 || name.starts_with("DEFINE_EVENT_");
-            if is_export || is_syscall || is_trace {
+            // x86 IDT entry declaration macros left unexpanded after soft PP.
+            let is_idt_decl = name.starts_with("DECLARE_IDTENTRY");
+            // DEFINE_IDTENTRY* acts as a function header; rewrite to void name(...)
+            // and leave the following { body } for the parser.
+            let is_idt_def = name.starts_with("DEFINE_IDTENTRY");
+            if is_export || is_syscall || is_trace || is_idt_decl || is_idt_def {
                 while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                     i += 1;
                 }
@@ -915,6 +920,36 @@ fn soften_kernel_pp_residue(src: &str) -> String {
                             i += 1;
                         }
                         out.push(' ');
+                        continue;
+                    }
+                    if is_idt_decl {
+                        // DECLARE_IDTENTRY(vector, func) → void asm_func(void); void func(void *regs);
+                        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+                            i += 1;
+                        }
+                        if i < bytes.len() && bytes[i] == b';' {
+                            i += 1;
+                        }
+                        let parts = split_top_level_commas(args_src);
+                        let func = parts
+                            .get(1)
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("idt_handler");
+                        out.push_str(&format!(
+                            "void asm_{func}(void); void xen_asm_{func}(void); void fred_{func}(void *regs); void {func}(void *regs); "
+                        ));
+                        continue;
+                    }
+                    if is_idt_def {
+                        // DEFINE_IDTENTRY(func) { ... } → void func(void *regs)
+                        let parts = split_top_level_commas(args_src);
+                        let func = parts
+                            .first()
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("idt_handler");
+                        out.push_str(&format!("void {func}(void *regs) "));
                         continue;
                     }
                     // SYSCALL_DEFINEn → long sys_name(...)
