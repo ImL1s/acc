@@ -3342,10 +3342,29 @@ impl Parser {
                 | "initialize_identity_maps"
                 | "finalize_identity_maps"
                 | "add_identity_map"
+                | "kernel_add_identity_map"
+                | "alloc_pgt_page"
+                | "alloc_pgt_page_n"
+                | "p4d_offset"
+                | "pud_offset"
+                | "pmd_offset"
+                | "pte_offset"
+                | "p4d_alloc"
+                | "pud_alloc"
+                | "pmd_alloc"
+                | "pte_alloc"
+                | "ident_pmd_init"
+                | "ident_pud_init"
+                | "ident_p4d_init"
+                | "kernel_ident_mapping_init"
                 | "load_stage1_idt"
                 | "load_stage2_idt"
                 | "cleanup_exception_handling"
                 | "set_page_flags"
+                | "____memcpy"
+                | "__memcpy"
+                | "__memmove"
+                | "__memset"
                 | "parse_mem_encrypt"
                 | "console_init"
                 | "early_serial_init"
@@ -3402,8 +3421,14 @@ impl Parser {
             || name.starts_with("dec_")
             || name.starts_with("fill_")
             || name.starts_with("flush_")
+            || name.starts_with("ident_")
+            || name.starts_with("kernel_ident")
+            || name.contains("identity_map")
+            || name.contains("IdentityMap")
             || name.contains("decompress")
             || name.contains("Decompress")
+            || name == "alloc_pgt_page"
+            || name == "alloc_pgt_page_n"
     }
 }
 

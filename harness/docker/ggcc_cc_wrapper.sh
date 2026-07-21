@@ -388,6 +388,17 @@ case "$src" in
     ;;
 esac
 
+# Soft exception: compressed identity-map bootstrap (ident_map_64.c pulls in
+# mm/ident_map.c + heavy pgtable headers). Full keep-list parse hangs; empty
+# soft-stubs for kernel_add_identity_map leave BSS unmapped → #PF in memcpy.
+# System freestanding CC for this one TU only. Logged for C1 audit.
+case "$src" in
+  *arch/x86/boot/compressed/ident_map_64.c|*arch/x86/mm/ident_map.c)
+    echo "ggcc_cc_wrapper: SOFT identity-map (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
 tmpdir="${TMPDIR:-/tmp}"
 work="$(mktemp -d "$tmpdir/ggcc-wrap.XXXXXX")"
 cleanup() { rm -rf "$work"; }

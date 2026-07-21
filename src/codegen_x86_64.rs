@@ -356,13 +356,23 @@ impl Codegen {
                     Some(b) if b.is_empty() && f.name != "main" => {
                         // Stub both static and non-static soft-skipped bodies so
                         // function-pointer tables (fops/ktype) resolve at link.
+                        // Freestanding memops: never soft-stub — inline asm bodies
+                        // are empty after soft-parse and would break kernel decompress.
                         if emitted_syms.insert(f.name.clone()) {
-                            self.emit_stub_function(f)?;
+                            if self.emit_freestanding_memop(f)? {
+                                // done
+                            } else {
+                                self.emit_stub_function(f)?;
+                            }
                         }
                     }
                     Some(_) => {
                         if emitted_syms.insert(f.name.clone()) {
-                            self.emit_function(f, &typedefs)?;
+                            // Prefer correct rep-based memops even if a soft C body exists
+                            // (signed ptr compares / missing ____memcpy inline asm).
+                            if !self.emit_freestanding_memop(f)? {
+                                self.emit_function(f, &typedefs)?;
+                            }
                         }
                     }
                 }
@@ -692,6 +702,79 @@ impl Codegen {
         writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
         writeln!(self.out, "\tretq").unwrap();
         Ok(())
+    }
+
+    /// Emit correct freestanding memcpy/memmove/memset (x86_64 SysV).
+    /// Kernel compressed boot trusts these; soft C + dropped inline asm is wrong.
+    /// Returns true if handled.
+    fn emit_freestanding_memop(&mut self, f: &Function) -> Result<bool, String> {
+        let name = f.name.as_str();
+        let is_memcpy = matches!(name, "memcpy" | "____memcpy" | "__memcpy");
+        let is_memmove = matches!(name, "memmove" | "__memmove");
+        let is_memset = matches!(name, "memset" | "__memset");
+        if !is_memcpy && !is_memmove && !is_memset {
+            return Ok(false);
+        }
+        let s = sym(&f.name);
+        if f.is_static {
+            writeln!(self.out, "").unwrap();
+        } else {
+            // Strong globals so they win over weak stubs from other TUs.
+            writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+        }
+        writeln!(self.out, "\t.p2align\t4, 0x90").unwrap();
+        writeln!(self.out, "{s}:").unwrap();
+        // SysV: rdi=dest/s, rsi=src/c, rdx=n
+        if is_memset {
+            // memset(void *s, int c, size_t n)
+            writeln!(self.out, "\tmovq\t%rdi, %r8").unwrap(); // save return
+            writeln!(self.out, "\tmovzbl\t%sil, %eax").unwrap(); // c
+            writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap(); // n
+            writeln!(self.out, "\tcld").unwrap();
+            writeln!(self.out, "\trep\tstosb").unwrap();
+            writeln!(self.out, "\tmovq\t%r8, %rax").unwrap();
+            writeln!(self.out, "\tretq").unwrap();
+            return Ok(true);
+        }
+        if is_memcpy {
+            // memcpy: forward copy (caller guarantees no destructive overlap, or
+            // the C wrapper already redirected to memmove).
+            writeln!(self.out, "\tmovq\t%rdi, %rax").unwrap(); // return dest
+            writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap();
+            writeln!(self.out, "\tcld").unwrap();
+            writeln!(self.out, "\trep\tmovsb").unwrap();
+            writeln!(self.out, "\tretq").unwrap();
+            return Ok(true);
+        }
+        // memmove: handle overlap
+        // if dest <= src || dest - src >= n → forward; else backward
+        let fwd = format!("L_{s}_fwd");
+        let bwd = format!("L_{s}_bwd");
+        let done = format!("L_{s}_done");
+        writeln!(self.out, "\tmovq\t%rdi, %rax").unwrap(); // return dest
+        writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap();
+        writeln!(self.out, "\ttestq\t%rcx, %rcx").unwrap();
+        writeln!(self.out, "\tje\t{done}").unwrap();
+        writeln!(self.out, "\tcmpq\t%rsi, %rdi").unwrap();
+        writeln!(self.out, "\tjbe\t{fwd}").unwrap(); // dest <= src (unsigned)
+        writeln!(self.out, "\tmovq\t%rdi, %r8").unwrap();
+        writeln!(self.out, "\tsubq\t%rsi, %r8").unwrap(); // dest - src
+        writeln!(self.out, "\tcmpq\t%rcx, %r8").unwrap();
+        writeln!(self.out, "\tjae\t{fwd}").unwrap(); // gap >= n
+        // backward
+        writeln!(self.out, "{bwd}:").unwrap();
+        writeln!(self.out, "\tleaq\t-1(%rdi,%rcx), %rdi").unwrap();
+        writeln!(self.out, "\tleaq\t-1(%rsi,%rcx), %rsi").unwrap();
+        writeln!(self.out, "\tstd").unwrap();
+        writeln!(self.out, "\trep\tmovsb").unwrap();
+        writeln!(self.out, "\tcld").unwrap();
+        writeln!(self.out, "\tjmp\t{done}").unwrap();
+        writeln!(self.out, "{fwd}:").unwrap();
+        writeln!(self.out, "\tcld").unwrap();
+        writeln!(self.out, "\trep\tmovsb").unwrap();
+        writeln!(self.out, "{done}:").unwrap();
+        writeln!(self.out, "\tretq").unwrap();
+        Ok(true)
     }
 
     fn emit_function(
