@@ -247,6 +247,7 @@ impl Parser {
             // storage class at file scope (may repeat / interleave)
             let mut file_static = false;
             let mut file_extern = false;
+            let mut file_register = false;
             loop {
                 if self.eat(TokenKind::Static) {
                     file_static = true;
@@ -256,8 +257,11 @@ impl Parser {
                     file_extern = true;
                     continue;
                 }
-                if self.eat(TokenKind::Register)
-                    || self.eat(TokenKind::Inline)
+                if self.eat(TokenKind::Register) {
+                    file_register = true;
+                    continue;
+                }
+                if self.eat(TokenKind::Inline)
                     || self.eat(TokenKind::Restrict)
                     || self.eat(TokenKind::Auto)
                     || self.eat(TokenKind::Const)
@@ -284,7 +288,7 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Enum) && self.is_enum_tag_decl() {
-                items.extend(self.parse_enum_item()?);
+                items.extend(self.parse_enum_item(file_extern)?);
                 continue;
             }
             // struct/union definition or forward decl at file scope: struct S { ... }; / struct S;
@@ -302,7 +306,10 @@ impl Parser {
                 let _ = self.parse_asm_stmt()?;
                 continue;
             }
-            items.extend(self.parse_decl_or_func(file_static, file_extern)?);
+            items.extend(self.parse_decl_or_func(
+                file_static || file_register,
+                file_extern,
+            )?);
         }
         // Flush enum constants discovered inside type specs (e.g. struct { enum { X } x; })
         for g in self.pending_enum_globals.drain(..) {
@@ -850,7 +857,7 @@ impl Parser {
         Ok(ty)
     }
 
-    fn parse_enum_item(&mut self) -> Result<Vec<Item>, String> {
+    fn parse_enum_item(&mut self, is_extern: bool) -> Result<Vec<Item>, String> {
         self.expect(TokenKind::Enum)?;
         let _name = if let TokenKind::Ident(s) = self.peek_kind().clone() {
             self.bump();
@@ -963,13 +970,18 @@ impl Parser {
                 } else {
                     None
                 };
-                items.push(Item::Global(VarDecl {
-                    name: id,
-                    ty: Type::Int,
-                    init,
-                    is_static: false,
-                    is_extern: false,
-                }));
+                // `extern enum E { ... } var;` → declaration only, no BSS.
+                if is_extern && init.is_none() {
+                    // skip define
+                } else {
+                    items.push(Item::Global(VarDecl {
+                        name: id,
+                        ty: Type::Int,
+                        init,
+                        is_static: false,
+                        is_extern,
+                    }));
+                }
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }
@@ -1597,6 +1609,7 @@ impl Parser {
         let mut is_static = file_static;
         let mut saw_inline = false;
         let mut is_extern = file_extern;
+        let mut is_register = false;
         loop {
             if self.eat(TokenKind::Static) {
                 is_static = true;
@@ -1610,11 +1623,18 @@ impl Parser {
                 is_extern = true;
                 continue;
             }
-            if self.eat(TokenKind::Register) || self.eat(TokenKind::Auto) {
+            if self.eat(TokenKind::Register) {
+                // GNU register vars are not linkable objects — treat as local static.
+                is_register = true;
+                is_static = true;
+                continue;
+            }
+            if self.eat(TokenKind::Auto) {
                 continue;
             }
             break;
         }
+        let _ = is_register;
         let base = self.parse_type_specifier()?;
         // type_specifier may still consume residual static/inline interleaved
         // with type keywords; re-check is unnecessary for body-skip heuristics.
