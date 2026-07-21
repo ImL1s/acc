@@ -12,6 +12,8 @@ pub struct Parser {
     unions: Vec<String>,
     /// struct/union field layouts recorded while parsing
     struct_fields: std::collections::HashMap<String, Vec<Field>>,
+    /// Struct/union tags declared `__attribute__((packed))` (1-byte alignment).
+    packed_structs: std::collections::HashSet<String>,
     /// scope-unique tag renames: (scope_id, tag) -> unique_name
     tag_scope: Vec<std::collections::HashMap<String, String>>,
     tag_serial: usize,
@@ -33,12 +35,22 @@ impl Parser {
             structs: Vec::new(),
             unions: Vec::new(),
             struct_fields: std::collections::HashMap::new(),
+            packed_structs: std::collections::HashSet::new(),
             tag_scope: vec![std::collections::HashMap::new()],
             tag_serial: 0,
             pending_enum_globals: Vec::new(),
             enum_values: std::collections::HashMap::new(),
             stmt_expr_depth: 0,
         }
+    }
+
+    /// Consume zero or more sticky `Packed` tokens (from `__attribute__((packed))`).
+    fn eat_packed_attrs(&mut self) -> bool {
+        let mut saw = false;
+        while self.eat(TokenKind::Packed) {
+            saw = true;
+        }
+        saw
     }
 
     fn eval_enum_const(&self, e: &Expr) -> Option<i64> {
@@ -318,7 +330,8 @@ impl Parser {
         let mut type_layouts = Vec::new();
         for (name, fields) in &self.struct_fields {
             let is_union = self.unions.iter().any(|u| u == name);
-            type_layouts.push((name.clone(), is_union, fields.clone()));
+            let packed = self.packed_structs.contains(name);
+            type_layouts.push((name.clone(), is_union, packed, fields.clone()));
         }
         Ok(Program {
             items,
@@ -367,6 +380,8 @@ impl Parser {
     fn parse_struct_or_union_item(&mut self) -> Result<Item, String> {
         let is_union = self.at(&TokenKind::Union);
         self.bump();
+        // `struct __attribute__((packed)) S { ... }`
+        let mut packed = self.eat_packed_attrs();
         let name = if let TokenKind::Ident(s) = &self.peek_kind() {
             let s = s.clone();
             self.bump();
@@ -374,8 +389,12 @@ impl Parser {
         } else {
             return Err("anonymous struct at file scope needs a name".into());
         };
+        packed = self.eat_packed_attrs() || packed;
         if self.eat(TokenKind::Semicolon) {
             // forward declaration
+            if packed {
+                self.packed_structs.insert(name.clone());
+            }
             if is_union {
                 self.unions.push(name.clone());
                 Ok(Item::UnionDef {
@@ -393,6 +412,11 @@ impl Parser {
             self.expect(TokenKind::LBrace)?;
             let fields = self.parse_fields()?;
             self.expect(TokenKind::RBrace)?;
+            // `struct S { ... } __attribute__((packed));`
+            packed = self.eat_packed_attrs() || packed;
+            if packed {
+                self.packed_structs.insert(name.clone());
+            }
             if is_union {
                 self.unions.push(name.clone());
                 self.struct_fields.insert(name.clone(), fields.clone());
@@ -1004,11 +1028,14 @@ impl Parser {
 
     fn parse_struct_type(&mut self, is_union: bool) -> Result<Type, String> {
         self.bump(); // struct/union
+        // `struct __attribute__((packed)) name { ... }`
+        let mut packed = self.eat_packed_attrs();
         let mut name: Option<String> = None;
         if let TokenKind::Ident(s) = self.peek_kind().clone() {
             name = Some(s);
             self.bump();
         }
+        packed = self.eat_packed_attrs() || packed;
         if self.eat(TokenKind::LBrace) {
             // Register tag before fields so recursive `struct S *p` resolves.
             let uniq_opt = name.as_ref().map(|n| self.resolve_tag(n, true));
@@ -1021,8 +1048,12 @@ impl Parser {
             }
             let fields = self.parse_fields()?;
             self.expect(TokenKind::RBrace)?;
+            packed = self.eat_packed_attrs() || packed;
             if let Some(uniq) = uniq_opt {
                 self.struct_fields.insert(uniq.clone(), fields.clone());
+                if packed {
+                    self.packed_structs.insert(uniq.clone());
+                }
                 if is_union {
                     Ok(Type::Union(uniq))
                 } else {
@@ -1035,6 +1066,9 @@ impl Parser {
             }
         } else if let Some(n) = name {
             let uniq = self.resolve_tag(&n, false);
+            if packed {
+                self.packed_structs.insert(uniq.clone());
+            }
             if is_union {
                 Ok(Type::Union(uniq))
             } else {
@@ -1290,17 +1324,20 @@ impl Parser {
                 .layout_named(n)
                 .map(|(_, a, _)| a)
                 .unwrap_or(8),
-            Type::AnonStruct(fs) => self.layout_fields_const(fs, false).1,
-            Type::AnonUnion(fs) => self.layout_fields_const(fs, true).1,
+            Type::AnonStruct(fs) => self.layout_fields_const(fs, false, false).1,
+            Type::AnonUnion(fs) => self.layout_fields_const(fs, true, false).1,
         }
     }
 
     /// Layout from struct_fields (bit-offset packing, matches codegen).
     /// Returns (size, align, field_name → byte offset).
+    /// When `packed` is true, field alignment is 1 and the overall align is 1
+    /// (matches GCC `__attribute__((packed))`).
     fn layout_fields_const(
         &self,
         fields: &[Field],
         is_union: bool,
+        packed: bool,
     ) -> (i64, i64, std::collections::HashMap<String, i64>) {
         let mut map = std::collections::HashMap::new();
         let mut max_align = 1i64;
@@ -1314,7 +1351,7 @@ impl Parser {
             if let Some(width) = f.bit_width {
                 let container_sz = self.const_type_size(&f.ty).unwrap_or(4).max(1) as u64;
                 let container_bits = container_sz * 8;
-                let al = self.const_type_align(&f.ty);
+                let al = if packed { 1 } else { self.const_type_align(&f.ty) };
                 max_align = max_align.max(al);
                 if is_union {
                     if !f.name.is_empty() && width > 0 {
@@ -1346,7 +1383,7 @@ impl Parser {
                 continue;
             }
             let sz = self.const_type_size(&f.ty).unwrap_or(8);
-            let al = self.const_type_align(&f.ty);
+            let al = if packed { 1 } else { self.const_type_align(&f.ty) };
             max_align = max_align.max(al);
             if is_union {
                 if !f.name.is_empty() {
@@ -1362,13 +1399,14 @@ impl Parser {
                 offset_bits = ((byte_off + sz) as u64) * 8;
             }
         }
+        let final_align = if packed { 1 } else { max_align.max(1) };
         let size = if is_union {
-            Self::align_up(max_size, max_align.max(1))
+            Self::align_up(max_size, final_align)
         } else {
             let byte_off = ((offset_bits + 7) / 8) as i64;
-            Self::align_up(byte_off, max_align.max(1))
+            Self::align_up(byte_off, final_align)
         };
-        (size, max_align.max(1), map)
+        (size, final_align, map)
     }
 
     fn layout_named(
@@ -1377,7 +1415,8 @@ impl Parser {
     ) -> Option<(i64, i64, std::collections::HashMap<String, i64>)> {
         let fields = self.struct_fields.get(name)?;
         let is_union = self.unions.iter().any(|u| u == name);
-        Some(self.layout_fields_const(fields, is_union))
+        let packed = self.packed_structs.contains(name);
+        Some(self.layout_fields_const(fields, is_union, packed))
     }
 
     /// Sizeof for constant-expression evaluation at parse time (array bounds).
@@ -1397,8 +1436,8 @@ impl Parser {
             Type::Struct(n) | Type::Union(n) => {
                 return self.layout_named(n).map(|(s, _, _)| s);
             }
-            Type::AnonStruct(fs) => self.layout_fields_const(fs, false).0,
-            Type::AnonUnion(fs) => self.layout_fields_const(fs, true).0,
+            Type::AnonStruct(fs) => self.layout_fields_const(fs, false, false).0,
+            Type::AnonUnion(fs) => self.layout_fields_const(fs, true, false).0,
         })
     }
 
@@ -1410,11 +1449,11 @@ impl Parser {
                 lay.2.get(field).copied()
             }
             Type::AnonStruct(fs) => {
-                let lay = self.layout_fields_const(fs, false);
+                let lay = self.layout_fields_const(fs, false, false);
                 lay.2.get(field).copied()
             }
             Type::AnonUnion(fs) => {
-                let lay = self.layout_fields_const(fs, true);
+                let lay = self.layout_fields_const(fs, true, false);
                 lay.2.get(field).copied()
             }
             // typedef alias stored as Struct(name) already handled; peel Ptr? no.
@@ -1479,7 +1518,7 @@ impl Parser {
                             (n, lay.2)
                         }
                         Type::AnonStruct(fs) => {
-                            let lay = self.layout_fields_const(&fs, false);
+                            let lay = self.layout_fields_const(&fs, false, false);
                             (String::new(), lay.2)
                         }
                         _ => return None,

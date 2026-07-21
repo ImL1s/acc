@@ -82,6 +82,8 @@ pub enum TokenKind {
     Case,
     Default,
     Sizeof,
+    /// Sticky GNU `__attribute__((packed))` — fields pack with align 1.
+    Packed,
     // literals / idents
     Ident(String),
     IntLit(i64),

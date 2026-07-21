@@ -149,12 +149,18 @@ impl<'a> Lexer<'a> {
 
     /// Skip `__attribute__((...))` balanced paren group after the keyword was consumed.
     fn skip_gnu_attribute_suffix(&mut self) {
+        let _ = self.scan_gnu_attribute_suffix();
+    }
+
+    /// Consume `__attribute__((...))` body; return true if `packed` appears.
+    fn scan_gnu_attribute_suffix(&mut self) -> bool {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
             self.bump();
         }
         if self.peek() != Some(b'(') {
-            return;
+            return false;
         }
+        let start = self.i;
         let mut depth = 0i32;
         while let Some(c) = self.peek() {
             if c == b'(' {
@@ -183,6 +189,8 @@ impl<'a> Lexer<'a> {
                 self.bump();
             }
         }
+        let body = std::str::from_utf8(&self.src[start..self.i]).unwrap_or("");
+        body.contains("packed")
     }
 
     fn number(&mut self) -> Token {
@@ -451,11 +459,16 @@ impl<'a> Lexer<'a> {
                 };
             }
             // Erase GNU __attribute__((...)) / __extension__ from the token stream.
+            // If the attribute is `packed`, emit TokenKind::Packed so the parser
+            // can apply 1-byte field alignment (kernel boot_params / setup_header).
             if c.is_ascii_alphabetic() || c == b'_' {
                 let t = self.ident_or_kw();
                 if let TokenKind::Ident(ref s) = t.kind {
                     if s == "__attribute__" || s == "__attribute" {
-                        self.skip_gnu_attribute_suffix();
+                        let packed = self.scan_gnu_attribute_suffix();
+                        if packed {
+                            return Ok(self.make(TokenKind::Packed, t.line, t.col));
+                        }
                         continue;
                     }
                     if s == "__extension__" {

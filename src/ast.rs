@@ -2,7 +2,8 @@
 pub struct Program {
     pub items: Vec<Item>,
     /// Named struct/union layouts discovered during parsing (including inline defs).
-    pub type_layouts: Vec<(String, bool, Vec<Field>)>, // name, is_union, fields
+    /// `(name, is_union, packed, fields)`.
+    pub type_layouts: Vec<(String, bool, bool, Vec<Field>)>,
 }
 
 #[derive(Debug, Clone)]

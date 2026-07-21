@@ -157,8 +157,8 @@ impl Codegen {
             Type::Ptr(_) => 8,
             Type::Array(e, n) => self.type_size(e) * n,
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.size).unwrap_or(8),
-            Type::AnonStruct(fs) => self.layout_fields(fs, false).size,
-            Type::AnonUnion(fs) => self.layout_fields(fs, true).size,
+            Type::AnonStruct(fs) => self.layout_fields(fs, false, false).size,
+            Type::AnonUnion(fs) => self.layout_fields(fs, true, false).size,
         }
     }
 
@@ -189,12 +189,12 @@ impl Codegen {
             Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
             Type::Array(e, _) => self.type_align(e),
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.align).unwrap_or(8),
-            Type::AnonStruct(fs) => self.layout_fields(fs, false).align,
-            Type::AnonUnion(fs) => self.layout_fields(fs, true).align,
+            Type::AnonStruct(fs) => self.layout_fields(fs, false, false).align,
+            Type::AnonUnion(fs) => self.layout_fields(fs, true, false).align,
         }
     }
 
-    fn layout_fields(&self, fields: &[Field], is_union: bool) -> Layout {
+    fn layout_fields(&self, fields: &[Field], is_union: bool, packed: bool) -> Layout {
         let mut map = HashMap::new();
         let mut off = 0i64;
         let mut max_align = 1i64;
@@ -202,21 +202,22 @@ impl Codegen {
         for f in fields {
             if f.name.is_empty() {
                 let nested_opt = match &f.ty {
-                    Type::AnonStruct(fs) => Some(self.layout_fields(fs, false)),
-                    Type::AnonUnion(fs) => Some(self.layout_fields(fs, true)),
+                    Type::AnonStruct(fs) => Some(self.layout_fields(fs, false, false)),
+                    Type::AnonUnion(fs) => Some(self.layout_fields(fs, true, false)),
                     Type::Struct(n) => self.layouts.get(n).cloned(),
                     Type::Union(n) => self.layouts.get(n).cloned(),
                     _ => None,
                 };
                 if let Some(nested) = nested_opt {
-                    max_align = max_align.max(nested.align);
+                    let nalign = if packed { 1 } else { nested.align };
+                    max_align = max_align.max(nalign);
                     if is_union {
                         for (fnm, (_, fty)) in &nested.fields {
                             map.insert(fnm.clone(), (0, fty.clone()));
                         }
                         max_size = max_size.max(nested.size);
                     } else {
-                        off = Self::align_up(off, nested.align);
+                        off = Self::align_up(off, nalign);
                         for (fnm, (fo, fty)) in &nested.fields {
                             map.insert(fnm.clone(), (off + fo, fty.clone()));
                         }
@@ -226,7 +227,7 @@ impl Codegen {
                 }
             }
             let sz = self.type_size(&f.ty);
-            let al = self.type_align(&f.ty);
+            let al = if packed { 1 } else { self.type_align(&f.ty) };
             max_align = max_align.max(al);
             if is_union {
                 if !f.name.is_empty() {
@@ -241,14 +242,15 @@ impl Codegen {
                 off += sz;
             }
         }
+        let final_align = if packed { 1 } else { max_align.max(1) };
         let size = if is_union {
-            Self::align_up(max_size, max_align.max(1))
+            Self::align_up(max_size, final_align)
         } else {
-            Self::align_up(off, max_align.max(1))
+            Self::align_up(off, final_align)
         };
         Layout {
             size,
-            align: max_align.max(1),
+            align: final_align,
             fields: map,
         }
     }
@@ -257,27 +259,39 @@ impl Codegen {
         // Multi-pass: type_layouts HashMap order is unstable; nested named
         // members must be sized before parent union/struct (else 8-byte fallback).
         for _ in 0..12 {
-            for (name, is_union, fields) in &prog.type_layouts {
-                let lay = self.layout_fields(fields, *is_union);
+            for (name, is_union, packed, fields) in &prog.type_layouts {
+                let lay = self.layout_fields(fields, *is_union, *packed);
                 self.layouts.insert(name.clone(), lay);
             }
             for item in &prog.items {
                 match item {
                     Item::StructDef { name, fields } => {
-                        let lay = self.layout_fields(fields, false);
+                        let packed = prog
+                            .type_layouts
+                            .iter()
+                            .find(|(n, _, _, _)| n == name)
+                            .map(|(_, _, p, _)| *p)
+                            .unwrap_or(false);
+                        let lay = self.layout_fields(fields, false, packed);
                         self.layouts.insert(name.clone(), lay);
                     }
                     Item::UnionDef { name, fields } => {
-                        let lay = self.layout_fields(fields, true);
+                        let packed = prog
+                            .type_layouts
+                            .iter()
+                            .find(|(n, _, _, _)| n == name)
+                            .map(|(_, _, p, _)| *p)
+                            .unwrap_or(false);
+                        let lay = self.layout_fields(fields, true, packed);
                         self.layouts.insert(name.clone(), lay);
                     }
                     Item::Typedef { name, ty } => match ty {
                         Type::AnonStruct(fs) => {
-                            let lay = self.layout_fields(fs, false);
+                            let lay = self.layout_fields(fs, false, false);
                             self.layouts.insert(name.clone(), lay);
                         }
                         Type::AnonUnion(fs) => {
-                            let lay = self.layout_fields(fs, true);
+                            let lay = self.layout_fields(fs, true, false);
                             self.layouts.insert(name.clone(), lay);
                         }
                         Type::Struct(n) | Type::Union(n) => {
@@ -540,7 +554,7 @@ impl Codegen {
             }
             Type::AnonStruct(fs) | Type::AnonUnion(fs) => {
                 let is_union = matches!(ty, Type::AnonUnion(_));
-                let lay = self.layout_fields(fs, is_union);
+                let lay = self.layout_fields(fs, is_union, false);
                 self.emit_struct_init_data(&lay, fields_in)?;
             }
             other => {
@@ -883,13 +897,13 @@ impl Codegen {
             Stmt::Decl(d) => {
                 let ty = match &d.ty {
                     Type::AnonStruct(fs) => {
-                        let lay = self.layout_fields(fs, false);
+                        let lay = self.layout_fields(fs, false, false);
                         let key = format!("anon_{}", d.name);
                         self.layouts.insert(key.clone(), lay);
                         Type::Struct(key)
                     }
                     Type::AnonUnion(fs) => {
-                        let lay = self.layout_fields(fs, true);
+                        let lay = self.layout_fields(fs, true, false);
                         let key = format!("anon_{}", d.name);
                         self.layouts.insert(key.clone(), lay);
                         Type::Union(key)
@@ -903,12 +917,12 @@ impl Codegen {
                         } else {
                             match typedefs.get(n).unwrap() {
                                 Type::AnonStruct(fs) => {
-                                    let lay = self.layout_fields(fs, false);
+                                    let lay = self.layout_fields(fs, false, false);
                                     self.layouts.insert(n.clone(), lay);
                                     Type::Struct(n.clone())
                                 }
                                 Type::AnonUnion(fs) => {
-                                    let lay = self.layout_fields(fs, true);
+                                    let lay = self.layout_fields(fs, true, false);
                                     self.layouts.insert(n.clone(), lay);
                                     Type::Union(n.clone())
                                 }
@@ -1366,8 +1380,8 @@ impl Codegen {
                             }
                         },
                     ),
-                    Type::AnonStruct(fs) => self.layout_fields(fs, false),
-                    Type::AnonUnion(fs) => self.layout_fields(fs, true),
+                    Type::AnonStruct(fs) => self.layout_fields(fs, false, false),
+                    Type::AnonUnion(fs) => self.layout_fields(fs, true, false),
                     // Incomplete typing: void*/void/int treated as opaque struct.
                     Type::Ptr(_)
                     | Type::Void
