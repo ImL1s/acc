@@ -1843,6 +1843,23 @@ impl Parser {
                         }
                     }
                     self.expect(TokenKind::RBracket)?;
+                    // Multi-dimensional: `[i][j] = expr` (cpumask bitmap tables).
+                    while self.eat(TokenKind::LBracket) {
+                        if !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
+                            if self.eat(TokenKind::Ellipsis) {
+                                // rare
+                            } else {
+                                let _ = self.parse_assign();
+                            }
+                            if self.eat(TokenKind::Ellipsis)
+                                && !self.at(&TokenKind::RBracket)
+                                && !self.at(&TokenKind::Eof)
+                            {
+                                let _ = self.parse_assign();
+                            }
+                        }
+                        self.expect(TokenKind::RBracket)?;
+                    }
                     self.expect(TokenKind::Assign)?;
                     fields.push((Some(idx_str), self.parse_initializer()?));
                 } else {
