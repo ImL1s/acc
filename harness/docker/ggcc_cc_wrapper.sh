@@ -247,14 +247,15 @@ if [[ "$mode" == "preprocess" ]]; then
   exec "$SYSCC" -E "${passthru_sys[@]}" "${ignored[@]}" "${s_sources[@]}" "${other_inputs[@]}"
 fi
 
-# Compile probe with no real .c: /dev/null or assembler-with-cpp version probes.
+# Compile probe with no real .c and no real .S: /dev/null or as-version probes.
 # as-version.sh: $(CC) -Wa,--version -c -x assembler-with-cpp /dev/null -o /dev/null
-if [[ "$mode" == "compile" && ${#c_sources[@]} -eq 0 ]]; then
-  # Forward to system cc (assembles/probes only; no project .c).
+# Real .S/.s sources must NOT take this path — they need depfile write below.
+if [[ "$mode" == "compile" && ${#c_sources[@]} -eq 0 && ${#s_sources[@]} -eq 0 ]]; then
+  # Forward to system cc (probes only; no project sources).
   if [[ -n "$out" ]]; then
-    exec "$SYSCC" -c "${passthru_sys[@]}" "${ignored[@]}" -o "$out" "${other_inputs[@]}" "${s_sources[@]}"
+    exec "$SYSCC" -c "${passthru_sys[@]}" "${ignored[@]}" -o "$out" "${other_inputs[@]}"
   else
-    exec "$SYSCC" -c "${passthru_sys[@]}" "${ignored[@]}" -o /dev/null "${other_inputs[@]}" "${s_sources[@]}" 2>/dev/null || exit 0
+    exec "$SYSCC" -c "${passthru_sys[@]}" "${ignored[@]}" -o /dev/null "${other_inputs[@]}" 2>/dev/null || exit 0
   fi
 fi
 
