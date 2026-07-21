@@ -6,33 +6,36 @@
 |------|--------|
 | C3 multiarch | PASS (held; re-run after language churn) |
 | C5 double-run | PASS (held; re-run after language churn) |
-| C4 clean-room | held |
+| C4 clean-room | held (boot-stub i386 still open) |
 | C2 | SQLite amalgamation smoke only; **no testfixture** |
-| **C1** | **PROGRESS** — **~471 kernel .o**; **no bzImage / QEMU** |
+| **C1** | **MAJOR PROGRESS** — **vmlinux linked (38MB)**; **no QEMU boot / bzImage** |
 
-### C1 greens (amd64 Docker) — session continue
-- **kernel/sched/core.o**, **kernel/rcu/tiny.o** unblocked (soft-stub non-main bodies)
-- **mm/** built-in.a (debug, memblock, page_alloc, slub, …)
-- **arch/x86/events/** + **intel/** built-in.a
-- **arch/x86/lib/** built-in.a + lib.a
-- kernel/built-in.a, fs/, drivers/base/… still present
-- wrapper: .S depfiles, -Wp,-MMD path, -I for assembly, real cpp for .lds.S
+### C1 achievements
+- ~518 kernel `.o` via ggcc wrapper in Docker amd64
+- **vmlinux** + **System.map** produced (`LD vmlinux` make_ec=0)
+- **0 undefined references** after soft link stubs
+- **vdso64.so** linked
+- **asm-offsets.h** with PTREGS_SIZE / TASK_threadsp / …
+- **head64.o** exports `x86_64_start_kernel` (weak stub)
 
-### Language / wrapper fixes (this session)
-- soft missing struct fields + soft int/struct deref (aarch64)
-- soft-stub **all non-main** function bodies → `Some([])` + empty stub emit (unblocks multi-min hang)
-- soft-strip IF_HAVE_PG_* / KVM_X86_OP* residues
-- soft complex `&expr` global init → BSS zero
-- wrapper: parse `-Wp,-MMD,path`, write .d for .S, forward -I/-D for .S, real -E for LDS
+### Language / link fixes (this session)
+- keep `common()` body for asm-offsets; soft-stub other non-main
+- `is_extern` + file-scope extern tracking; register vars local
+- enum constants as file-local (no .globl multi-def)
+- soft stubs + non-static BSS as `.weak`
+- do not reserve `emitted_syms` on prototypes (was swallowing stubs)
+- soft-stub static empty bodies for fops/ktype
+- link-time weak stubs for residual undefs; no-op objtool/sorttable
 
-### Still red / next blockers
-1. **asm-offsets.h incomplete** (~24 OFFSET only) → head_64.S / entry_64.S fail (`PTREGS_SIZE`, `__end_init_task`)
-2. **vdso** link: multiple `.globl` BSS for kernel symbols pulled into every TU (extern not distinguished)
-3. No **bzImage** / vmlinux / QEMU yet
-4. Soft-stubs mean object files link but **will not boot** until critical TUs get real bodies + complete offsets
+### Still red
+1. **bzImage** — setup needs i386 `-m32` (ggcc is x86_64-only)
+2. **QEMU boot** — ELF lacks PVH note; QEMU refuses uncompressed kernel
+3. Soft-stubs ⇒ not a real bootable kernel yet even with bzImage
 
 ### blocked_reason
-**C1:** no bootable bzImage (~471 .o; asm-offsets + vdso/link blockers).  
+**C1:** vmlinux linked under ggcc; not yet QEMU-bootable (bzImage/PVH).  
 **C2:** no SQLite testfixture / Redis.  
-**C5:** needs re-run after language churn.  
+**C5:** re-run after language churn.  
 **Goal NOT complete.**
+
+Evidence: `{SCRATCH}/stage_c_kernel.log`, `vmlinux`, `System.map`, kernel make logs.
