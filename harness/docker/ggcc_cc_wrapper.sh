@@ -251,12 +251,45 @@ fi
 
 # Pure assembly / objects / link with no .c → system tools only
 if [[ ${#c_sources[@]} -eq 0 ]]; then
+  # Ensure gcc-style depfile exists when kbuild passed -Wp,-MMD (fixdep needs it).
+  write_depfile_asm() {
+    local srcf="${1:-}"
+    [[ "$deps" -eq 1 || -n "$DEP_MF" ]] || return 0
+    [[ -n "$srcf" || -n "$out" ]] || return 0
+    local dfile
+    if [[ -n "$DEP_MF" ]]; then
+      dfile="$DEP_MF"
+    elif [[ -n "$out" ]]; then
+      local base dir
+      base="$(basename "$out")"
+      dir="$(dirname "$out")"
+      dfile="$dir/.${base}.d"
+    else
+      dfile=".$(basename "${srcf:-x}" .S).o.d"
+    fi
+    mkdir -p "$(dirname "$dfile")" 2>/dev/null || true
+    printf '%s: %s\n' "${out:-out.o}" "${srcf:-}" >"$dfile"
+  }
   if [[ "$mode" == "compile" ]]; then
     # assemble .S/.s → .o
     if [[ ${#s_sources[@]} -eq 1 && -n "$out" ]]; then
-      exec "$SYSCC" -c -o "$out" "${passthru_sys[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+      set +e
+      "$SYSCC" -c -o "$out" "${passthru_sys[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+      ec=$?
+      set -e
+      write_depfile_asm "${s_sources[0]}"
+      exit "$ec"
     fi
-    exec "$SYSCC" -c "${passthru_sys[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
+    set +e
+    "$SYSCC" -c "${passthru_sys[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
+    ec=$?
+    set -e
+    if [[ ${#s_sources[@]} -ge 1 ]]; then
+      write_depfile_asm "${s_sources[0]}"
+    elif [[ -n "$out" ]]; then
+      write_depfile_asm ""
+    fi
+    exit "$ec"
   fi
   if [[ "$mode" == "asm" ]]; then
     exec "$SYSCC" -S "${passthru_sys[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
