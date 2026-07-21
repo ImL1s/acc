@@ -844,6 +844,16 @@ impl Parser {
                 self.bump();
                 self.typedef_map.get(&s).cloned().unwrap_or(Type::Int)
             }
+            // Soft: unknown identifier as type name (incomplete headers / OS-specific
+            // types like malloc_zone_t). Register as opaque int typedef and continue.
+            TokenKind::Ident(s) => {
+                self.bump();
+                if !self.typedefs.iter().any(|t| t == &s) {
+                    self.typedefs.push(s.clone());
+                    self.typedef_map.insert(s, Type::Int);
+                }
+                Type::Int
+            }
             _ => {
                 return Err(format!(
                     "expected type at {}:{}",
