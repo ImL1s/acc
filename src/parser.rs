@@ -934,9 +934,35 @@ impl Parser {
             break;
         }
         self.expect(TokenKind::RBrace)?;
-        // enum fred { ... } optional trailing name/var
-        if let TokenKind::Ident(_) = self.peek_kind().clone() {
-            self.bump();
+        // `enum { X, Y } name = Y;` / `enum E { ... } var;`
+        // Trailing declarators with optional initializers (file-scope globals).
+        loop {
+            self.skip_kernel_type_quals();
+            while self.eat(TokenKind::Star) {
+                self.skip_kernel_type_quals();
+            }
+            if let TokenKind::Ident(id) = self.peek_kind().clone() {
+                self.bump();
+                // skip residual () if function-like residue
+                if self.at(&TokenKind::LParen) {
+                    let _ = self.skip_balanced_parens();
+                }
+                let init = if self.eat(TokenKind::Assign) {
+                    Some(self.parse_initializer()?)
+                } else {
+                    None
+                };
+                items.push(Item::Global(VarDecl {
+                    name: id,
+                    ty: Type::Int,
+                    init,
+                    is_static: false,
+                }));
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
+            }
+            break;
         }
         self.eat(TokenKind::Semicolon);
         Ok(items)
@@ -1805,15 +1831,9 @@ impl Parser {
                         }
                         "0".into()
                     };
-                    // GNU range designator [lo ... hi]
+                    // GNU range designator [lo ... hi] — hi may be `16 - 1`.
                     if self.eat(TokenKind::Ellipsis) {
-                        // skip hi (int / enum / expr)
-                        if matches!(
-                            self.peek_kind(),
-                            TokenKind::IntLit(_) | TokenKind::Ident(_)
-                        ) {
-                            self.bump();
-                        } else if !self.at(&TokenKind::RBracket) {
+                        if !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
                             let _ = self.parse_assign();
                         }
                     }

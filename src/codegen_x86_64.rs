@@ -1255,8 +1255,8 @@ impl Codegen {
                     let t = self.emit_expr_rval(base, regn, typedefs)?;
                     match t {
                         Type::Ptr(inner) => *inner,
-                        // Incomplete typing (e.g. typeof collapsed to Int): treat as
-                        // opaque pointer so kernel patterns like p->f still lower.
+                        // Incomplete typing: typeof/typedef collapsed (Int, bare
+                        // Struct name used as pointer value, etc.).
                         Type::Int
                         | Type::UInt
                         | Type::Long
@@ -1264,7 +1264,9 @@ impl Codegen {
                         | Type::Short
                         | Type::UShort
                         | Type::Char
-                        | Type::Void => Type::Struct("__opaque__".into()),
+                        | Type::Void
+                        | Type::Struct(_)
+                        | Type::Union(_) => Type::Struct("__opaque__".into()),
                         other => return Err(format!("-> on non-pointer {:?}", other)),
                     }
                 } else {

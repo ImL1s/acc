@@ -861,7 +861,39 @@ fn soften_kernel_pp_residue(src: &str) -> String {
                     | "COMPAT_SYSCALL_DEFINE5"
                     | "COMPAT_SYSCALL_DEFINE6"
             );
-            if is_export || is_syscall {
+            // Tracepoint macros (often left unexpanded when TRACEPOINTS soft-off).
+            let is_trace = matches!(
+                name,
+                "DECLARE_EVENT_CLASS"
+                    | "DECLARE_EVENT_CLASS_NOP"
+                    | "DEFINE_EVENT"
+                    | "DEFINE_EVENT_NOP"
+                    | "DEFINE_EVENT_CONDITION"
+                    | "DEFINE_EVENT_PRINT"
+                    | "TRACE_EVENT"
+                    | "TRACE_EVENT_CONDITION"
+                    | "TRACE_EVENT_FN"
+                    | "TRACE_EVENT_FN_COND"
+                    | "TRACE_EVENT_FLAGS"
+                    | "TRACE_EVENT_PERF_PERM"
+                    | "TRACE_DEFINE_ENUM"
+                    | "TRACE_DEFINE_SIZEOF"
+                    | "TP_PROTO"
+                    | "TP_ARGS"
+                    | "TP_STRUCT__entry"
+                    | "TP_fast_assign"
+                    | "TP_printk"
+                    | "TP_CONDITION"
+                    | "__perf_task"
+                    | "__perf_count"
+                    | "__perf_addr"
+                    | "DECLARE_TRACE"
+                    | "DEFINE_TRACE"
+                    | "DEFINE_TRACE_FN"
+            ) || name.starts_with("TRACE_EVENT_")
+                || name.starts_with("DECLARE_EVENT_")
+                || name.starts_with("DEFINE_EVENT_");
+            if is_export || is_syscall || is_trace {
                 while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                     i += 1;
                 }
@@ -875,8 +907,8 @@ fn soften_kernel_pp_residue(src: &str) -> String {
                         ""
                     };
                     i = after;
-                    if is_export {
-                        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                    if is_export || is_trace {
+                        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                             i += 1;
                         }
                         if i < bytes.len() && bytes[i] == b';' {
