@@ -401,9 +401,33 @@ impl<'a> Lexer<'a> {
         } else {
             c as i64
         };
-        if self.bump() != Some(b'\'') {
-            return Err(format!("expected closing ' at {line}:{col}"));
+        // GCC multi-char constants (`'ab'`) and soft unclosed chars: consume to
+        // closing `'` (or end of line) instead of hard-failing. SQLite shell
+        // amalgamation embeds SQL examples with apostrophes that thrash a
+        // strict single-byte char lexer when comment/macro state drifts.
+        if self.peek() != Some(b'\'') {
+            let mut v = v;
+            while let Some(c2) = self.peek() {
+                if c2 == b'\'' {
+                    self.bump();
+                    break;
+                }
+                if c2 == b'\n' {
+                    // soft unclosed: stop; keep first char value
+                    break;
+                }
+                if c2 == b'\\' {
+                    self.bump();
+                    let _ = self.bump();
+                    continue;
+                }
+                // multi-char: pack low 8 bits of each subsequent char (GCC-ish)
+                v = ((v & 0xff) << 8) | (c2 as i64 & 0xff);
+                self.bump();
+            }
+            return Ok(self.make(TokenKind::CharLit(v), line, col));
         }
+        self.bump(); // closing '
         Ok(self.make(TokenKind::CharLit(v), line, col))
     }
 

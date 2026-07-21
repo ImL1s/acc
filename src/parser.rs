@@ -1676,10 +1676,15 @@ impl Parser {
             if self.at(&TokenKind::LBrace) {
                 // Soft body-skip policy (kernel fail-drive):
                 // - keep `main` + `common` (asm-offsets DEFINE/OFFSET generators)
-                // - stub everything else (headers + huge non-static sched/mm)
-                // Keeping all static non-inline bodies hangs (5k+ statics in PP).
+                // - keep early-boot / decompress names (empty stubs triple-fault)
+                // - GGCC_PARSE_ALL_BODIES=1: parse every body (use only on small TUs
+                //   like arch/x86/boot/compressed/* — full sched/mm still hangs)
                 // Empty Some([]) vs None: stubs link; prototypes do not define.
-                let keep = name == "main" || name == "common";
+                let parse_all = std::env::var_os("GGCC_PARSE_ALL_BODIES").is_some();
+                let keep = parse_all
+                    || name == "main"
+                    || name == "common"
+                    || Self::is_boot_critical_fn(&name);
                 let skip_body = !keep;
                 let body = if skip_body {
                     self.skip_balanced_braces()?;
@@ -3266,6 +3271,101 @@ impl Parser {
 enum Postfix {
     Array(i64),
     Func,
+}
+
+impl Parser {
+    /// Functions that must keep real bodies for kernel early-boot / decompress.
+    /// Empty soft-stubs here produce triple-fault right after setup console.
+    fn is_boot_critical_fn(name: &str) -> bool {
+        matches!(
+            name,
+            "extract_kernel"
+                | "decompress_kernel"
+                | "__decompress"
+                | "parse_elf"
+                | "handle_relocations"
+                | "__putstr"
+                | "__puthex"
+                | "__putdec"
+                | "__putnum"
+                | "scroll"
+                | "serial_putchar"
+                | "memmove"
+                | "memcpy"
+                | "memset"
+                | "memcmp"
+                | "strlen"
+                | "strnlen"
+                | "strchr"
+                | "strcmp"
+                | "strncmp"
+                | "configure_5level_paging"
+                | "initialize_identity_maps"
+                | "finalize_identity_maps"
+                | "add_identity_map"
+                | "load_stage1_idt"
+                | "load_stage2_idt"
+                | "cleanup_exception_handling"
+                | "set_page_flags"
+                | "parse_mem_encrypt"
+                | "console_init"
+                | "early_serial_init"
+                | "puts"
+                | "putchar"
+                | "sprintf"
+                | "vsprintf"
+                | "number"
+                | "skip_spaces"
+                | "boot_params"
+                | "sanitize_boot_params"
+                | "copy_bootdata"
+                | "x86_64_start_kernel"
+                | "x86_64_start_reservations"
+                | "start_kernel"
+                | "setup_arch"
+                | "setup_arch_memory"
+                | "early_cpu_init"
+                | "early_ioremap_setup"
+                | "idt_setup_early_handler"
+                | "idt_setup_early_traps"
+                | "trap_init"
+                | "mm_init"
+                | "softirq_init"
+                | "init_IRQ"
+                | "time_init"
+                | "calibrate_delay"
+                | "rest_init"
+                | "kernel_init"
+                | "kernel_init_freeable"
+                | "do_basic_setup"
+                | "do_initcalls"
+                | "do_pre_smp_initcalls"
+                | "console_on_rootfs"
+                | "prepare_namespace"
+                | "init_rootfs"
+                | "ramdisk_execute_command"
+                | "run_init_process"
+                | "try_to_run_init_process"
+        ) || name.starts_with("__decompress")
+            || name.starts_with("unxz")
+            || name.starts_with("gunzip")
+            || name.starts_with("unlzma")
+            || name.starts_with("unlzo")
+            || name.starts_with("unlz4")
+            || name.starts_with("unzstd")
+            || name.starts_with("xz_")
+            || name.starts_with("zlib_")
+            || name.starts_with("zstd_")
+            || name.starts_with("inflate")
+            || name.starts_with("crc32")
+            || name.starts_with("bcj_")
+            || name.starts_with("lzma")
+            || name.starts_with("dec_")
+            || name.starts_with("fill_")
+            || name.starts_with("flush_")
+            || name.contains("decompress")
+            || name.contains("Decompress")
+    }
 }
 
 pub fn parse(src: &str) -> Result<Program, String> {

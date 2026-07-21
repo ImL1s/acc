@@ -663,12 +663,17 @@ impl Codegen {
         offset
     }
 
-    /// Soft stub: empty non-static definition so kernel soft-skip still produces linkable symbols.
+    /// Soft stub: empty definition so kernel soft-skip still produces linkable symbols.
     fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
         let s = sym(&f.name);
-        // Weak: many TUs soft-stub the same symbol after header expansion.
-        writeln!(self.out, "\n\t.weak\t{s}").unwrap();
-        writeln!(self.out, "\t.globl\t{s}").unwrap();
+        if f.is_static {
+            // Internal linkage only — static inline stubs must not multi-def across TUs.
+            writeln!(self.out, "").unwrap();
+        } else {
+            // Weak: many TUs soft-stub the same symbol after header expansion.
+            writeln!(self.out, "\n\t.weak\t{s}").unwrap();
+            writeln!(self.out, "\t.globl\t{s}").unwrap();
+        }
         writeln!(self.out, "{s}:").unwrap();
         writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
         writeln!(self.out, "\tretq").unwrap();
@@ -710,7 +715,13 @@ impl Codegen {
         self.stack_size = 8;
 
         let s = sym(&f.name);
-        writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+        // static / static-inline: local symbol only (kernel headers expand into many TUs).
+        // Real non-static bodies stay strong so they win over .weak soft-stubs.
+        if f.is_static {
+            writeln!(self.out, "").unwrap();
+        } else {
+            writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+        }
         writeln!(self.out, "{s}:").unwrap();
         writeln!(self.out, "\tpushq\t%rbp").unwrap();
         writeln!(self.out, "\tmovq\t%rsp, %rbp").unwrap();

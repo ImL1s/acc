@@ -1054,6 +1054,15 @@ fn soften_kernel_builtins(src: &str) -> String {
                 "__builtin_choose_expr" => Some("__ggcc_choose"),
                 // expect(x,c) → (x)
                 "__builtin_expect" => Some("__ggcc_expect"),
+                // noreturn sink — soft to no-op expression (kernel heads use it)
+                "__builtin_unreachable" => Some("((void)0)"),
+                // Map freestanding builtins to libc/kernel helpers (compressed boot
+                // has memcpy/memset; calling __builtin_* leaves undef at link).
+                "__builtin_memcpy" => Some("memcpy"),
+                "__builtin_memmove" => Some("memmove"),
+                "__builtin_memset" => Some("memset"),
+                "__builtin_memcmp" => Some("memcmp"),
+                "__builtin_strlen" => Some("strlen"),
                 // C11 _Generic is multi-assoc type switch; kernel uses it in
                 // READ_ONCE-style helpers. Soft → 0 to avoid parse thrash.
                 "_Generic" => Some("0"),

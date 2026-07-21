@@ -1263,11 +1263,15 @@ impl Codegen {
         offset
     }
 
-    /// Soft stub: empty non-static definition so kernel soft-skip still produces linkable symbols.
+    /// Soft stub: empty definition so kernel soft-skip still produces linkable symbols.
     fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
         let sym = self.c_sym(&f.name);
-        writeln!(self.out, "\n\t.weak\t{sym}").unwrap();
-        writeln!(self.out, "\t.globl\t{sym}").unwrap();
+        if f.is_static {
+            writeln!(self.out, "").unwrap();
+        } else {
+            writeln!(self.out, "\n\t.weak\t{sym}").unwrap();
+            writeln!(self.out, "\t.globl\t{sym}").unwrap();
+        }
         writeln!(self.out, "{sym}:").unwrap();
         // return 0
         writeln!(self.out, "\tmov\tx0, xzr").unwrap();
@@ -1343,7 +1347,12 @@ impl Codegen {
         self.va_fixed_n = if f.variadic { fixed_gp.min(8) } else { 0 };
 
         let sym = self.c_sym(&f.name);
-        writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+        // static / static-inline: local only. Real non-static bodies stay strong.
+        if f.is_static {
+            writeln!(self.out, "").unwrap();
+        } else {
+            writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+        }
         writeln!(self.out, "{sym}:").unwrap();
         writeln!(self.out, "\tstp\tx29, x30, [sp, #-16]!").unwrap();
         writeln!(self.out, "\tmov\tx29, sp").unwrap();
