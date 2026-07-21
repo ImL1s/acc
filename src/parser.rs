@@ -1645,11 +1645,12 @@ impl Parser {
             }
             if self.at(&TokenKind::LBrace) {
                 // Soft body-skip policy (kernel fail-drive):
-                // - always keep `main` (asm-offsets DEFINE/OFFSET live here)
-                // - keep static non-inline bodies (e.g. asm-offsets `common()`)
-                // - skip inline (headers) and non-static non-main (huge sched/mm)
+                // - keep `main` + `common` (asm-offsets DEFINE/OFFSET generators)
+                // - stub everything else (headers + huge non-static sched/mm)
+                // Keeping all static non-inline bodies hangs (5k+ statics in PP).
                 // Empty Some([]) vs None: stubs link; prototypes do not define.
-                let skip_body = name != "main" && (saw_inline || !is_static);
+                let keep = name == "main" || name == "common";
+                let skip_body = !keep;
                 let body = if skip_body {
                     self.skip_balanced_braces()?;
                     Some(Vec::new())
