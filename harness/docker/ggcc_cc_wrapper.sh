@@ -281,17 +281,17 @@ if [[ ${#c_sources[@]} -eq 0 ]]; then
     printf '%s: %s\n' "${out:-out.o}" "${srcf:-}" >"$dfile"
   }
   if [[ "$mode" == "compile" ]]; then
-    # assemble .S/.s → .o
+    # assemble .S/.s → .o  (need -I/-D/-include from ignored for cpp of .S)
     if [[ ${#s_sources[@]} -eq 1 && -n "$out" ]]; then
       set +e
-      "$SYSCC" -c -o "$out" "${passthru_sys[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+      "$SYSCC" -c -o "$out" "${passthru_sys[@]}" "${ignored[@]}" "${s_sources[@]}" "${other_inputs[@]}"
       ec=$?
       set -e
       write_depfile_asm "${s_sources[0]}"
       exit "$ec"
     fi
     set +e
-    "$SYSCC" -c "${passthru_sys[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
+    "$SYSCC" -c "${passthru_sys[@]}" "${ignored[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
     ec=$?
     set -e
     if [[ ${#s_sources[@]} -ge 1 ]]; then
@@ -302,10 +302,27 @@ if [[ ${#c_sources[@]} -eq 0 ]]; then
     exit "$ec"
   fi
   if [[ "$mode" == "asm" ]]; then
-    exec "$SYSCC" -S "${passthru_sys[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
+    exec "$SYSCC" -S "${passthru_sys[@]}" "${ignored[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
+  fi
+  # preprocess / LDS / link — keep -I/-D so cpp_lds_S and friends work
+  if [[ "$mode" == "preprocess" ]]; then
+    set +e
+    if [[ -n "$out" ]]; then
+      "$SYSCC" -E "${passthru_sys[@]}" "${ignored[@]}" -o "$out" "${s_sources[@]}" "${other_inputs[@]}"
+    else
+      "$SYSCC" -E "${passthru_sys[@]}" "${ignored[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+    fi
+    ec=$?
+    set -e
+    if [[ ${#s_sources[@]} -ge 1 ]]; then
+      write_depfile_asm "${s_sources[0]}"
+    elif [[ -n "$out" ]]; then
+      write_depfile_asm ""
+    fi
+    exit "$ec"
   fi
   # link
-  exec "$SYSCC" "${passthru_sys[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
+  exec "$SYSCC" "${passthru_sys[@]}" "${ignored[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
 fi
 
 # --- .c present: ggcc only for C, then system as for objects ---
