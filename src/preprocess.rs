@@ -1063,6 +1063,11 @@ fn soften_kernel_builtins(src: &str) -> String {
                 "__builtin_memset" => Some("memset"),
                 "__builtin_memcmp" => Some("memcmp"),
                 "__builtin_strlen" => Some("strlen"),
+                // Soft: map bswap builtins to freestanding helpers (emitted by codegen)
+                // so kernel crc32/etc. does not leave undef __builtin_bswap* at link.
+                "__builtin_bswap16" => Some("__ggcc_bswap16"),
+                "__builtin_bswap32" => Some("__ggcc_bswap32"),
+                "__builtin_bswap64" => Some("__ggcc_bswap64"),
                 // C11 _Generic is multi-assoc type switch; kernel uses it in
                 // READ_ONCE-style helpers. Soft → 0 to avoid parse thrash.
                 "_Generic" => Some("0"),

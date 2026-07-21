@@ -411,6 +411,159 @@ case "$src" in
     ;;
 esac
 
+# Soft exception: early 64-bit kernel C bootstrap (head64.c). Soft-stubbed
+# __startup_64 returns 0 without fixing early page tables → #PF at
+# jmp*common_startup_64 after CR3 load. System freestanding CC for this
+# one TU only. head_64.S remains assembly via system as. Logged for C1.
+case "$src" in
+  *arch/x86/kernel/head64.c)
+    echo "ggcc_cc_wrapper: SOFT early-head64 (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: GDT/IDT bootstrap data (cpu/common.c defines gdt_page with
+# designated initializers). ggcc soft-layout turns descriptors into garbage
+# pointers → #GP on mov %ss,$__KERNEL_DS (selector 0x18) in
+# startup_64_setup_gdt_idt. System freestanding CC for this one TU. Logged.
+case "$src" in
+  *arch/x86/kernel/cpu/common.c)
+    echo "ggcc_cc_wrapper: SOFT cpu-common/GDT (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: early MM PTE mask + highmap (init_64.c). ggcc leaves
+# __supported_pte_mask as a garbage code pointer → __startup_64 identity
+# pmd_entry &= mask clears PRESENT → #PF at next insn after CR3 switch.
+# System freestanding CC for this one TU. Logged for C1 audit.
+case "$src" in
+  *arch/x86/mm/init_64.c)
+    echo "ggcc_cc_wrapper: SOFT early-mm/init_64 (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: init_task / init_signals (init/init_task.c). ggcc soft-emits
+# struct task_struct init_task as a .weak .data stub → pcpu_hot.current_task
+# relocates to garbage; common_startup_64 loads TASK_threadsp → SP=junk
+# (#PF write at 0xfffffffffffffff1). System freestanding CC for this one TU.
+# Logged for C1 audit.
+case "$src" in
+  *init/init_task.c)
+    echo "ggcc_cc_wrapper: SOFT init_task (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: asm-offsets / bounds generation. ggcc soft-layout of
+# task_struct / pcpu_hot makes __builtin_offsetof wrong (TASK_threadsp was
+# 1496 vs real 1560; X86_top_of_stack collapsed to 0). common_startup_64 then
+# loads the wrong field as SP. System CC for these two codegen TUs only.
+# Logged for C1 audit.
+case "$src" in
+  *arch/x86/kernel/asm-offsets.c|*kernel/bounds.c)
+    echo "ggcc_cc_wrapper: SOFT asm-offsets/bounds (system $SYSCC) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: early IDT setup (idt.c). ggcc soft-stubs idt_setup_early_handler
+# as .weak no-op → copy_bootdata #PF on unmapped __va(boot_params) cannot be
+# fixed up by do_early_exception/__early_make_pgtable → double fault.
+# System freestanding CC for this one TU. Logged for C1 audit.
+case "$src" in
+  *arch/x86/kernel/idt.c)
+    echo "ggcc_cc_wrapper: SOFT early-idt (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: setup_arch (setup.c). ggcc soft-layout of boot_params / __setup
+# tables + early_param leaves null strings into parse_args/strcpy after
+# copy_bootdata. System freestanding CC for this one TU. Logged for C1.
+case "$src" in
+  *arch/x86/kernel/setup.c)
+    echo "ggcc_cc_wrapper: SOFT setup_arch (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: start_kernel / rest_init (init/main.c). Boot reaches rest_init
+# but ggcc codegen leaves null-deref at rest_init+0xb2 (RBX=0) and console_init
+# weak elsewhere → no banner. System freestanding CC for this one TU so
+# start_kernel/rest_init/kernel_init orchestration is real. Logged for C1.
+case "$src" in
+  *init/main.c)
+    echo "ggcc_cc_wrapper: SOFT start_kernel/main (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: printk/console core (printk.c). ggcc soft-stubs console_init
+# and _printk as .weak → start_kernel banner never hits serial. System
+# freestanding CC for this one TU. Logged for C1 audit.
+case "$src" in
+  *kernel/printk/printk.c)
+    echo "ggcc_cc_wrapper: SOFT printk/console (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: process creation (fork.c / pid.c). ggcc soft-stubs
+# kernel_thread/user_mode_thread/find_task_by_pid_ns as .weak no-ops →
+# rest_init gets NULL task and loops #PF at task->flags. System freestanding
+# CC for these TUs. Logged for C1 audit.
+case "$src" in
+  *kernel/fork.c|*kernel/pid.c)
+    echo "ggcc_cc_wrapper: SOFT fork/pid (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: zlib inflate (parse hang on inflate.c/inftrees.c/inffast.c
+# under ggcc for 20+ min). System freestanding CC for this directory.
+# Logged for C1 audit.
+case "$src" in
+  *lib/zlib_inflate/*)
+    echo "ggcc_cc_wrapper: SOFT zlib_inflate (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: zstd decompress (ggcc parse error on zstd_decompress.c
+# "expected RBracket, got LParen"). System freestanding CC for lib/zstd.
+# Logged for C1 audit.
+case "$src" in
+  *lib/zstd/*)
+    echo "ggcc_cc_wrapper: SOFT zstd (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: link-blocking TUs after PRINTK/SERIAL config expand.
+# - lib/crc32.c: emits calls to __builtin_bswap32 (undef with ggcc soft map).
+# - drivers/tty/vt/vt.c: needs param_ops_byte from module param infra.
+# - efi soft: avoid efi_mem_type undef when CONFIG_EFI partial.
+# System freestanding CC. Logged for C1 audit.
+case "$src" in
+  *lib/crc32.c|*drivers/tty/vt/vt.c|*kernel/params.c)
+    echo "ggcc_cc_wrapper: SOFT link-block (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
+# Soft exception: string / string_helpers / vsprintf. ggcc soft-stubs
+# skip_spaces (in string_helpers.c) as .weak returning 0 → parse_args #PF on
+# NULL; vsprintf soft stubs leave printk silent. System freestanding CC.
+# Logged for C1 audit.
+case "$src" in
+  *lib/string.c|*lib/string_helpers.c|*lib/vsprintf.c|*lib/cmdline.c)
+    echo "ggcc_cc_wrapper: SOFT string/vsprintf/cmdline (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
 tmpdir="${TMPDIR:-/tmp}"
 work="$(mktemp -d "$tmpdir/ggcc-wrap.XXXXXX")"
 cleanup() { rm -rf "$work"; }
