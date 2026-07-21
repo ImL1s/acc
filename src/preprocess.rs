@@ -906,12 +906,20 @@ fn soften_kernel_pp_residue(src: &str) -> String {
                 || name.starts_with("DEF_PAGEFLAG_NAME")
                 || name.starts_with("DEF_PAGETYPE_NAME")
                 || name.starts_with("DEF_VMAFLAG_NAME");
+            // KVM static-call table macros (KVM_X86_OP / KVM_X86_OP_OPTIONAL …)
+            // partially expand; leftover KVM_X86_OP(name) breaks file-scope parse.
+            let is_kvm_op = name.starts_with("KVM_X86_OP")
+                || name.starts_with("KVM_X86_CALL")
+                || name.starts_with("static_call_cond")
+                || name == "static_call_update"
+                || name == "STATIC_CALL_TRAMP_ADDR";
             if is_export
                 || is_syscall
                 || is_trace
                 || is_idt_decl
                 || is_idt_def
                 || is_if_have
+                || is_kvm_op
             {
                 while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                     i += 1;
@@ -926,7 +934,7 @@ fn soften_kernel_pp_residue(src: &str) -> String {
                         ""
                     };
                     i = after;
-                    if is_export || is_trace || is_if_have {
+                    if is_export || is_trace || is_if_have || is_kvm_op {
                         while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                             i += 1;
                         }

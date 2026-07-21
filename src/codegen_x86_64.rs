@@ -415,7 +415,11 @@ impl Codegen {
                         writeln!(self.out, "{s}:").unwrap();
                         writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
                     } else {
-                        return Err("unsupported global initializer".into());
+                        // Soft: &complex_expr global (member/index) → zero BSS.
+                        self.bss_section();
+                        writeln!(self.out, "\t.p2align\t3").unwrap();
+                        writeln!(self.out, "{s}:").unwrap();
+                        writeln!(self.out, "\t.zero\t{size}").unwrap();
                     }
                 }
                 Expr::String(st) => {
