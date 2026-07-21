@@ -898,7 +898,21 @@ fn soften_kernel_pp_residue(src: &str) -> String {
             // DEFINE_IDTENTRY* acts as a function header; rewrite to void name(...)
             // and leave the following { body } for the parser.
             let is_idt_def = name.starts_with("DEFINE_IDTENTRY");
-            if is_export || is_syscall || is_trace || is_idt_decl || is_idt_def {
+            // Conditional flag-name helpers from mmflags.h (often unexpanded in
+            // soft PP when CONFIG_* gates don't fire the empty macro form).
+            // Residue looks like `IF_HAVE_PG_IDLE(idle)` mid-initializer list.
+            let is_if_have = name.starts_with("IF_HAVE_PG_")
+                || name.starts_with("IF_HAVE_")
+                || name.starts_with("DEF_PAGEFLAG_NAME")
+                || name.starts_with("DEF_PAGETYPE_NAME")
+                || name.starts_with("DEF_VMAFLAG_NAME");
+            if is_export
+                || is_syscall
+                || is_trace
+                || is_idt_decl
+                || is_idt_def
+                || is_if_have
+            {
                 while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                     i += 1;
                 }
@@ -912,7 +926,7 @@ fn soften_kernel_pp_residue(src: &str) -> String {
                         ""
                     };
                     i = after;
-                    if is_export || is_trace {
+                    if is_export || is_trace || is_if_have {
                         while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
                             i += 1;
                         }
