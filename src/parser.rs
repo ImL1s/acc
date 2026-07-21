@@ -246,13 +246,17 @@ impl Parser {
             }
             // storage class at file scope (may repeat / interleave)
             let mut file_static = false;
+            let mut file_extern = false;
             loop {
                 if self.eat(TokenKind::Static) {
                     file_static = true;
                     continue;
                 }
-                if self.eat(TokenKind::Extern)
-                    || self.eat(TokenKind::Register)
+                if self.eat(TokenKind::Extern) {
+                    file_extern = true;
+                    continue;
+                }
+                if self.eat(TokenKind::Register)
                     || self.eat(TokenKind::Inline)
                     || self.eat(TokenKind::Restrict)
                     || self.eat(TokenKind::Auto)
@@ -298,7 +302,7 @@ impl Parser {
                 let _ = self.parse_asm_stmt()?;
                 continue;
             }
-            items.extend(self.parse_decl_or_func(file_static)?);
+            items.extend(self.parse_decl_or_func(file_static, file_extern)?);
         }
         // Flush enum constants discovered inside type specs (e.g. struct { enum { X } x; })
         for g in self.pending_enum_globals.drain(..) {
@@ -419,6 +423,7 @@ impl Parser {
                     ty: vty,
                     init,
                 is_static: false,
+                is_extern: false,
             }))
             }
         }
@@ -780,6 +785,7 @@ impl Parser {
                                 ty: Type::Int,
                                 init: Some(Expr::Int(next_val)),
                                 is_static: false,
+                                is_extern: false,
                             });
                             next_val += 1;
                         } else {
@@ -923,6 +929,7 @@ impl Parser {
                 ty: Type::Int,
                 init: Some(Expr::Int(next_val)),
                 is_static: false,
+                is_extern: false,
             }));
             next_val += 1;
             if self.eat(TokenKind::Comma) {
@@ -961,6 +968,7 @@ impl Parser {
                     ty: Type::Int,
                     init,
                     is_static: false,
+                    is_extern: false,
                 }));
                 if self.eat(TokenKind::Comma) {
                     continue;
@@ -1580,10 +1588,15 @@ impl Parser {
         }
     }
 
-    fn parse_decl_or_func(&mut self, file_static: bool) -> Result<Vec<Item>, String> {
+    fn parse_decl_or_func(
+        &mut self,
+        file_static: bool,
+        file_extern: bool,
+    ) -> Result<Vec<Item>, String> {
         // Collect storage-class before/while type-specifier eats them.
         let mut is_static = file_static;
         let mut saw_inline = false;
+        let mut is_extern = file_extern;
         loop {
             if self.eat(TokenKind::Static) {
                 is_static = true;
@@ -1593,8 +1606,11 @@ impl Parser {
                 saw_inline = true;
                 continue;
             }
-            if self.eat(TokenKind::Extern) || self.eat(TokenKind::Register) || self.eat(TokenKind::Auto)
-            {
+            if self.eat(TokenKind::Extern) {
+                is_extern = true;
+                continue;
+            }
+            if self.eat(TokenKind::Register) || self.eat(TokenKind::Auto) {
                 continue;
             }
             break;
@@ -1628,11 +1644,12 @@ impl Parser {
                 })]);
             }
             if self.at(&TokenKind::LBrace) {
-                // Kernel TUs inject thousands of helpers + huge non-static sched/mm
-                // bodies. Soft path: skip AST build for every non-main function body
-                // so codegen stays fast. Use Some([]) (empty def) vs None (prototype)
-                // so stubs still emit linkable symbols without stubbing bare decls.
-                let skip_body = name != "main";
+                // Soft body-skip policy (kernel fail-drive):
+                // - always keep `main` (asm-offsets DEFINE/OFFSET live here)
+                // - keep static non-inline bodies (e.g. asm-offsets `common()`)
+                // - skip inline (headers) and non-static non-main (huge sched/mm)
+                // Empty Some([]) vs None: stubs link; prototypes do not define.
+                let skip_body = name != "main" && (saw_inline || !is_static);
                 let body = if skip_body {
                     self.skip_balanced_braces()?;
                     Some(Vec::new())
@@ -1681,6 +1698,7 @@ impl Parser {
                             ty: t2,
                             init,
                             is_static,
+                            is_extern,
                         }));
                     }
                     if self.eat(TokenKind::Comma) {
@@ -1710,6 +1728,7 @@ impl Parser {
             ty: ty.clone(),
             init,
             is_static,
+            is_extern,
         }));
         while self.eat(TokenKind::Comma) {
             let (n2, t2, _) = self.parse_declarator(base.clone())?;
@@ -1724,6 +1743,7 @@ impl Parser {
                 ty: t2,
                 init: init2,
                 is_static,
+                is_extern,
             }));
         }
         self.expect(TokenKind::Semicolon)?;
@@ -2436,6 +2456,7 @@ impl Parser {
                 ty,
                 init,
                 is_static,
+                is_extern: false,
             });
             if self.eat(TokenKind::Comma) {
                 continue;

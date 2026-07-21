@@ -43,6 +43,9 @@ pub struct VarDecl {
     pub init: Option<Expr>,
     /// Function-scope static → emit as hidden global with static duration.
     pub is_static: bool,
+    /// File-scope `extern` declaration only — must not define BSS/.data (vdso
+    /// multi-def if every TU re-emits `.globl` zeros for header externs).
+    pub is_extern: bool,
 }
 
 #[derive(Debug, Clone)]

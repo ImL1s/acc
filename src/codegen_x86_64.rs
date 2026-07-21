@@ -327,12 +327,16 @@ impl Codegen {
         let mut emitted_syms = std::collections::HashSet::new();
         for item in &prog.items {
             if let Item::Func(f) = item {
-                // Skip static helpers except main. Soft-empty bodies (Some([])) from
-                // parse skip still need a linkable stub for non-static defs.
-                if (!f.is_static || f.name == "main") && emitted_syms.insert(f.name.clone()) {
+                // Emit: main; non-static (stubs or full); static with real body
+                // (asm-offsets `common()` and similar __used offset generators).
+                let has_real_body = f.body.as_ref().map(|b| !b.is_empty()).unwrap_or(false);
+                let emit = f.name == "main" || !f.is_static || has_real_body;
+                if emit && emitted_syms.insert(f.name.clone()) {
                     match &f.body {
                         Some(b) if b.is_empty() && f.name != "main" => {
-                            self.emit_stub_function(f)?;
+                            if !f.is_static {
+                                self.emit_stub_function(f)?;
+                            }
                         }
                         Some(_) => self.emit_function(f, &typedefs)?,
                         None => {}
@@ -343,6 +347,10 @@ impl Codegen {
 
         for item in &prog.items {
             if let Item::Global(g) = item {
+                // Pure `extern T x;` — reference only, never define.
+                if g.is_extern && g.init.is_none() {
+                    continue;
+                }
                 if g.init.is_some() && emitted_syms.insert(g.name.clone()) {
                     self.emit_global(g)?;
                 }
@@ -350,6 +358,9 @@ impl Codegen {
         }
         for item in &prog.items {
             if let Item::Global(g) = item {
+                if g.is_extern && g.init.is_none() {
+                    continue;
+                }
                 if emitted_syms.insert(g.name.clone()) {
                     self.emit_global(g)?;
                 }
