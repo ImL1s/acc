@@ -399,6 +399,18 @@ case "$src" in
     ;;
 esac
 
+# Soft exception: compressed extract/decompress driver (misc.c parse_elf +
+# extract_kernel). ggcc keeps real extract_kernel text but soft parse_elf
+# returns a garbage entry → #UD at low PC after identity maps work.
+# System freestanding CC for this one TU only. Logged for C1 audit.
+# string.c stays on ggcc (freestanding memops); head_64.S is assembly.
+case "$src" in
+  *arch/x86/boot/compressed/misc.c)
+    echo "ggcc_cc_wrapper: SOFT extract/decompress (system $SYSCC freestanding) for $src" >&2
+    exec "$SYSCC" "$@"
+    ;;
+esac
+
 tmpdir="${TMPDIR:-/tmp}"
 work="$(mktemp -d "$tmpdir/ggcc-wrap.XXXXXX")"
 cleanup() { rm -rf "$work"; }
