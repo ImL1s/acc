@@ -778,13 +778,13 @@ impl Parser {
                                 }
                             }
                             self.enum_values.insert(id.clone(), next_val);
-                            // store as int global for expression use
-                            // (parser side-effect via temporary list on self)
+                            // Local (static) global for expression load; not .globl
+                            // (kernel headers re-define the same enums in every TU).
                             self.pending_enum_globals.push(VarDecl {
                                 name: id,
                                 ty: Type::Int,
                                 init: Some(Expr::Int(next_val)),
-                                is_static: false,
+                                is_static: true,
                                 is_extern: false,
                             });
                             next_val += 1;
@@ -923,12 +923,12 @@ impl Parser {
                 }
             }
             self.enum_values.insert(id.clone(), next_val);
-            // Emit as global const int
+            // Local (static) global — not .globl (avoids vdso multi-def of enum names).
             items.push(Item::Global(VarDecl {
                 name: id,
                 ty: Type::Int,
                 init: Some(Expr::Int(next_val)),
-                is_static: false,
+                is_static: true,
                 is_extern: false,
             }));
             next_val += 1;

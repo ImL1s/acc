@@ -403,7 +403,12 @@ impl Codegen {
     fn emit_global(&mut self, g: &VarDecl) -> Result<(), String> {
         let size = self.type_size(&g.ty).max(1);
         let s = sym(&g.name);
-        writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+        // File-scope static / enum constants: local symbols only (avoid vdso multi-def).
+        if !g.is_static {
+            writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+        } else {
+            writeln!(self.out, "").unwrap();
+        }
         if let Some(init) = &g.init {
             match init {
                 Expr::Int(n) | Expr::Char(n) => {

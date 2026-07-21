@@ -821,7 +821,12 @@ impl Codegen {
         }
         let size = self.type_size(&g.ty).max(1);
         let sym = self.c_sym(&g.name);
-        writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+        // File-scope static / enum constants: local symbols only (avoid multi-def).
+        if !g.is_static {
+            writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+        } else {
+            writeln!(self.out, "").unwrap();
+        }
         if let Some(init) = &g.init {
             match init {
                 Expr::Int(n) | Expr::Char(n) => {
