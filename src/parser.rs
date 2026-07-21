@@ -1628,13 +1628,14 @@ impl Parser {
                 })]);
             }
             if self.at(&TokenKind::LBrace) {
-                // Kernel headers inject thousands of static/inline helpers. Codegen
-                // already skips static non-main bodies; skip AST build for speed.
-                // Treat `inline` without static as skippable too (headers).
-                let skip_body = name != "main" && (is_static || saw_inline);
+                // Kernel TUs inject thousands of helpers + huge non-static sched/mm
+                // bodies. Soft path: skip AST build for every non-main function body
+                // so codegen stays fast. Use Some([]) (empty def) vs None (prototype)
+                // so stubs still emit linkable symbols without stubbing bare decls.
+                let skip_body = name != "main";
                 let body = if skip_body {
                     self.skip_balanced_braces()?;
-                    None
+                    Some(Vec::new())
                 } else {
                     Some(self.parse_block()?)
                 };

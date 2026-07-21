@@ -327,13 +327,16 @@ impl Codegen {
         let mut emitted_syms = std::collections::HashSet::new();
         for item in &prog.items {
             if let Item::Func(f) = item {
-                // Skip static function bodies except main: kernel headers inject
-                // thousands of static inlines; kbuild offset TUs only need main.
-                if f.body.is_some()
-                    && (!f.is_static || f.name == "main")
-                    && emitted_syms.insert(f.name.clone())
-                {
-                    self.emit_function(f, &typedefs)?;
+                // Skip static helpers except main. Soft-empty bodies (Some([])) from
+                // parse skip still need a linkable stub for non-static defs.
+                if (!f.is_static || f.name == "main") && emitted_syms.insert(f.name.clone()) {
+                    match &f.body {
+                        Some(b) if b.is_empty() && f.name != "main" => {
+                            self.emit_stub_function(f)?;
+                        }
+                        Some(_) => self.emit_function(f, &typedefs)?,
+                        None => {}
+                    }
                 }
             }
         }
@@ -626,6 +629,16 @@ impl Codegen {
             },
         );
         offset
+    }
+
+    /// Soft stub: empty non-static definition so kernel soft-skip still produces linkable symbols.
+    fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
+        let s = sym(&f.name);
+        writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+        writeln!(self.out, "{s}:").unwrap();
+        writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
+        writeln!(self.out, "\tretq").unwrap();
+        Ok(())
     }
 
     fn emit_function(
@@ -1216,7 +1229,7 @@ impl Codegen {
                 match ty {
                     Type::Ptr(inner) => Ok(*inner),
                     Type::Array(inner, _) => Ok(*inner),
-                    // Incomplete typing: integer used as pointer.
+                    // Incomplete typing: integer/struct used as pointer (kernel soft).
                     Type::Int
                     | Type::UInt
                     | Type::Long
@@ -1224,7 +1237,9 @@ impl Codegen {
                     | Type::Short
                     | Type::UShort
                     | Type::Char
-                    | Type::Void => Ok(Type::Char),
+                    | Type::Void
+                    | Type::Struct(_)
+                    | Type::Union(_) => Ok(Type::Char),
                     other => Err(format!("cannot dereference {:?}", other)),
                 }
             }
@@ -1294,11 +1309,18 @@ impl Codegen {
                             }
                         })
                     }
-                    Type::Struct(n) | Type::Union(n) => self
-                        .layouts
-                        .get(n)
-                        .cloned()
-                        .ok_or_else(|| format!("unknown struct layout {n}"))?,
+                    Type::Struct(n) | Type::Union(n) => self.layouts.get(n).cloned().unwrap_or_else(
+                        || {
+                            // Soft: named struct without recorded layout.
+                            let mut fields = HashMap::new();
+                            fields.insert(field.clone(), (0, Type::Ptr(Box::new(Type::Void))));
+                            Layout {
+                                size: 8,
+                                align: 8,
+                                fields,
+                            }
+                        },
+                    ),
                     Type::AnonStruct(fs) => self.layout_fields(fs, false),
                     Type::AnonUnion(fs) => self.layout_fields(fs, true),
                     // Incomplete typing: void*/void/int treated as opaque struct.
