@@ -362,6 +362,32 @@ if [[ ${#c_sources[@]} -gt 1 ]]; then
 fi
 src="${c_sources[0]}"
 
+# Soft exception: x86 real-mode setup (arch/x86/boot/*.c, not compressed/) is
+# built with -m16/-march=i386. ggcc only emits x86_64 SysV; without a 16-bit
+# backend we cannot produce setup.elf. Use system CC solely for this firmware
+# path so bzImage packaging can complete. Protected-mode kernel .c still goes
+# through ggcc only. Logged for C1 audit.
+need_realmode=0
+for a in "$@"; do
+  case "$a" in
+    -m16|-m32|-march=i386|-march=i486|-march=i586|-march=i686) need_realmode=1 ;;
+  esac
+done
+case "$src" in
+  arch/x86/boot/*|*/arch/x86/boot/*)
+    case "$src" in
+      arch/x86/boot/compressed/*|*/arch/x86/boot/compressed/*) ;;
+      *)
+        if [[ "$need_realmode" -eq 1 ]]; then
+          echo "ggcc_cc_wrapper: SOFT realmode (system $SYSCC) for $src" >&2
+          # Forward full argv to system cc for -m16 setup only.
+          exec "$SYSCC" "$@"
+        fi
+        ;;
+    esac
+    ;;
+esac
+
 tmpdir="${TMPDIR:-/tmp}"
 work="$(mktemp -d "$tmpdir/ggcc-wrap.XXXXXX")"
 cleanup() { rm -rf "$work"; }
