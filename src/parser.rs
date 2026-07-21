@@ -1812,44 +1812,31 @@ impl Parser {
                     self.expect(TokenKind::Assign)?;
                     fields.push((Some(field), self.parse_initializer()?));
                 } else if self.eat(TokenKind::LBracket) {
-                    // designated array index [n] = expr, [ENUM] = expr,
-                    // GNU range [lo ... hi] = expr
-                    let idx_str = if let TokenKind::IntLit(n) = self.peek_kind().clone() {
-                        self.bump();
-                        n.to_string()
-                    } else if let TokenKind::Ident(s) = self.peek_kind().clone() {
-                        self.bump();
-                        // optional parenthesized form already handled by expr path
-                        if let Some(v) = self.enum_values.get(&s) {
-                            v.to_string()
-                        } else {
-                            // soft: unknown enumerator → 0
-                            "0".into()
-                        }
-                    } else if matches!(
-                        self.peek_kind(),
-                        TokenKind::LParen
-                            | TokenKind::Sizeof
-                            | TokenKind::Minus
-                            | TokenKind::Tilde
-                            | TokenKind::Bang
-                    ) {
-                        // constant expression index
-                        let e = self.parse_assign()?;
-                        self.eval_enum_const(&e)
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| "0".into())
-                    } else {
-                        // soft: skip tokens until ] / ...
-                        while !self.at(&TokenKind::RBracket)
-                            && !self.at(&TokenKind::Ellipsis)
-                            && !self.at(&TokenKind::Eof)
-                        {
-                            self.bump();
-                        }
+                    // designated array index: [n], [1+2], [ENUM], GNU [lo ... hi]
+                    // Always parse full constant expressions so `1 + 2` is not
+                    // left as IntLit then Plus before `]`.
+                    let idx_str = if self.at(&TokenKind::RBracket)
+                        || self.at(&TokenKind::Ellipsis)
+                    {
                         "0".into()
+                    } else {
+                        match self.parse_assign() {
+                            Ok(e) => self
+                                .eval_enum_const(&e)
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "0".into()),
+                            Err(_) => {
+                                while !self.at(&TokenKind::RBracket)
+                                    && !self.at(&TokenKind::Ellipsis)
+                                    && !self.at(&TokenKind::Eof)
+                                {
+                                    self.bump();
+                                }
+                                "0".into()
+                            }
+                        }
                     };
-                    // GNU range designator [lo ... hi] — hi may be `16 - 1`.
+                    // GNU range designator [lo ... hi] — hi may be `16 - 1` / `n + 1`.
                     if self.eat(TokenKind::Ellipsis) {
                         if !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
                             let _ = self.parse_assign();
