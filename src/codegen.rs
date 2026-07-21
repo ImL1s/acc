@@ -733,14 +733,16 @@ impl Codegen {
                 // Emit: main; non-static (stubs or full); static with real body.
                 // Do NOT reserve emitted_syms on pure prototypes (body=None).
                 let has_real_body = f.body.as_ref().map(|b| !b.is_empty()).unwrap_or(false);
-                let emit = f.name == "main" || !f.is_static || has_real_body;
+                let emit = f.name == "main" || !f.is_static || has_real_body || f.body.is_some();
                 if !emit {
                     continue;
                 }
                 match &f.body {
                     None => {}
                     Some(b) if b.is_empty() && f.name != "main" => {
-                        if !f.is_static && emitted_syms.insert(f.name.clone()) {
+                        // Stub both static and non-static soft-skipped bodies so
+                        // function-pointer tables (fops/ktype) resolve at link.
+                        if emitted_syms.insert(f.name.clone()) {
                             self.emit_stub_function(f)?;
                         }
                     }
