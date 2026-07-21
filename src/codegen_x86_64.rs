@@ -403,9 +403,11 @@ impl Codegen {
     fn emit_global(&mut self, g: &VarDecl) -> Result<(), String> {
         let size = self.type_size(&g.ty).max(1);
         let s = sym(&g.name);
-        // File-scope static / enum constants: local symbols only (avoid vdso multi-def).
+        // File-scope static / enum constants: local symbols only.
+        // Non-static globals: .weak so soft kernel multi-TU decls do not hard multi-def.
         if !g.is_static {
-            writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+            writeln!(self.out, "\n\t.weak\t{s}").unwrap();
+            writeln!(self.out, "\t.globl\t{s}").unwrap();
         } else {
             writeln!(self.out, "").unwrap();
         }
@@ -654,7 +656,9 @@ impl Codegen {
     /// Soft stub: empty non-static definition so kernel soft-skip still produces linkable symbols.
     fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
         let s = sym(&f.name);
-        writeln!(self.out, "\n\t.globl\t{s}").unwrap();
+        // Weak: many TUs soft-stub the same symbol after header expansion.
+        writeln!(self.out, "\n\t.weak\t{s}").unwrap();
+        writeln!(self.out, "\t.globl\t{s}").unwrap();
         writeln!(self.out, "{s}:").unwrap();
         writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
         writeln!(self.out, "\tretq").unwrap();

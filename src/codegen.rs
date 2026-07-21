@@ -821,9 +821,11 @@ impl Codegen {
         }
         let size = self.type_size(&g.ty).max(1);
         let sym = self.c_sym(&g.name);
-        // File-scope static / enum constants: local symbols only (avoid multi-def).
+        // File-scope static / enum constants: local symbols only.
+        // Non-static: .weak to avoid hard multi-def across soft-stubbed kernel TUs.
         if !g.is_static {
-            writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+            writeln!(self.out, "\n\t.weak\t{sym}").unwrap();
+            writeln!(self.out, "\t.globl\t{sym}").unwrap();
         } else {
             writeln!(self.out, "").unwrap();
         }
@@ -1257,7 +1259,8 @@ impl Codegen {
     /// Soft stub: empty non-static definition so kernel soft-skip still produces linkable symbols.
     fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
         let sym = self.c_sym(&f.name);
-        writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+        writeln!(self.out, "\n\t.weak\t{sym}").unwrap();
+        writeln!(self.out, "\t.globl\t{sym}").unwrap();
         writeln!(self.out, "{sym}:").unwrap();
         // return 0
         writeln!(self.out, "\tmov\tx0, xzr").unwrap();
