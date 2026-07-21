@@ -5,37 +5,27 @@
 | Gate | Status |
 |------|--------|
 | C3 multiarch | PASS (held; re-run after language churn) |
-| C5 double-run | PASS (held; re-run after language churn) |
-| C4 clean-room | held (boot-stub i386 still open) |
+| C5 double-run | held; re-run after language churn |
+| C4 clean-room | held (realmode -m16 soft exception logged) |
 | C2 | SQLite amalgamation smoke only; **no testfixture** |
-| **C1** | **MAJOR PROGRESS** — **vmlinux linked (38MB)**; **no QEMU boot / bzImage** |
+| **C1** | **bzImage + QEMU setup serial**; **triple-fault before full boot** |
 
-### C1 achievements
-- ~518 kernel `.o` via ggcc wrapper in Docker amd64
-- **vmlinux** + **System.map** produced (`LD vmlinux` make_ec=0)
-- **0 undefined references** after soft link stubs
-- **vdso64.so** linked
-- **asm-offsets.h** with PTREGS_SIZE / TASK_threadsp / …
-- **head64.o** exports `x86_64_start_kernel` (weak stub)
+### C1 evidence
+- `bzImage` ready (~239KB), `vmlinux` ~38MB, `System.map`
+- QEMU serial: **`early console in setup code`** then triple fault
+- SCRATCH: `stage_c_kernel.log`, `bzImage`, `qemu_boot_serial.log`
 
-### Language / link fixes (this session)
-- keep `common()` body for asm-offsets; soft-stub other non-main
-- `is_extern` + file-scope extern tracking; register vars local
-- enum constants as file-local (no .globl multi-def)
-- soft stubs + non-static BSS as `.weak`
-- do not reserve `emitted_syms` on prototypes (was swallowing stubs)
-- soft-stub static empty bodies for fops/ktype
-- link-time weak stubs for residual undefs; no-op objtool/sorttable
+### Soft exceptions (explicit)
+- `arch/x86/boot/*.c` + `-m16` → system gcc (16-bit realmode only)
+- Protected-mode kernel `.c` still ggcc-only
 
-### Still red
-1. **bzImage** — setup needs i386 `-m32` (ggcc is x86_64-only)
-2. **QEMU boot** — ELF lacks PVH note; QEMU refuses uncompressed kernel
-3. Soft-stubs ⇒ not a real bootable kernel yet even with bzImage
+### Next
+1. Reduce triple-fault (real early decompress / head64 path)
+2. C2 SQLite testfixture or Redis
+3. C5 double-run
 
 ### blocked_reason
-**C1:** vmlinux linked under ggcc; not yet QEMU-bootable (bzImage/PVH).  
-**C2:** no SQLite testfixture / Redis.  
-**C5:** re-run after language churn.  
+**C1:** not full boot (setup ok, 64-bit path faults).  
+**C2:** no testfixture/Redis.  
+**C5:** re-run needed.  
 **Goal NOT complete.**
-
-Evidence: `{SCRATCH}/stage_c_kernel.log`, `vmlinux`, `System.map`, kernel make logs.
