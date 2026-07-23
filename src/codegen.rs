@@ -7721,16 +7721,46 @@ impl Codegen {
                             writeln!(self.out, "\tsub\tx0, x9, x10").unwrap();
                         }
                         BinOp::Mul => writeln!(self.out, "\tmul\tx0, x9, x10").unwrap(),
-                        BinOp::Div => writeln!(self.out, "\tsdiv\tx0, x9, x10").unwrap(),
+                        BinOp::Div => {
+                            // u64 s /= 10 in sqlite3AtoF strip loop: must udiv.
+                            // Signed sdiv of significand ≥2^63 yields ~1.76e19 → 17.6.
+                            let unsigned = matches!(
+                                lty,
+                                Type::UInt | Type::ULong | Type::UShort | Type::Char
+                            );
+                            if unsigned {
+                                writeln!(self.out, "\tudiv\tx0, x9, x10").unwrap();
+                            } else {
+                                writeln!(self.out, "\tsdiv\tx0, x9, x10").unwrap();
+                            }
+                        }
                         BinOp::Mod => {
-                            writeln!(self.out, "\tsdiv\tx11, x9, x10").unwrap();
+                            let unsigned = matches!(
+                                lty,
+                                Type::UInt | Type::ULong | Type::UShort | Type::Char
+                            );
+                            if unsigned {
+                                writeln!(self.out, "\tudiv\tx11, x9, x10").unwrap();
+                            } else {
+                                writeln!(self.out, "\tsdiv\tx11, x9, x10").unwrap();
+                            }
                             writeln!(self.out, "\tmsub\tx0, x11, x10, x9").unwrap();
                         }
                         BinOp::BitAnd => writeln!(self.out, "\tand\tx0, x9, x10").unwrap(),
                         BinOp::BitOr => writeln!(self.out, "\torr\tx0, x9, x10").unwrap(),
                         BinOp::BitXor => writeln!(self.out, "\teor\tx0, x9, x10").unwrap(),
                         BinOp::Shl => writeln!(self.out, "\tlsl\tx0, x9, x10").unwrap(),
-                        BinOp::Shr => writeln!(self.out, "\tasr\tx0, x9, x10").unwrap(),
+                        BinOp::Shr => {
+                            let unsigned = matches!(
+                                lty,
+                                Type::UInt | Type::ULong | Type::UShort | Type::Char
+                            );
+                            if unsigned {
+                                writeln!(self.out, "\tlsr\tx0, x9, x10").unwrap();
+                            } else {
+                                writeln!(self.out, "\tasr\tx0, x9, x10").unwrap();
+                            }
+                        }
                         _ => return Err("bad compound assign".into()),
                     }
                 }
