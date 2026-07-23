@@ -84,6 +84,10 @@ pub enum TokenKind {
     Sizeof,
     /// Sticky GNU `__attribute__((packed))` — fields pack with align 1.
     Packed,
+    /// Sticky GNU `__attribute__((__weak__))` / `__weak` — weak linkage.
+    Weak,
+    /// `__attribute__((__section__("sec")))` or `__section__("sec")`
+    Section(String),
     // literals / idents
     Ident(String),
     IntLit(i64),

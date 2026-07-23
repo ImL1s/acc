@@ -1,19 +1,29 @@
 # Build
 /target/
+/target-*/
 **/*.rs.bk
 *.rlib
 *.rmeta
 
-# Object / asm artifacts (compiler may emit under cwd)
+# Object / asm artifacts
 *.o
 *.a
 *.so
 *.dylib
 *.out
 a.out
-# do not ignore source .s under fixtures if any — only top-level dumps
 /tmp_*.s
 /*.s
+!oracles/**/*.s
+
+# Built binaries under real-project smoke dirs
+**/lua_bin
+**/miniz_bin
+**/tinyc_bin
+**/sqlite_bin
+**/redis-server
+third_party/real/**/*_bin
+third_party/real/**/*.s
 
 # OS / IDE
 .DS_Store
@@ -30,20 +40,34 @@ target/ctest_work/
 *.log
 !harness/**/*.md
 
-# Nested VCS inside vendored trees (we vendor as plain files)
+# Nested VCS inside vendored trees
 third_party/**/.git/
 
-# Large optional Stage C fetches (keep amalgamation tracked if small enough)
+# Large Stage C fetches (document fetch in BUILDING_LINUX.txt / real_projects.md)
+third_party/linux-*/
 third_party/stage_c/**/*.zip
 third_party/stage_c/linux-*/
-third_party/stage_c/redis-*/
+third_party/stage_c/redis/
+third_party/stage_c/sqlite_full/
+third_party/real/lua-5.4.6/
 
-# Local agent state (locks ok to track empty; runtime locks optional)
+# Local agent / tool state
 harness/current_tasks/*.lock
 .omc/
-.claude/worktrees/
+.omg/
+.agents/
+.claude/
+.cargo-docker/
 
 # Cargo
 Cargo.lock.bak
-third_party/linux-*/
-.cargo-docker/
+
+# Junk / local dumps
+/-
+/fred.txt
+/chunk.c
+/tmp_core.*
+/undefs_unique.txt
+/link_full.log
+/qemu*.log
+/examples_pp_dump.rs

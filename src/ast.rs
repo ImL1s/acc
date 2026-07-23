@@ -35,6 +35,10 @@ pub struct Function {
     /// File-scope `static` function (internal linkage). Kernel headers pull in
     /// thousands of static inlines; codegen may skip their bodies for speed.
     pub is_static: bool,
+    /// `__attribute__((weak))` / `__weak` — COND_SYSCALL stubs must be weak so
+    /// real SYSCALL_DEFINE implementations win at link.
+    pub is_weak: bool,
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +51,10 @@ pub struct VarDecl {
     /// File-scope `extern` declaration only — must not define BSS/.data (vdso
     /// multi-def if every TU re-emits `.globl` zeros for header externs).
     pub is_extern: bool,
+    /// `__weak` / `__attribute__((weak))` — e.g. version.c placeholders that
+    /// version-timestamp.o overrides with a strong def.
+    pub is_weak: bool,
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +88,7 @@ pub enum Type {
 pub enum Stmt {
     Block(Vec<Stmt>),
     Decl(VarDecl),
+    DeclGroup(Vec<VarDecl>),
     Expr(Expr),
     Return(Option<Expr>),
     If {
@@ -115,9 +124,18 @@ pub enum Stmt {
     },
     Default(Box<Stmt>),
     Empty,
-    /// Fully-resolved GNU basic asm lines (after "i" constraint substitution).
-    /// Used by kernel kbuild `DEFINE(sym, val)` → `.ascii "->sym val ..."`.
-    Asm { lines: Vec<String> },
+    /// Fully-resolved GNU asm lines (after %N → xN / immediate substitution).
+    /// Used by kernel kbuild `DEFINE(sym, val)` → `.ascii "->sym val ..."`,
+    /// `get_current` / percpu: `asm("mrs %0, sp_el0" : "=r"(v))`, and
+    /// RELOC_HIDE: `asm("" : "=r"(p) : "0"(ptr))` (matching constraint).
+    ///
+    /// `in_loads`: before lines, evaluate `expr` into `x{reg}` (may be Addr/Cast).
+    /// `out_stores`: after lines, store `x{reg}` into local/global `var`.
+    Asm {
+        lines: Vec<String>,
+        in_loads: Vec<(u8, Expr)>,
+        out_stores: Vec<(u8, String)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +195,7 @@ pub enum Expr {
     PreDec(Box<Expr>),
     PostInc(Box<Expr>),
     PostDec(Box<Expr>),
+    StmtExpr(Vec<Stmt>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,129 @@
+Building Linux 6.9 with ggcc (Stage C1)
+========================================
+
+Honest notes (read harness/progress.md for current status).
+This tree does NOT vendor the full kernel (~GBs). Fetch Linux 6.9 yourself.
+
+Unlike CCC's standalone ELF toolchain, ggcc emits assembly and uses system
+as/ld inside a Linux Docker environment. Kernel .c is never compiled by
+system gcc/clang.
+
+------------------------------------------------
+0. Prerequisites
+------------------------------------------------
+
+  - Rust stable (cargo build --release)
+  - Docker Desktop / Docker Engine with aarch64 Linux containers
+  - Host may be macOS arm64; kernel build + QEMU run inside Linux Docker
+
+------------------------------------------------
+1. Build ggcc (Linux binary)
+------------------------------------------------
+
+  cargo build --release
+
+  For in-Docker builds, the harness sets CARGO_TARGET_DIR=target-linux so
+  the Linux ELF ggcc lives at:
+
+    target-linux/release/ggcc
+
+------------------------------------------------
+2. Fetch Linux 6.9
+------------------------------------------------
+
+  mkdir -p third_party
+  cd third_party
+  curl -fL -o linux-6.9.tar.xz \
+    https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.9.tar.xz
+  tar -xJf linux-6.9.tar.xz
+  # tree: third_party/linux-6.9/  (gitignored)
+
+------------------------------------------------
+3. Policy env (PASS path)
+------------------------------------------------
+
+  export GGCC_ALLOW_SOFT_SYSCC=0          # must stay 0
+  export GGCC_SOFT_FREESTANDING=0         # mid-boot soft body-skip OFF
+  # GGCC_SOFT_FREESTANDING=1 is ladder/debug only — never claim PASS with it
+
+------------------------------------------------
+4. Docker kernel build (recommended)
+------------------------------------------------
+
+  From repo root:
+
+    ./harness/docker/build_kernel.sh
+
+  Internally this roughly does:
+
+    - docker build harness/docker/Dockerfile.linux → image ggcc-linux
+    - cargo build --release inside container (target-linux)
+    - export CC=harness/docker/ggcc_cc_wrapper.sh
+    - make ARCH=arm64 CC=$WRAP HOSTCC=gcc … Image
+
+  Wrapper rules:
+    - .c  → ggcc -S → system as/cc on .s only
+    - .S/.s/.o / link → system tools
+    - GGCC_ALLOW_SOFT_SYSCC=1 → hard error
+
+------------------------------------------------
+5. Manual make (inside Linux aarch64 env)
+------------------------------------------------
+
+  export GGCC=$PWD/target-linux/release/ggcc
+  export GGCC_TARGET_OS=linux GGCC_ARCH=aarch64
+  export GGCC_SOFT_FREESTANDING=0 GGCC_ALLOW_SOFT_SYSCC=0
+  WRAP=$PWD/harness/docker/ggcc_cc_wrapper.sh
+  chmod +x "$WRAP"
+
+  cd third_party/linux-6.9
+  make ARCH=arm64 defconfig   # or your known-good .config
+  make ARCH=arm64 CC="$WRAP" HOSTCC=gcc HOSTCXX=g++ -j$(nproc) Image
+
+  Image path:
+    arch/arm64/boot/Image
+
+------------------------------------------------
+6. QEMU smoke
+------------------------------------------------
+
+  qemu-system-aarch64 -M virt -cpu cortex-a57 \
+    -kernel arch/arm64/boot/Image \
+    -nographic \
+    -append "console=ttyAMA0 earlycon=pl011,0x9000000"
+
+  Look for:
+    Linux version 6.9.0 … (ggcc-wrapper …)
+    optional: init / pid1 lines if initrd/payload is configured
+
+  harness/initrd/ may hold experiment payloads (not a full userspace distro).
+
+------------------------------------------------
+7. Anti-bypass checks
+------------------------------------------------
+
+  ./scripts/anti_bypass_audit.sh
+  ./harness/mutation_check.sh
+
+  strings arch/arm64/boot/Image | grep freestanding
+  # PASS path: prefer zero mid-boot soft freestanding markers
+
+------------------------------------------------
+8. What “PASS” means for this repo
+------------------------------------------------
+
+  C1 PASS requires:
+    - clean-room Image (no soft SYSCC on .c)
+    - actual QEMU boot evidence (Linux version + working init)
+    - no silent acceptance of mid-boot soft body-skip as complete
+
+  If boot is partial, record blocked_reason in harness/progress.md.
+  Do not rebrand Stage B as complete.
+
+------------------------------------------------
+References (process only)
+------------------------------------------------
+
+  Anthropic CCC experiment: human-side method (oracles, real projects, kernel).
+  Public CCC BUILDING_LINUX transcript is process inspiration only —
+  do not read or copy CCC compiler sources.

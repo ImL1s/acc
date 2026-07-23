@@ -36,12 +36,14 @@ fn main() {
     let mut args = env::args().skip(1);
     let mut output: Option<PathBuf> = None;
     let mut emit_asm_only = false;
+    let mut preprocess_only = false;
     let mut keep_asm = false;
     let mut target = Target::Aarch64;
     let mut target_os = TargetOs::host();
     let mut input: Option<PathBuf> = None;
     let mut include_dirs: Vec<PathBuf> = Vec::new();
-    let mut defines: Vec<(String, String)> = Vec::new();
+    // None = bare -DNAME; Some(v) = -DNAME=v (Some("") for empty replacement).
+    let mut defines: Vec<(String, Option<String>)> = Vec::new();
     let mut force_includes: Vec<PathBuf> = Vec::new();
 
     while let Some(a) = args.next() {
@@ -55,6 +57,7 @@ fn main() {
                 output = Some(PathBuf::from(p));
             }
             "-S" => emit_asm_only = true,
+            "-E" => preprocess_only = true,
             "--keep-asm" => keep_asm = true,
             "-m" => {
                 let t = args.next().unwrap_or_else(|| {
@@ -92,17 +95,17 @@ fn main() {
                     process::exit(2);
                 });
                 if let Some((k, v)) = p.split_once('=') {
-                    defines.push((k.to_string(), v.to_string()));
+                    defines.push((k.to_string(), Some(v.to_string())));
                 } else {
-                    defines.push((p, String::new()));
+                    defines.push((p, None));
                 }
             }
             s if s.starts_with("-D") && s.len() > 2 => {
                 let rest = &s[2..];
                 if let Some((k, v)) = rest.split_once('=') {
-                    defines.push((k.to_string(), v.to_string()));
+                    defines.push((k.to_string(), Some(v.to_string())));
                 } else {
-                    defines.push((rest.to_string(), String::new()));
+                    defines.push((rest.to_string(), None));
                 }
             }
             "-include" => {
@@ -117,16 +120,11 @@ fn main() {
                 force_includes.push(PathBuf::from(&s[8..]));
             }
             s if s.starts_with("-m") && s.len() > 2 => {
-                // Support -march style glue: -mx86_64 / -maarch64
                 let t = &s[2..];
-                // -m32/-m64 are ignored (kernel flags)
-                if t == "32" || t == "64" || t.starts_with("cpu") || t.starts_with("arch") {
-                    continue;
+                if let Some(parsed) = Target::parse(t) {
+                    target = parsed;
                 }
-                target = Target::parse(t).unwrap_or_else(|| {
-                    eprintln!("ERROR: unknown target '{t}' (use aarch64 or x86_64)");
-                    process::exit(2);
-                });
+                continue;
             }
             s if s.starts_with('-') => {
                 // Silently ignore unknown gcc-style flags (kernel builds pass many).
@@ -154,6 +152,65 @@ fn main() {
 
     // Policy: never special-case fixture basenames.
     debug_assert!(!driver::is_forbidden_fixture_path_special_case(&input));
+
+    if preprocess_only {
+        let src = match std::fs::read_to_string(&input) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ERROR: failed to read input file {}: {}", input.display(), e);
+                process::exit(1);
+            }
+        };
+        // Match `compile()`: inject -D / -include before preprocessing so
+        // `ggcc -E -DFOO=` agrees with `ggcc -S -DFOO=` (empty #define REDIS_STATIC=).
+        let mut prefixed = String::new();
+        for (k, v) in &defines {
+            match v {
+                None => prefixed.push_str(&format!("#define {k} 1\n")),
+                Some(val) if val.is_empty() => prefixed.push_str(&format!("#define {k}\n")),
+                Some(val) => prefixed.push_str(&format!("#define {k} {val}\n")),
+            }
+        }
+        for fi in &force_includes {
+            let abs = if fi.is_absolute() {
+                fi.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(fi)
+            };
+            prefixed.push_str(&format!("#include \"{}\"\n", abs.display()));
+        }
+        prefixed.push_str(&src);
+        let inc_paths: Vec<&std::path::Path> = include_dirs.iter().map(|p| p.as_path()).collect();
+        let first_inc = inc_paths.first().copied();
+        let rest_inc = if inc_paths.is_empty() {
+            &[]
+        } else {
+            &inc_paths[1..]
+        };
+        let for_linux = target_os == TargetOs::Linux;
+        match preprocess::preprocess_with_options(
+            &prefixed,
+            first_inc,
+            rest_inc,
+            for_linux,
+            &input.to_string_lossy(),
+        ) {
+            Ok(pp) => {
+                if output.as_os_str() != "a.out" {
+                    let _ = std::fs::write(output, pp);
+                } else {
+                    println!("{pp}");
+                }
+                process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                process::exit(1);
+            }
+        }
+    }
 
     if let Err(e) = compile(&CompileOptions {
         input,

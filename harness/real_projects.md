@@ -1,19 +1,26 @@
-# Fixed real-project list
+# Stage B — 3 real projects (frozen list)
 
-## Stage B (exactly 3)
-| # | Name | Location | Build | Test |
-|---|------|----------|-------|------|
-| 1 | tinyc | `third_party/real/tinyc/` | see `build.sh` | `./build.sh test` |
-| 2 | miniz_smoke | `third_party/real/miniz_smoke/` | see `build.sh` | `./build.sh test` |
-| 3 | lua_smoke | `third_party/real/lua_smoke/` | see `build.sh` | `./build.sh test` |
+Build each with `CC=$PWD/target/release/ggcc`.
 
-Each `build.sh` **must** set `CC` to shipped ggcc only (never system gcc for `.c` compilation of the project sources).
+| # | Project | Path | Build | Test |
+|---|---------|------|-------|------|
+| 1 | miniz | `third_party/real/miniz/` | `./build.sh` | `./build.sh test` |
+| 2 | lua | `third_party/real/lua/` | `./build.sh` | `./build.sh test` (prints `lua ok 42`) |
+| 3 | sqlite | `third_party/real/sqlite/` | `./build.sh` | `./build.sh test` (`sqlite ok sum=42`) |
 
-## Stage C2 (≥2 large)
-| # | Name | Notes |
-|---|------|--------|
-| 1 | sqlite | amalgamation + `testfixture` or official suite in Docker Linux |
-| 2 | redis | basic `make test` subset in Docker Linux |
+## Status (2026-07-21)
 
-## Stage C1
-Linux **6.9** kernel build + QEMU boot via `harness/docker/`.
+- **miniz**: PASS — compress/decompress roundtrip
+- **lua 5.4.6**: PASS — multi-file, `print("lua ok", 6*7)` → 42
+- **sqlite amalgamation**: PASS — `third_party/stage_c/sqlite/sqlite3.c` under ggcc → link → open :memory: SUM 40+2=42
+
+## Stage C2 (≥2 large) — frozen bar (no smoke-only PASS)
+
+Per `STAGE_CONTRACTS.md` / plan: **SQLite full/regression** and/or **Redis basic** (not amalgamation/sds smoke alone).
+
+| # | Project | Path | Status |
+|---|---------|------|--------|
+| 1 | **SQLite full testfixture** | `third_party/stage_c/sqlite_full/sqlite-src-3450300` + ggcc-built `testfixture` | **STRONG** — regression subset 20/22 suites, 17914 tests, 10 errors (~99.94%); prior batch2 ~60k green |
+| 2 | **Redis 7.2.5 basic** | redis-server RESP PING/SET/GET under ggcc | **PASS** `PASS_REDIS_DEFAULT_LATENCY` |
+
+Amalgamation `sqlite ok sum=42` / sds smoke remain Stage B / intermediate only — **not** C2 PASS evidence.

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompileOptions {
     pub input: PathBuf,
     pub output: PathBuf,
@@ -20,12 +20,32 @@ pub struct CompileOptions {
     /// Additional `-I` include search paths (kernel builds need many).
     pub include_dirs: Vec<PathBuf>,
     /// Predefined macros from `-DNAME` / `-DNAME=value`.
-    pub defines: Vec<(String, String)>,
+    /// `None` = bare `-DNAME` (gcc: `#define NAME 1`);
+    /// `Some("")` = `-DNAME=` (empty replacement, needed for `SQLITE_PRIVATE=""`);
+    /// `Some(v)` = `-DNAME=v`.
+    pub defines: Vec<(String, Option<String>)>,
     /// Files from gcc-style `-include path` (pre-included before the TU).
     pub force_includes: Vec<PathBuf>,
 }
 
+/// Entrypoint for compilation. Spawns a dedicated compiler thread with a 64MB stack
+/// size to prevent stack overflow when parsing large preprocessed translation units (~148k lines).
 pub fn compile(opts: &CompileOptions) -> Result<(), String> {
+    const STACK_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+    let opts_clone = opts.clone();
+    let handle = std::thread::Builder::new()
+        .name("ggcc-compiler".into())
+        .stack_size(STACK_SIZE)
+        .spawn(move || compile_internal(&opts_clone))
+        .map_err(|e| format!("failed to spawn compiler thread: {e}"))?;
+
+    match handle.join() {
+        Ok(res) => res,
+        Err(_) => Err("compiler thread panicked (stack overflow or internal error)".into()),
+    }
+}
+
+fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
     let src = fs::read_to_string(&opts.input)
         .map_err(|e| format!("read {}: {e}", opts.input.display()))?;
 
@@ -41,10 +61,12 @@ pub fn compile(opts: &CompileOptions) -> Result<(), String> {
     // Inject -D macros and -include files at the top of the TU (gcc order).
     let mut prefixed = String::new();
     for (k, v) in &opts.defines {
-        if v.is_empty() {
-            prefixed.push_str(&format!("#define {k} 1\n"));
-        } else {
-            prefixed.push_str(&format!("#define {k} {v}\n"));
+        match v {
+            // Bare -DNAME → #define NAME 1 (gcc default).
+            None => prefixed.push_str(&format!("#define {k} 1\n")),
+            // -DNAME= → empty replacement (critical for SQLITE_PRIVATE="").
+            Some(val) if val.is_empty() => prefixed.push_str(&format!("#define {k}\n")),
+            Some(val) => prefixed.push_str(&format!("#define {k} {val}\n")),
         }
     }
     // `-include file` ≡ `#include "file"` before the primary source.
@@ -187,5 +209,76 @@ mod tests {
         let out = Command::new(&bin_path).output().expect("run");
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), msg);
+    }
+
+    #[test]
+    fn compiles_and_runs_scope_shadowing_program() {
+        let dir = {
+            let mut d = std::env::temp_dir();
+            d.push(format!(
+                "ggcc-shadow-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&d).unwrap();
+            d
+        };
+        let src_path = dir.join("shadow.c");
+        let bin_path_arm = dir.join("shadow_arm");
+        let bin_path_x86 = dir.join("shadow_x86");
+        let code = r#"
+        int main(void) {
+            int x = 10;
+            {
+                int x = 20;
+                if (x != 20) return 1;
+            }
+            if (x != 10) return 2;
+
+            int y = ({ int x = 30; x + 5; });
+            if (x != 10 || y != 35) return 3;
+
+            return 0;
+        }
+        "#;
+        fs::write(&src_path, code).unwrap();
+
+        compile(&CompileOptions {
+            input: src_path.clone(),
+            output: bin_path_arm.clone(),
+            keep_asm: false,
+            emit_asm_only: false,
+            target: Target::Aarch64,
+            target_os: TargetOs::host(),
+            linker: None,
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            force_includes: Vec::new(),
+        })
+        .expect("compile aarch64");
+        let out_arm = Command::new(&bin_path_arm).output().expect("run arm");
+        assert_eq!(out_arm.status.code(), Some(0));
+
+        compile(&CompileOptions {
+            input: src_path,
+            output: bin_path_x86.clone(),
+            keep_asm: false,
+            emit_asm_only: false,
+            target: Target::X86_64,
+            target_os: TargetOs::host(),
+            linker: None,
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            force_includes: Vec::new(),
+        })
+        .expect("compile x86_64");
+
+        if Command::new("arch").arg("-x86_64").arg("true").output().map(|o| o.status.success()).unwrap_or(false) {
+            let out_x86 = Command::new("arch").arg("-x86_64").arg(&bin_path_x86).output().expect("run x86");
+            assert_eq!(out_x86.status.code(), Some(0));
+        }
     }
 }

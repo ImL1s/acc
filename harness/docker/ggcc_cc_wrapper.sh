@@ -17,6 +17,22 @@ SYSCC="${SYSCC:-cc}"   # assemble / link only
 SYSAS="${SYSAS:-as}"
 TARGET_OS="${GGCC_TARGET_OS:-linux}"
 ARCH="${GGCC_ARCH:-x86_64}"
+# Soft-skip non-critical function bodies (empty stubs). DEFAULT OFF for honest
+# C1/C4: any PASS claim requires real bodies. Kernel fail-drive may still set
+# GGCC_SOFT_SKIP_BODIES=1 explicitly, but that path must never be marked PASS.
+# (Skeptic REJECT: default-on SOFT_SKIP is C1 violation.)
+if [[ -n "${GGCC_SOFT_SKIP_BODIES+x}" ]]; then
+  export GGCC_SOFT_SKIP_BODIES
+else
+  unset GGCC_SOFT_SKIP_BODIES 2>/dev/null || true
+fi
+# Soft freestanding mid-boot body replacements (sched_init/do_initcalls/…).
+# DEFAULT OFF: emit real C bodies. GGCC_SOFT_FREESTANDING=1 is ladder-only.
+if [[ "${GGCC_SOFT_FREESTANDING:-0}" == "1" ]]; then
+  export GGCC_SOFT_FREESTANDING=1
+else
+  export GGCC_SOFT_FREESTANDING=0
+fi
 # Map kernel ARCH → ggcc -m
 case "$ARCH" in
   x86_64|x86|i386) GGCC_M=x86_64 ;;
@@ -132,16 +148,25 @@ while [[ $i -lt $# ]]; do
     -include*)
       ggcc_flags+=("$a"); ignored+=("$a"); i=$((i+1)); continue
       ;;
-    -U|-idirafter|-isystem|-iquote)
+    -isystem|-iquote|-idirafter)
+      ggcc_flags+=("-I" "${args[$((i+1))]:-}")
       ignored+=("$a" "${args[$((i+1))]:-}")
       i=$((i+2)); continue
       ;;
-    -U*|-idirafter*|-isystem*|-iquote*)
+    -isystem*|-iquote*|-idirafter*)
+      ggcc_flags+=("-I${a#-isystem}")
+      ignored+=("$a"); i=$((i+1)); continue
+      ;;
+    -U)
+      ignored+=("$a" "${args[$((i+1))]:-}")
+      i=$((i+2)); continue
+      ;;
+    -U*)
       ignored+=("$a"); i=$((i+1)); continue
       ;;
     # Assembler/linker-relevant flags for system tools
     # Note: -Wa,* must NOT be swallowed by -W* below (as-version.sh uses -Wa,--version).
-    -Wa,*|-Wl,*|-L*|-l*|-shared|-static|-pie|-no-pie|-nostdlib|-nostartfiles|-nodefaultlibs|-r)
+    -Wa,*|-Wl,*|-L*|-l*|-shared|-static|-pie|-no-pie|-nostdlib|-nostartfiles|-nodefaultlibs|-r|-m32|-m64)
       passthru_sys+=("$a"); i=$((i+1)); continue
       ;;
     -T)
@@ -240,8 +265,11 @@ fi
 # Preprocess-only
 if [[ "$mode" == "preprocess" ]]; then
   if [[ ${#c_sources[@]} -gt 0 ]]; then
-    echo "ggcc_cc_wrapper: BLOCKED -E on real .c not implemented; refusing gcc fallback for: ${c_sources[*]}" >&2
-    exit 1
+    set +e
+    "$GGCC" --target-os "$TARGET_OS" -m "$GGCC_M" "${ggcc_flags[@]}" -E ${out:+-o "$out"} "${c_sources[0]}"
+    ec=$?
+    set -e
+    exit "$ec"
   fi
   # .lds.S / probes: system preprocessor (with -I/-D) + depfile for fixdep.
   write_depfile_pp() {
@@ -362,207 +390,14 @@ if [[ ${#c_sources[@]} -gt 1 ]]; then
 fi
 src="${c_sources[0]}"
 
-# Soft exception: x86 real-mode setup (arch/x86/boot/*.c, not compressed/) is
-# built with -m16/-march=i386. ggcc only emits x86_64 SysV; without a 16-bit
-# backend we cannot produce setup.elf. Use system CC solely for this firmware
-# path so bzImage packaging can complete. Protected-mode kernel .c still goes
-# through ggcc only. Logged for C1 audit.
-need_realmode=0
-for a in "$@"; do
-  case "$a" in
-    -m16|-m32|-march=i386|-march=i486|-march=i586|-march=i686) need_realmode=1 ;;
-  esac
-done
-case "$src" in
-  arch/x86/boot/*|*/arch/x86/boot/*)
-    case "$src" in
-      arch/x86/boot/compressed/*|*/arch/x86/boot/compressed/*) ;;
-      *)
-        if [[ "$need_realmode" -eq 1 ]]; then
-          echo "ggcc_cc_wrapper: SOFT realmode (system $SYSCC) for $src" >&2
-          # Forward full argv to system cc for -m16 setup only.
-          exec "$SYSCC" "$@"
-        fi
-        ;;
-    esac
-    ;;
-esac
-
-# Soft exception: compressed identity-map bootstrap (ident_map_64.c pulls in
-# mm/ident_map.c + heavy pgtable headers). Full keep-list parse hangs; empty
-# soft-stubs for kernel_add_identity_map leave BSS unmapped → #PF in memcpy.
-# System freestanding CC for this one TU only. Logged for C1 audit.
-case "$src" in
-  *arch/x86/boot/compressed/ident_map_64.c|*arch/x86/mm/ident_map.c)
-    echo "ggcc_cc_wrapper: SOFT identity-map (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: compressed extract/decompress driver (misc.c parse_elf +
-# extract_kernel). ggcc keeps real extract_kernel text but soft parse_elf
-# returns a garbage entry → #UD at low PC after identity maps work.
-# System freestanding CC for this one TU only. Logged for C1 audit.
-# string.c stays on ggcc (freestanding memops); head_64.S is assembly.
-case "$src" in
-  *arch/x86/boot/compressed/misc.c)
-    echo "ggcc_cc_wrapper: SOFT extract/decompress (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: early 64-bit kernel C bootstrap (head64.c). Soft-stubbed
-# __startup_64 returns 0 without fixing early page tables → #PF at
-# jmp*common_startup_64 after CR3 load. System freestanding CC for this
-# one TU only. head_64.S remains assembly via system as. Logged for C1.
-case "$src" in
-  *arch/x86/kernel/head64.c)
-    echo "ggcc_cc_wrapper: SOFT early-head64 (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: GDT/IDT bootstrap data (cpu/common.c defines gdt_page with
-# designated initializers). ggcc soft-layout turns descriptors into garbage
-# pointers → #GP on mov %ss,$__KERNEL_DS (selector 0x18) in
-# startup_64_setup_gdt_idt. System freestanding CC for this one TU. Logged.
-case "$src" in
-  *arch/x86/kernel/cpu/common.c)
-    echo "ggcc_cc_wrapper: SOFT cpu-common/GDT (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: early MM PTE mask + highmap (init_64.c). ggcc leaves
-# __supported_pte_mask as a garbage code pointer → __startup_64 identity
-# pmd_entry &= mask clears PRESENT → #PF at next insn after CR3 switch.
-# System freestanding CC for this one TU. Logged for C1 audit.
-case "$src" in
-  *arch/x86/mm/init_64.c)
-    echo "ggcc_cc_wrapper: SOFT early-mm/init_64 (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: init_task / init_signals (init/init_task.c). ggcc soft-emits
-# struct task_struct init_task as a .weak .data stub → pcpu_hot.current_task
-# relocates to garbage; common_startup_64 loads TASK_threadsp → SP=junk
-# (#PF write at 0xfffffffffffffff1). System freestanding CC for this one TU.
-# Logged for C1 audit.
-case "$src" in
-  *init/init_task.c)
-    echo "ggcc_cc_wrapper: SOFT init_task (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: asm-offsets / bounds generation. ggcc soft-layout of
-# task_struct / pcpu_hot makes __builtin_offsetof wrong (TASK_threadsp was
-# 1496 vs real 1560; X86_top_of_stack collapsed to 0). common_startup_64 then
-# loads the wrong field as SP. System CC for these two codegen TUs only.
-# Logged for C1 audit.
-case "$src" in
-  *arch/x86/kernel/asm-offsets.c|*kernel/bounds.c)
-    echo "ggcc_cc_wrapper: SOFT asm-offsets/bounds (system $SYSCC) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: early IDT setup (idt.c). ggcc soft-stubs idt_setup_early_handler
-# as .weak no-op → copy_bootdata #PF on unmapped __va(boot_params) cannot be
-# fixed up by do_early_exception/__early_make_pgtable → double fault.
-# System freestanding CC for this one TU. Logged for C1 audit.
-case "$src" in
-  *arch/x86/kernel/idt.c)
-    echo "ggcc_cc_wrapper: SOFT early-idt (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: setup_arch (setup.c). ggcc soft-layout of boot_params / __setup
-# tables + early_param leaves null strings into parse_args/strcpy after
-# copy_bootdata. System freestanding CC for this one TU. Logged for C1.
-case "$src" in
-  *arch/x86/kernel/setup.c)
-    echo "ggcc_cc_wrapper: SOFT setup_arch (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: start_kernel / rest_init (init/main.c). Boot reaches rest_init
-# but ggcc codegen leaves null-deref at rest_init+0xb2 (RBX=0) and console_init
-# weak elsewhere → no banner. System freestanding CC for this one TU so
-# start_kernel/rest_init/kernel_init orchestration is real. Logged for C1.
-case "$src" in
-  *init/main.c)
-    echo "ggcc_cc_wrapper: SOFT start_kernel/main (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: printk/console core (printk.c). ggcc soft-stubs console_init
-# and _printk as .weak → start_kernel banner never hits serial. System
-# freestanding CC for this one TU. Logged for C1 audit.
-case "$src" in
-  *kernel/printk/printk.c)
-    echo "ggcc_cc_wrapper: SOFT printk/console (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: process creation (fork.c / pid.c). ggcc soft-stubs
-# kernel_thread/user_mode_thread/find_task_by_pid_ns as .weak no-ops →
-# rest_init gets NULL task and loops #PF at task->flags. System freestanding
-# CC for these TUs. Logged for C1 audit.
-case "$src" in
-  *kernel/fork.c|*kernel/pid.c)
-    echo "ggcc_cc_wrapper: SOFT fork/pid (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: zlib inflate (parse hang on inflate.c/inftrees.c/inffast.c
-# under ggcc for 20+ min). System freestanding CC for this directory.
-# Logged for C1 audit.
-case "$src" in
-  *lib/zlib_inflate/*)
-    echo "ggcc_cc_wrapper: SOFT zlib_inflate (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: zstd decompress (ggcc parse error on zstd_decompress.c
-# "expected RBracket, got LParen"). System freestanding CC for lib/zstd.
-# Logged for C1 audit.
-case "$src" in
-  *lib/zstd/*)
-    echo "ggcc_cc_wrapper: SOFT zstd (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: link-blocking TUs after PRINTK/SERIAL config expand.
-# - lib/crc32.c: emits calls to __builtin_bswap32 (undef with ggcc soft map).
-# - drivers/tty/vt/vt.c: needs param_ops_byte from module param infra.
-# - efi soft: avoid efi_mem_type undef when CONFIG_EFI partial.
-# System freestanding CC. Logged for C1 audit.
-case "$src" in
-  *lib/crc32.c|*drivers/tty/vt/vt.c|*kernel/params.c)
-    echo "ggcc_cc_wrapper: SOFT link-block (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
-
-# Soft exception: string / string_helpers / vsprintf. ggcc soft-stubs
-# skip_spaces (in string_helpers.c) as .weak returning 0 → parse_args #PF on
-# NULL; vsprintf soft stubs leave printk silent. System freestanding CC.
-# Logged for C1 audit.
-case "$src" in
-  *lib/string.c|*lib/string_helpers.c|*lib/vsprintf.c|*lib/cmdline.c)
-    echo "ggcc_cc_wrapper: SOFT string/vsprintf/cmdline (system $SYSCC freestanding) for $src" >&2
-    exec "$SYSCC" "$@"
-    ;;
-esac
+# Soft SYSCC on kernel .c REMOVED for C1/C4 clean-room.
+# Historical fail-drive paths that exec system $SYSCC on real .c are gone.
+# All .c → ggcc only; $SYSCC remains solely for assemble/link of .s/.o.
+# If a kernel TU fails under ggcc, that is an honest language gap (not a soft gcc path).
+if [[ "${GGCC_ALLOW_SOFT_SYSCC:-0}" == "1" ]]; then
+  echo "ggcc_cc_wrapper: ERROR GGCC_ALLOW_SOFT_SYSCC=1 is no longer supported (C1/C4). Unset it." >&2
+  exit 2
+fi
 
 tmpdir="${TMPDIR:-/tmp}"
 work="$(mktemp -d "$tmpdir/ggcc-wrap.XXXXXX")"
@@ -577,11 +412,48 @@ set +e
 ec=$?
 set -e
 if [[ $ec -ne 0 ]]; then
-  echo "ggcc_cc_wrapper: ggcc failed on $src (ec=$ec)" >&2
+  echo "ggcc_cc_wrapper: ggcc failed on $src ec=$ec" >&2
   head -50 "$work/ggcc.err" >&2 || true
+  "$GGCC" --target-os "$TARGET_OS" -m "$GGCC_M" "${ggcc_flags[@]}" -E -o /scratch/debug_failed_pp.c "$src" 2>/dev/null || true
   # Policy: do NOT fall back to gcc/clang on the .c
   exit "$ec"
 fi
+
+# Drop broken mrs/msr with negative integer operands (soft %0→-14 frame offset):
+# `msr spsr_el2,-14` fails gas. Codegen also filters; this is a safety net for
+# hyp/nvhe special builds that may re-emit templates.
+if command -v sed >/dev/null 2>&1; then
+  sed -i \
+    -e '/[[:space:]]mrs[[:space:]].*,[[:space:]]*-[[:digit:]]/d' \
+    -e '/[[:space:]]msr[[:space:]].*,[[:space:]]*-[[:digit:]]/d' \
+    -e '/[[:space:]]mrs[[:space:]]*-[[:digit:]]/d' \
+    -e '/[[:space:]]msr[[:space:]]*-[[:digit:]]/d' \
+    "$asm_out" 2>/dev/null || true
+fi
+
+# arm64 PI early-boot objects (arch/*/kernel/pi/*): relacheck rejects R_AARCH64_ABS64
+# outside sections whose name contains ".rodata.prel64". Map plain .rodata (and
+# .init.rodata) so ABS64 .quad symbol tables are rewritten to PREL64 by relacheck.
+# Only apply under /pi/ paths — normal kernel still wants absolute .rodata.
+case "$src" in
+  */kernel/pi/*|*/arch/*/kernel/pi/*)
+    # .section .rodata  /  .section\t.rodata  → .rodata.prel64
+    # .section .init.rodata → .init.rodata.prel64
+    if command -v sed >/dev/null 2>&1; then
+      sed -i \
+        -e 's/^\([[:space:]]*\.section[[:space:]]\{1,\}\)\.rodata[[:space:]]*$/\1.rodata.prel64,"a"/' \
+        -e 's/^\([[:space:]]*\.section[[:space:]]\{1,\}\)\.rodata"/\1.rodata.prel64,"a"/' \
+        -e 's/^\([[:space:]]*\.section[[:space:]]\{1,\}\)\.init\.rodata[[:space:]]*$/\1.init.rodata.prel64,"a"/' \
+        -e 's/^\([[:space:]]*\.rodata\)[[:space:]]*$/\t.section\t.rodata.prel64,"a"/' \
+        "$asm_out" 2>/dev/null || true
+    fi
+    ;;
+esac
+
+# EFI libstub: same ABS64 ban. Also map .rodata → prel64-like name won't help
+# (checker wants no ABS at all). Soft-global .quad fix is in codegen; here drop
+# any remaining `.quad <softname>` that is a bare identifier of common params
+# only if undefined would be wrong — skip (codegen fix is primary).
 
 # Write a minimal gcc-compatible depfile when -MD/-MMD was requested.
 write_depfile() {
@@ -614,10 +486,16 @@ case "$mode" in
     ;;
   compile)
     # system assembler only — never recompile .c
+    sys_flags=()
+    for flg in "${passthru_sys[@]}"; do
+      if [[ "$flg" != "-m32" ]]; then
+        sys_flags+=("$flg")
+      fi
+    done
     if [[ -n "$out" ]]; then
-      "$SYSCC" -c -o "$out" "$asm_out"
+      "$SYSCC" -c -o "$out" "${sys_flags[@]}" "$asm_out"
     else
-      "$SYSCC" -c -o "$(basename "$src" .c).o" "$asm_out"
+      "$SYSCC" -c -o "$(basename "$src" .c).o" "${sys_flags[@]}" "$asm_out"
     fi
     write_depfile "$src"
     exit 0

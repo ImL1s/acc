@@ -23,6 +23,22 @@ pub struct Parser {
     /// Nesting depth of GNU statement expressions `({...})`. Deep nesting from
     /// kernel do/while(0) macros can thrash the recursive parser; soft-skip.
     stmt_expr_depth: u32,
+    pub last_section: Option<String>,
+    /// Names declared `__weak` without initializer in this TU — later
+    /// definitions of the same name (e.g. version.c #include of
+    /// version-timestamp.c) stay weak so version-timestamp.o can override.
+    weak_names: std::collections::HashSet<String>,
+    /// Block/function-scope variable types (params + locals). Used so
+    /// `char buf[sizeof(p->field)]` can fold sizeof at parse time for array
+    /// bounds. Innermost scope is last.
+    local_types: Vec<std::collections::HashMap<String, Type>>,
+    /// File-scope variable types. Needed for array bounds like
+    /// `u8 zHeader[sizeof(aJournalMagic)+4]` where `aJournalMagic` is a
+    /// static global — without this, sizeof folds to None → unwrap_or(0) →
+    /// zero-length local → later `sqlite3OsWrite(..., sizeof(zHeader), ...)`
+    /// writes 0 bytes and journal magic is never patched (SQLite savepoint
+    /// rollback fails with SQLITE_DONE).
+    global_types: std::collections::HashMap<String, Type>,
 }
 
 impl Parser {
@@ -41,6 +57,10 @@ impl Parser {
             pending_enum_globals: Vec::new(),
             enum_values: std::collections::HashMap::new(),
             stmt_expr_depth: 0,
+            last_section: None,
+            weak_names: std::collections::HashSet::new(),
+            local_types: vec![std::collections::HashMap::new()],
+            global_types: std::collections::HashMap::new(),
         }
     }
 
@@ -90,11 +110,50 @@ impl Parser {
 
     fn push_scope(&mut self) {
         self.tag_scope.push(std::collections::HashMap::new());
+        self.local_types.push(std::collections::HashMap::new());
     }
     fn pop_scope(&mut self) {
         if self.tag_scope.len() > 1 {
             self.tag_scope.pop();
         }
+        if self.local_types.len() > 1 {
+            self.local_types.pop();
+        }
+    }
+    fn insert_local_type(&mut self, name: &str, ty: Type) {
+        if name.is_empty() {
+            return;
+        }
+        if let Some(scope) = self.local_types.last_mut() {
+            scope.insert(name.to_string(), ty);
+        }
+    }
+    fn insert_global_type(&mut self, name: &str, ty: Type) {
+        if name.is_empty() {
+            return;
+        }
+        // Prefer a sized array over a prior incomplete `[]` declaration.
+        if let Type::Array(_, n) = &ty {
+            if *n > 0 {
+                self.global_types.insert(name.to_string(), ty);
+                return;
+            }
+        }
+        self.global_types.entry(name.to_string()).or_insert(ty);
+    }
+    fn lookup_local_type(&self, name: &str) -> Option<&Type> {
+        for scope in self.local_types.iter().rev() {
+            if let Some(t) = scope.get(name) {
+                return Some(t);
+            }
+        }
+        None
+    }
+    fn lookup_var_type(&self, name: &str) -> Option<&Type> {
+        if let Some(t) = self.lookup_local_type(name) {
+            return Some(t);
+        }
+        self.global_types.get(name)
     }
     fn resolve_tag(&mut self, tag: &str, define: bool) -> String {
         if define {
@@ -197,32 +256,161 @@ impl Parser {
             | TokenKind::Const
             | TokenKind::Volatile => true,
             TokenKind::Ident(s) => {
-                s == "typeof"
-                    || s == "__typeof"
-                    || s == "__typeof__"
+                // C ordinary-identifier scope: a parameter/local named the same
+                // as a typedef shadows it in expressions. Redis does this heavily:
+                //   void *raxFind(rax *rax, ...) { raxLowWalk(rax, ...); }
+                // Without this, call-arg soft path treats `rax` as a type and
+                // substitutes Int(0) → SEGV in raxLowWalk (null tree pointer).
+                if self.lookup_local_type(s).is_some() {
+                    return false;
+                }
+                if let Some(next) = self.toks.get(self.i + 1) {
+                    if matches!(
+                        next.kind,
+                        TokenKind::Arrow
+                            | TokenKind::Dot
+                            | TokenKind::Assign
+                            | TokenKind::PlusEq
+                            | TokenKind::MinusEq
+                            | TokenKind::StarEq
+                            | TokenKind::SlashEq
+                            | TokenKind::PlusPlus
+                            | TokenKind::MinusMinus
+                    ) {
+                        return false;
+                    }
+                }
+                Self::is_typeof_kw(&s)
+                    || Self::is_gnu_attr_name(&s)
                     || s == "__builtin_va_list"
                     || s == "__gnuc_va_list"
+                    || s.ends_with("_t")
+                    || s.ends_with("_T")
+                    || matches!(s.as_str(), "u8" | "u16" | "u32" | "u64" | "s8" | "s16" | "s32" | "s64" | "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool")
                     || self.typedefs.iter().any(|t| t == s)
             }
+            TokenKind::Section(_) | TokenKind::Packed | TokenKind::Weak => true,
             _ => false,
         }
     }
 
+    fn is_gnu_attr_name(s: &str) -> bool {
+        s.starts_with("__attribute")
+            || s == "attribute"
+            || s == "__section__"
+            || s == "__section"
+            || s == "__asm"
+            || s == "__asm__"
+            || s == "asm"
+            || s == "__signed_wrap"
+            || s == "noinstr"
+            || s == "__noinstr_section"
+            || s == "__no_caller_saved_registers"
+            || s == "__no_caller_saved_registers__"
+            || s == "__no_sanitize_coverage"
+            || s == "__no_sanitize_address"
+            || s == "__no_sanitize_undefined"
+            || s == "__no_kasan_or_inline"
+            || s == "__no_profile"
+            || s == "__no_stack_protector"
+            || s == "__noclone"
+            || s == "__always_inline"
+            || s == "__gnu_inline"
+            || s == "__attribute_const__"
+            || s == "__attribute_pure__"
+            || s == "__maybe_unused"
+            || s == "__used"
+            || s == "__pure"
+            || s == "__cold"
+            || s == "__hot"
+            || s == "__noreturn"
+            || s == "__malloc"
+            || s == "__read_mostly"
+            || s == "__ro_after_init"
+            || s == "__init"
+            || s == "__exit"
+            || s == "__ref"
+            || s == "__head"
+            || s == "__must_check"
+            || s == "__packed"
+            || s == "__aligned"
+            || s == "__visible"
+            || s.starts_with("__no_sanitize")
+            || s.starts_with("__no_caller")
+            || s.starts_with("__no_kasan")
+            || s.starts_with("__no_profile")
+            || s.starts_with("__no_stack")
+            || s.starts_with("__read_mostly")
+            || s.starts_with("__ro_after_init")
+            || s.contains("ATTRIBUTE")
+            || s.contains("ATTRIBUTES")
+            || s.starts_with("PER_CPU_")
+    }
+
+    fn parse_field_name(&mut self) -> Result<String, String> {
+        let tok = self.peek().clone();
+        let field = match tok.kind {
+            TokenKind::Ident(s) => {
+                self.bump();
+                s
+            }
+            TokenKind::Int => { self.bump(); "int".into() }
+            TokenKind::Void => { self.bump(); "void".into() }
+            TokenKind::Char => { self.bump(); "char".into() }
+            TokenKind::Long => { self.bump(); "long".into() }
+            TokenKind::Short => { self.bump(); "short".into() }
+            TokenKind::Float => { self.bump(); "float".into() }
+            TokenKind::Double => { self.bump(); "double".into() }
+            TokenKind::Struct => { self.bump(); "struct".into() }
+            TokenKind::Union => { self.bump(); "union".into() }
+            TokenKind::Typedef => { self.bump(); "typedef".into() }
+            TokenKind::Enum => { self.bump(); "enum".into() }
+            TokenKind::Unsigned => { self.bump(); "unsigned".into() }
+            TokenKind::Signed => { self.bump(); "signed".into() }
+            TokenKind::Static => { self.bump(); "static".into() }
+            TokenKind::Extern => { self.bump(); "extern".into() }
+            TokenKind::Register => { self.bump(); "register".into() }
+            TokenKind::Inline => { self.bump(); "inline".into() }
+            TokenKind::Restrict => { self.bump(); "restrict".into() }
+            TokenKind::Auto => { self.bump(); "auto".into() }
+            TokenKind::Const => { self.bump(); "const".into() }
+            TokenKind::Volatile => { self.bump(); "volatile".into() }
+            TokenKind::Return => { self.bump(); "return".into() }
+            TokenKind::If => { self.bump(); "if".into() }
+            TokenKind::Else => { self.bump(); "else".into() }
+            TokenKind::While => { self.bump(); "while".into() }
+            TokenKind::For => { self.bump(); "for".into() }
+            TokenKind::Do => { self.bump(); "do".into() }
+            TokenKind::Break => { self.bump(); "break".into() }
+            TokenKind::Continue => { self.bump(); "continue".into() }
+            TokenKind::Goto => { self.bump(); "goto".into() }
+            TokenKind::Switch => { self.bump(); "switch".into() }
+            TokenKind::Case => { self.bump(); "case".into() }
+            TokenKind::Default => { self.bump(); "default".into() }
+            TokenKind::Sizeof => { self.bump(); "sizeof".into() }
+            TokenKind::Packed => { self.bump(); "packed".into() }
+            TokenKind::Section(s) => { self.bump(); s }
+            _ => {
+                return Err(format!(
+                    "expected field name identifier after '.' or '->', got {:?} at {}:{}",
+                    tok.kind, tok.line, tok.col
+                ));
+            }
+        };
+        Ok(field)
+    }
+
     fn is_typeof_kw(s: &str) -> bool {
-        s == "typeof" || s == "__typeof" || s == "__typeof__"
+        s == "typeof" || s == "__typeof" || s == "__typeof__" || s == "__auto_type"
     }
 
     /// After seeing '(', decide if this is nested `(declarator)` vs function params.
     fn lparen_starts_nested_declarator(&self) -> bool {
-        // Look at token after the '('.
         let j = self.i + 1;
         match self.toks.get(j).map(|t| &t.kind) {
-            // (*...)  ((...))  ([...]) — nested
             Some(TokenKind::Star | TokenKind::LParen | TokenKind::LBracket) => true,
-            // () empty → abstract function type (params), not nested
             Some(TokenKind::RParen) => false,
             Some(TokenKind::Ellipsis) => false,
-            // type keywords / typedef → function parameter list
             Some(
                 TokenKind::Int
                 | TokenKind::Void
@@ -243,8 +431,13 @@ impl Parser {
                 | TokenKind::Static,
             ) => false,
             Some(TokenKind::Ident(s)) => {
-                // typedef name as type in params; ordinary ident is nested name `(foo)`
-                !self.typedefs.iter().any(|t| t == s)
+                if matches!(self.toks.get(j + 1).map(|t| &t.kind), Some(TokenKind::RParen))
+                    && matches!(self.toks.get(j + 2).map(|t| &t.kind), Some(TokenKind::LParen | TokenKind::LBracket))
+                {
+                    true
+                } else {
+                    !self.typedefs.iter().any(|t| t == s)
+                }
             }
             _ => false,
         }
@@ -287,14 +480,92 @@ impl Parser {
                 items.push(self.parse_typedef()?);
                 continue;
             }
+            if self.peek_kind() == &TokenKind::Do
+                || (matches!(self.peek_kind(), TokenKind::Int | TokenKind::Void | TokenKind::Char | TokenKind::Long | TokenKind::Short)
+                    && self.toks.get(self.i + 1).map(|t| &t.kind) == Some(&TokenKind::Do))
+            {
+                if matches!(self.peek_kind(), TokenKind::Int | TokenKind::Void | TokenKind::Char | TokenKind::Long | TokenKind::Short) {
+                    self.bump();
+                }
+                self.expect(TokenKind::Do)?;
+                if self.at(&TokenKind::LBrace) {
+                    let _ = self.skip_balanced_braces();
+                }
+                if self.eat(TokenKind::While) {
+                    if self.at(&TokenKind::LParen) {
+                        let _ = self.skip_balanced_parens();
+                    }
+                }
+                let _ = self.eat(TokenKind::Semicolon);
+                continue;
+            }
+            if self.eat(TokenKind::While) {
+                if self.at(&TokenKind::LParen) {
+                    let _ = self.skip_balanced_parens();
+                }
+                let _ = self.eat(TokenKind::Semicolon);
+                continue;
+            }
+            if self.eat(TokenKind::If) {
+                if self.at(&TokenKind::LParen) {
+                    let _ = self.skip_balanced_parens();
+                }
+                if self.at(&TokenKind::LBrace) {
+                    let _ = self.skip_balanced_braces();
+                } else {
+                    while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Else) && !self.at(&TokenKind::Eof) {
+                        self.bump();
+                    }
+                    let _ = self.eat(TokenKind::Semicolon);
+                }
+                if self.eat(TokenKind::Else) {
+                    if self.at(&TokenKind::LBrace) {
+                        let _ = self.skip_balanced_braces();
+                    } else {
+                        while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Eof) {
+                            self.bump();
+                        }
+                        let _ = self.eat(TokenKind::Semicolon);
+                    }
+                }
+                continue;
+            }
+            if self.eat(TokenKind::For) || self.eat(TokenKind::Switch) {
+                if self.at(&TokenKind::LParen) {
+                    let _ = self.skip_balanced_parens();
+                }
+                if self.at(&TokenKind::LBrace) {
+                    let _ = self.skip_balanced_braces();
+                } else {
+                    while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Eof) {
+                        self.bump();
+                    }
+                    let _ = self.eat(TokenKind::Semicolon);
+                }
+                continue;
+            }
+            if self.eat(TokenKind::Return) || self.eat(TokenKind::Goto) {
+                while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Eof) {
+                    self.bump();
+                }
+                let _ = self.eat(TokenKind::Semicolon);
+                continue;
+            }
             // C11 `_Static_assert(cond, "msg");` / C23 `static_assert(...)` — skip.
             if matches!(
                 self.peek_kind(),
-                TokenKind::Ident(s) if s == "_Static_assert" || s == "static_assert"
+                TokenKind::Ident(s) if s == "_Static_assert"
+                    || s == "static_assert"
+                    || s.starts_with("ALLOW_")
+                    || s.starts_with("EXPORT_")
+                    || s.starts_with("MODULE_")
+                    || s.starts_with("TRACE_")
+                    || s.starts_with("SYSCALL_")
+                    || s.starts_with("KBUILD_")
             ) {
                 self.bump();
                 if self.at(&TokenKind::LParen) {
-                    self.skip_balanced_parens()?;
+                    let _ = self.skip_balanced_parens();
                 }
                 let _ = self.eat(TokenKind::Semicolon);
                 continue;
@@ -318,10 +589,27 @@ impl Parser {
                 let _ = self.parse_asm_stmt()?;
                 continue;
             }
-            items.extend(self.parse_decl_or_func(
-                file_static || file_register,
-                file_extern,
-            )?);
+            // Soft recovery: one bad top-level decl/func must not abort the whole
+            // kernel TU (cleanup.h CLASS expansions + huge headers). Skip to a
+            // plausible next top-level boundary and keep going.
+            let save_i = self.i;
+            match self.parse_decl_or_func(file_static || file_register, file_extern) {
+                Ok(more) => items.extend(more),
+                Err(e) => {
+                    // Surface soft-skip reasons for large-TU debugging (GGCC_PARSE_TRACE=1).
+                    if std::env::var_os("GGCC_PARSE_TRACE").is_some() {
+                        let t = self.peek();
+                        eprintln!(
+                            "GGCC_PARSE_TRACE: soft-skip at {}:{} tok={:?}: {e}",
+                            t.line, t.col, t.kind
+                        );
+                    }
+                    self.i = save_i;
+                    if !self.skip_to_next_toplevel() {
+                        break;
+                    }
+                }
+            }
         }
         // Flush enum constants discovered inside type specs (e.g. struct { enum { X } x; })
         for g in self.pending_enum_globals.drain(..) {
@@ -339,6 +627,43 @@ impl Parser {
         })
     }
 
+    /// After a top-level parse error, advance to the next likely top-level item.
+    /// Returns false if we hit EOF without progress.
+    fn skip_to_next_toplevel(&mut self) -> bool {
+        let start = self.i;
+        // Prefer: skip one balanced {...} if we're at/inside a brace-heavy item,
+        // else skip until `;` at brace-depth 0, then resume after it.
+        let mut depth = 0i32;
+        let mut saw = false;
+        while !self.at(&TokenKind::Eof) {
+            match self.peek_kind() {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    saw = true;
+                    self.bump();
+                }
+                TokenKind::RBrace => {
+                    self.bump();
+                    if depth > 0 {
+                        depth -= 1;
+                        if depth == 0 && saw {
+                            let _ = self.eat(TokenKind::Semicolon);
+                            return self.i > start;
+                        }
+                    }
+                }
+                TokenKind::Semicolon if depth == 0 => {
+                    self.bump();
+                    return self.i > start;
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+        self.i > start
+    }
+
     fn is_struct_tag_decl(&self) -> bool {
         // struct Ident { ... } ;  OR  struct Ident ;
         let mut j = self.i;
@@ -354,15 +679,23 @@ impl Parser {
         } else {
             return false;
         }
+        if matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::LBrace)) {
+            j = self.skip_balanced_braces_offset(j);
+            j = self.skip_gnu_attrs_offset(j);
+            return matches!(
+                self.toks.get(j).map(|t| &t.kind),
+                Some(TokenKind::Semicolon)
+            );
+        }
         matches!(
             self.toks.get(j).map(|t| &t.kind),
-            Some(TokenKind::LBrace | TokenKind::Semicolon)
+            Some(TokenKind::Semicolon)
         )
     }
 
     fn is_enum_tag_decl(&self) -> bool {
         // enum E;  OR  enum E { ... }  OR  enum { ... }
-        // NOT: enum E foo(...); / enum E x;
+        // NOT: enum E foo(...); / enum E x; / enum { ... } x;
         let mut j = self.i;
         if !matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::Enum)) {
             return false;
@@ -371,9 +704,17 @@ impl Parser {
         if matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
             j += 1;
         }
+        if matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::LBrace)) {
+            j = self.skip_balanced_braces_offset(j);
+            j = self.skip_gnu_attrs_offset(j);
+            return matches!(
+                self.toks.get(j).map(|t| &t.kind),
+                Some(TokenKind::Semicolon)
+            );
+        }
         matches!(
             self.toks.get(j).map(|t| &t.kind),
-            Some(TokenKind::LBrace | TokenKind::Semicolon)
+            Some(TokenKind::Semicolon)
         )
     }
 
@@ -449,12 +790,15 @@ impl Parser {
                 self.expect(TokenKind::Semicolon)?;
                 // Layout is already in struct_fields; StructDef item is optional for
                 // codegen as long as type_layouts is filled from struct_fields.
+                self.insert_global_type(&vname, vty.clone());
                 Ok(Item::Global(VarDecl {
                     name: vname,
                     ty: vty,
                     init,
                 is_static: false,
                 is_extern: false,
+                is_weak: false,
+                section: None,
             }))
             }
         }
@@ -465,7 +809,7 @@ impl Parser {
         // Longest typedef prefix match so `__u16` wins over `__u1` if both exist.
         let mut best: Option<(usize, Type)> = None;
         for (name, ty) in &self.typedef_map {
-            if s.starts_with(name.as_str()) && s.len() > name.len() {
+            if name.len() >= 3 && s.starts_with(name.as_str()) && s.len() > name.len() {
                 let rest = &s[name.len()..];
                 // Rest must look like an identifier continuation.
                 if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
@@ -605,12 +949,23 @@ impl Parser {
                     ty,
                     bit_width,
                 });
+                self.skip_trailing_gnu_attrs();
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }
                 break;
             }
-            self.expect(TokenKind::Semicolon)?;
+            while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Comma) && !self.at(&TokenKind::Eof) {
+                self.skip_trailing_gnu_attrs();
+                if self.at(&TokenKind::Semicolon) || self.at(&TokenKind::Comma) || self.at(&TokenKind::Eof) {
+                    break;
+                }
+                self.bump();
+                if self.at(&TokenKind::LParen) {
+                    let _ = self.skip_balanced_parens();
+                }
+            }
+            self.eat(TokenKind::Semicolon);
         }
         Ok(fields)
     }
@@ -618,7 +973,27 @@ impl Parser {
     fn parse_typedef(&mut self) -> Result<Item, String> {
         self.expect(TokenKind::Typedef)?;
         let base = self.parse_type_specifier()?;
-        let (name, ty, _) = self.parse_declarator(base)?;
+        // Linux headers: `typedef _Bool _Bool;` is a no-op. Lexer maps `_Bool`
+        // → TokenKind::Int, so this looks like `typedef int int;` and the second
+        // Int is not a valid declarator name. Accept a type-keyword "name" as a
+        // no-op typedef of `_Bool` (keeps subsequent parse alive for kernel TUs).
+        let (name, ty, _) = if matches!(
+            self.peek_kind(),
+            TokenKind::Int
+                | TokenKind::Void
+                | TokenKind::Char
+                | TokenKind::Long
+                | TokenKind::Short
+                | TokenKind::Float
+                | TokenKind::Double
+                | TokenKind::Unsigned
+                | TokenKind::Signed
+        ) {
+            self.bump();
+            ("_Bool".to_string(), base, None)
+        } else {
+            self.parse_declarator(base)?
+        };
         self.expect(TokenKind::Semicolon)?;
         // Normalize anon struct/union typedefs to named layouts under the typedef name
         let ty = match ty {
@@ -640,9 +1015,10 @@ impl Parser {
     }
 
     fn parse_type_specifier(&mut self) -> Result<Type, String> {
-        // skip storage / signedness prefixes (may interleave with long/int)
+        // skip storage / signedness / long prefixes (may interleave with long/int)
         let mut saw_unsigned = false;
         let mut saw_signed = false;
+        let mut saw_long = false;
         loop {
             // Residual GNU attributes that escaped the lexer (nested explosion).
             self.skip_trailing_gnu_attrs();
@@ -657,25 +1033,31 @@ impl Parser {
             {
                 continue;
             }
-            // Kernel sparse/address-space markers as type qualifiers
-            // (also erased at PP; keep parser soft if any leak through).
             if let TokenKind::Ident(s) = self.peek_kind().clone() {
-                if matches!(
-                    s.as_str(),
-                    "__user"
-                        | "__kernel"
-                        | "__iomem"
-                        | "__percpu"
-                        | "__rcu"
-                        | "__force"
-                        | "__bitwise"
-                        | "__bitwise__"
-                        | "__private"
-                        | "__safe"
-                        | "__nocast"
-                        | "__pmem"
-                ) {
+                let next_is_builtin_type = matches!(
+                    self.toks.get(self.i + 1).map(|t| &t.kind),
+                    Some(
+                        TokenKind::Int
+                            | TokenKind::Void
+                            | TokenKind::Char
+                            | TokenKind::Long
+                            | TokenKind::Short
+                            | TokenKind::Float
+                            | TokenKind::Double
+                            | TokenKind::Struct
+                            | TokenKind::Union
+                            | TokenKind::Enum
+                            | TokenKind::Unsigned
+                            | TokenKind::Signed
+                    )
+                );
+                if Self::is_gnu_attr_name(&s)
+                    || (next_is_builtin_type && !self.typedefs.iter().any(|t| t == &s))
+                {
                     self.bump();
+                    if self.at(&TokenKind::LParen) {
+                        let _ = self.skip_balanced_parens();
+                    }
                     continue;
                 }
             }
@@ -687,7 +1069,26 @@ impl Parser {
                 saw_unsigned = true;
                 continue;
             }
+            if self.eat(TokenKind::Long) {
+                saw_long = true;
+                self.skip_trailing_gnu_attrs();
+                let _ = self.eat(TokenKind::Long);
+                self.skip_trailing_gnu_attrs();
+                let _ = self.eat(TokenKind::Int);
+                self.skip_trailing_gnu_attrs();
+                continue;
+            }
             break;
+        }
+        if saw_long {
+            if self.eat(TokenKind::Double) {
+                return Ok(Type::Double);
+            }
+            return Ok(if saw_unsigned {
+                Type::ULong
+            } else {
+                Type::Long
+            });
         }
         let ty = match self.peek_kind().clone() {
             TokenKind::Void => {
@@ -714,12 +1115,16 @@ impl Parser {
             }
             TokenKind::Long => {
                 self.bump();
+                self.skip_trailing_gnu_attrs();
                 // long long / long int / long double
                 if self.eat(TokenKind::Double) {
                     Type::Double
                 } else {
+                    self.skip_trailing_gnu_attrs();
                     let _ = self.eat(TokenKind::Long);
+                    self.skip_trailing_gnu_attrs();
                     let _ = self.eat(TokenKind::Int);
+                    self.skip_trailing_gnu_attrs();
                     if saw_unsigned {
                         Type::ULong
                     } else {
@@ -817,6 +1222,8 @@ impl Parser {
                                 init: Some(Expr::Int(next_val)),
                                 is_static: true,
                                 is_extern: false,
+                                is_weak: false,
+                section: None,
                             });
                             next_val += 1;
                         } else {
@@ -840,24 +1247,29 @@ impl Parser {
                 Type::Int
             }
             TokenKind::Ident(s) if Self::is_typeof_kw(&s) => {
-                // GNU/C23 typeof(expr) / typeof(type) — enough for kernel READ_ONCE etc.
+                // GNU/C23 typeof(expr) / typeof(type) / __auto_type
                 self.bump();
-                self.expect(TokenKind::LParen)?;
-                // Prefer expression form for `typeof(*(p))`, `typeof(x->f[i])`, casts.
-                // Only take type-name when the next token is a plain type keyword/typedef
-                // (not `(` which starts cast/paren expr).
-                let t = if self.is_typename()
-                    && !matches!(
-                        self.peek_kind(),
-                        TokenKind::LParen | TokenKind::Star | TokenKind::AndAnd | TokenKind::Amp
-                    ) {
-                    self.parse_type_name()?
-                } else {
-                    let _e = self.parse_assign()?;
+                if s == "__auto_type" {
                     Type::ULong
-                };
-                self.expect(TokenKind::RParen)?;
-                t
+                } else if self.eat(TokenKind::LParen) {
+                    // Prefer expression form for `typeof(*(p))`, `typeof(x->f[i])`, casts.
+                    // Only take type-name when the next token is a plain type keyword/typedef
+                    // (not `(` which starts cast/paren expr).
+                    let t = if self.is_typename()
+                        && !matches!(
+                            self.peek_kind(),
+                            TokenKind::LParen | TokenKind::Star | TokenKind::AndAnd | TokenKind::Amp
+                        ) {
+                        self.parse_type_name()?
+                    } else {
+                        let _e = self.parse_assign()?;
+                        Type::ULong
+                    };
+                    self.expect(TokenKind::RParen)?;
+                    t
+                } else {
+                    Type::ULong
+                }
             }
             // Compiler builtins used as types in freestanding/kernel headers.
             TokenKind::Ident(s) if s == "__builtin_va_list" || s == "__gnuc_va_list" => {
@@ -872,7 +1284,9 @@ impl Parser {
             // types like malloc_zone_t). Register as opaque int typedef and continue.
             TokenKind::Ident(s) => {
                 self.bump();
-                if !self.typedefs.iter().any(|t| t == &s) {
+                if (s.ends_with("_t") || s.ends_with("_T") || matches!(s.as_str(), "u8" | "u16" | "u32" | "u64" | "s8" | "s16" | "s32" | "s64" | "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool"))
+                    && !self.typedefs.iter().any(|t| t == &s)
+                {
                     self.typedefs.push(s.clone());
                     self.typedef_map.insert(s, Type::Int);
                 }
@@ -971,6 +1385,8 @@ impl Parser {
                 init: Some(Expr::Int(next_val)),
                 is_static: true,
                 is_extern: false,
+                is_weak: false,
+                section: None,
             }));
             next_val += 1;
             if self.eat(TokenKind::Comma) {
@@ -986,12 +1402,15 @@ impl Parser {
             break;
         }
         self.expect(TokenKind::RBrace)?;
+        self.skip_trailing_gnu_attrs();
         // `enum { X, Y } name = Y;` / `enum E { ... } var;`
         // Trailing declarators with optional initializers (file-scope globals).
         loop {
             self.skip_kernel_type_quals();
+            self.skip_trailing_gnu_attrs();
             while self.eat(TokenKind::Star) {
                 self.skip_kernel_type_quals();
+                self.skip_trailing_gnu_attrs();
             }
             if let TokenKind::Ident(id) = self.peek_kind().clone() {
                 self.bump();
@@ -1014,6 +1433,8 @@ impl Parser {
                         init,
                         is_static: false,
                         is_extern,
+                        is_weak: false,
+                section: None,
                     }));
                 }
                 if self.eat(TokenKind::Comma) {
@@ -1032,10 +1453,22 @@ impl Parser {
         let mut packed = self.eat_packed_attrs();
         let mut name: Option<String> = None;
         if let TokenKind::Ident(s) = self.peek_kind().clone() {
-            name = Some(s);
-            self.bump();
+            if s == "__attribute__" || s == "__attribute" || s == "__extension__" || s == "__extension" {
+                self.bump();
+                if self.at(&TokenKind::LParen) {
+                    let _ = self.skip_balanced_parens();
+                }
+                if let TokenKind::Ident(s2) = self.peek_kind().clone() {
+                    name = Some(s2);
+                    self.bump();
+                }
+            } else {
+                name = Some(s);
+                self.bump();
+            }
         }
         packed = self.eat_packed_attrs() || packed;
+        self.skip_trailing_gnu_attrs();
         if self.eat(TokenKind::LBrace) {
             // Register tag before fields so recursive `struct S *p` resolves.
             let uniq_opt = name.as_ref().map(|n| self.resolve_tag(n, true));
@@ -1075,7 +1508,15 @@ impl Parser {
                 Ok(Type::Struct(uniq))
             }
         } else {
-            Err("struct/union without name or body".into())
+            let uniq = self.resolve_tag("", false);
+            if packed {
+                self.packed_structs.insert(uniq.clone());
+            }
+            if is_union {
+                Ok(Type::Union(uniq))
+            } else {
+                Ok(Type::Struct(uniq))
+            }
         }
     }
 
@@ -1156,8 +1597,8 @@ impl Parser {
         base: Type,
     ) -> Result<(String, Type, Option<(Vec<(String, Type)>, bool)>), String> {
         let mut ty = base;
-        // Qualifiers may appear before the first `*`: `char __user *p`.
         self.skip_kernel_type_quals();
+        self.skip_trailing_gnu_attrs();
         while self.eat(TokenKind::Star) {
             // pointer qualifiers: *const / *volatile / *restrict / *__user
             loop {
@@ -1183,36 +1624,84 @@ impl Parser {
                                 | "__safe"
                                 | "__nocast"
                                 | "__pmem"
-                        ) =>
+                        ) || Self::is_gnu_attr_name(&s) =>
                     {
                         self.bump();
+                        if self.at(&TokenKind::LParen) {
+                            let _ = self.skip_balanced_parens();
+                        }
                     }
                     _ => break,
                 }
             }
+            self.skip_kernel_type_quals();
+            self.skip_trailing_gnu_attrs();
             ty = Type::Ptr(Box::new(ty));
         }
+        self.skip_kernel_type_quals();
+        self.skip_trailing_gnu_attrs();
         // '(' starts a nested declarator (*name)/(*name()) only when the next
         // token looks like a declarator, not a type (function-parameter list).
         // So `int (int x)` / `int ()` are abstract function types, while
         // `int (*f)(void)` / `int (foo)` are nested declarators.
-        let (name, mut ty, nested, mut bubbled_fp) = if self.at(&TokenKind::LParen)
+        // `nested_ptr_form`: true for `(*name)` / `(*name)(params)` function-pointer
+        // variables. false for bare `(name)` including `T *(name)(params)` (function
+        // returning T*). Distinguishing by post-hoc Type::Ptr is wrong: outer `*` for
+        // the return type also yields Ptr (Redis/Lua `lua_State *(luaL_newstate)(void)`).
+        let (name, mut ty, nested, nested_ptr_form, mut bubbled_fp) = if self.at(&TokenKind::LParen)
             && self.lparen_starts_nested_declarator()
         {
             self.bump(); // (
+            self.skip_trailing_gnu_attrs();
+            let nested_ptr_form = self.at(&TokenKind::Star);
             let (n, inner, inner_fp) = self.parse_declarator(ty)?;
+            self.skip_trailing_gnu_attrs();
             self.expect(TokenKind::RParen)?;
             // Bubble function params from `(*name(params))` so definitions work:
             // `void (*f(T))(void) { ... }` is a function named f.
-            (n, inner, true, inner_fp)
-        } else if let TokenKind::Ident(s) = self.peek_kind().clone() {
-            // Don't consume typedef names as declarator identifiers when they
-            // appear where a nested type would be unexpected — still OK as name.
-            self.bump();
-            (s, ty, false, None)
+            (n, inner, true, nested_ptr_form, inner_fp)
         } else {
-            (String::new(), ty, false, None)
+            self.skip_trailing_gnu_attrs();
+            if self.eat(TokenKind::Do) {
+                if self.at(&TokenKind::LBrace) {
+                    let _ = self.skip_balanced_braces();
+                }
+                if self.at(&TokenKind::LParen) {
+                    let _ = self.skip_balanced_parens();
+                }
+                self.skip_trailing_gnu_attrs();
+            }
+            if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                self.bump();
+                let full_name = if s.starts_with("__UNIQUE_ID") && self.at(&TokenKind::LParen) {
+                    self.bump(); // (
+                    let inner_name = if let TokenKind::Ident(id) = self.peek_kind().clone() {
+                        self.bump();
+                        id
+                    } else {
+                        "name".to_string()
+                    };
+                    if self.at(&TokenKind::RParen) {
+                        self.bump(); // )
+                    }
+                    format!("{}_{}", s, inner_name)
+                } else {
+                    s
+                };
+                (full_name, ty, false, false, None)
+            } else if self.at(&TokenKind::LParen) && self.lparen_starts_nested_declarator() {
+                self.bump();
+                self.skip_trailing_gnu_attrs();
+                let nested_ptr_form = self.at(&TokenKind::Star);
+                let (n, inner, inner_fp) = self.parse_declarator(ty)?;
+                self.skip_trailing_gnu_attrs();
+                self.expect(TokenKind::RParen)?;
+                (n, inner, true, nested_ptr_form, inner_fp)
+            } else {
+                (String::new(), ty, false, false, None)
+            }
         };
+        self.skip_trailing_gnu_attrs();
         // Arrays: collect dims left-to-right then wrap right-to-left so
         // `char a[2][4]` becomes Array(Array(Char,4), 2).
         // Nested `(*p)[4]` → Ptr(Array(Char,4)).
@@ -1227,8 +1716,16 @@ impl Parser {
                     | TokenKind::Register => {
                         self.bump();
                     }
-                    TokenKind::Ident(s) if s == "restrict" || s == "__restrict" || s == "__restrict__" => {
+                    TokenKind::Ident(s)
+                        if matches!(
+                            s.as_str(),
+                            "restrict" | "__restrict" | "__restrict__"
+                        ) || Self::is_gnu_attr_name(&s) =>
+                    {
                         self.bump();
+                        if self.at(&TokenKind::LParen) {
+                            let _ = self.skip_balanced_parens();
+                        }
                     }
                     _ => break,
                 }
@@ -1243,8 +1740,10 @@ impl Parser {
                 self.const_array_len(&e).unwrap_or(0)
             };
             self.expect(TokenKind::RBracket)?;
+            self.skip_trailing_gnu_attrs();
             dims.push(n);
         }
+        self.skip_trailing_gnu_attrs();
         for n in dims.into_iter().rev() {
             if nested {
                 ty = Self::array_under_ptrs(ty, n);
@@ -1252,28 +1751,38 @@ impl Parser {
                 ty = Type::Array(Box::new(ty), n);
             }
         }
+        self.skip_trailing_gnu_attrs();
         // Function suffixes:
         // - bare `name(params)` → function prototype/definition (return params)
+        // - `int (name)(params)` → same as bare (Lua: `void (luaL_register)(...)`)
+        // - `T *(name)(params)` → function returning T* (Lua: `lua_State *(luaL_newstate)(void)`)
         // - `(*name)(params)` → pointer-to-function variable (no func params)
         // - `(*name(params))(params2)` → function returning function pointer
         //   (params bubbled from inner; params2 is return type sugar)
+        self.skip_trailing_gnu_attrs();
         let mut func_params: Option<(Vec<(String, Type)>, bool)> = None;
-        if !nested && self.at(&TokenKind::LParen) {
+        // Parenthesized bare name `(name)` is a function declarator even when the
+        // return type is a pointer (`T *`). Only `(*name)` is a function-pointer var.
+        let paren_bare_name = nested && !nested_ptr_form;
+        if (!nested || paren_bare_name) && self.at(&TokenKind::LParen) {
             self.bump();
             let params = self.parse_param_list_body()?;
             self.expect(TokenKind::RParen)?;
+            self.skip_trailing_gnu_attrs();
             func_params = Some(params);
             while self.at(&TokenKind::LParen) {
                 self.bump();
                 let _ = self.parse_param_list_body()?;
                 self.expect(TokenKind::RParen)?;
+                self.skip_trailing_gnu_attrs();
             }
         } else {
-            // nested / abstract: absorb trailing (params) as type sugar
+            // nested pointer / abstract: absorb trailing (params) as type sugar
             while self.at(&TokenKind::LParen) {
                 self.bump();
                 let _ = self.parse_param_list_body()?;
                 self.expect(TokenKind::RParen)?;
+                self.skip_trailing_gnu_attrs();
             }
             // Promote bubbled params from (*name(params)) form
             if bubbled_fp.is_some() {
@@ -1333,6 +1842,11 @@ impl Parser {
     /// Returns (size, align, field_name → byte offset).
     /// When `packed` is true, field alignment is 1 and the overall align is 1
     /// (matches GCC `__attribute__((packed))`).
+    ///
+    /// Anonymous nested struct/union members are **flattened** into the parent
+    /// map (same as codegen `layout_fields`). Skipping them made
+    /// `offsetof(struct pt_regs, regs[N])` / `thread_info.preempt_count` return
+    /// 0 and collapsed `sizeof(struct pt_regs)` — fatal for Linux asm-offsets.
     fn layout_fields_const(
         &self,
         fields: &[Field],
@@ -1345,7 +1859,34 @@ impl Parser {
         let mut offset_bits: u64 = 0;
 
         for f in fields {
+            // Anonymous nested struct/union: promote fields into this layout.
             if f.name.is_empty() && f.bit_width.is_none() {
+                let nested_opt: Option<(i64, i64, std::collections::HashMap<String, i64>)> =
+                    match &f.ty {
+                        Type::AnonStruct(fs) => Some(self.layout_fields_const(fs, false, false)),
+                        Type::AnonUnion(fs) => Some(self.layout_fields_const(fs, true, false)),
+                        Type::Struct(n) | Type::Union(n) => self.layout_named(n),
+                        _ => None,
+                    };
+                if let Some((nsz, nal, nmap)) = nested_opt {
+                    let nalign = if packed { 1 } else { nal };
+                    max_align = max_align.max(nalign);
+                    if is_union {
+                        for (fnm, fo) in &nmap {
+                            map.insert(fnm.clone(), *fo);
+                        }
+                        max_size = max_size.max(nsz);
+                    } else {
+                        let mut byte_off = ((offset_bits + 7) / 8) as i64;
+                        byte_off = Self::align_up(byte_off, nalign);
+                        for (fnm, fo) in &nmap {
+                            map.insert(fnm.clone(), byte_off + fo);
+                        }
+                        offset_bits = ((byte_off + nsz) as u64) * 8;
+                    }
+                    continue;
+                }
+                // Unknown empty-name field (e.g. incomplete type): skip size contribution.
                 continue;
             }
             if let Some(width) = f.bit_width {
@@ -1461,20 +2002,56 @@ impl Parser {
         }
     }
 
+    /// Resolve field type, searching into anonymous nested struct/union members.
+    fn find_field_type(&self, ty: &Type, field: &str) -> Option<Type> {
+        let fields: &[Field] = match ty {
+            Type::Struct(n) | Type::Union(n) => self.struct_fields.get(n)?.as_slice(),
+            Type::AnonStruct(fs) | Type::AnonUnion(fs) => fs.as_slice(),
+            _ => return None,
+        };
+        for f in fields {
+            if f.name == field {
+                return Some(f.ty.clone());
+            }
+            if f.name.is_empty() && f.bit_width.is_none() {
+                if let Some(t) = self.find_field_type(&f.ty, field) {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+
     /// Nested offsetof path: `a.b.c` → sum of successive field offsets.
-    fn const_offsetof_type_path(&self, ty: &Type, path: &[String]) -> Option<i64> {
+    /// Each path element is `(field_name, array_indices)` so
+    /// `regs[2]` / `stackframe[1]` add `index * elem_size`.
+    fn const_offsetof_type_path(
+        &self,
+        ty: &Type,
+        path: &[(String, Vec<i64>)],
+    ) -> Option<i64> {
         let mut cur = ty.clone();
         let mut total = 0i64;
-        for field in path {
+        for (field, indices) in path {
             let off = self.const_offsetof_type_field(&cur, field)?;
             total += off;
-            // Advance type to the field's type for the next segment.
-            let fields = match &cur {
-                Type::Struct(n) | Type::Union(n) => self.struct_fields.get(n)?.clone(),
-                Type::AnonStruct(fs) | Type::AnonUnion(fs) => fs.clone(),
-                _ => return None,
-            };
-            let fty = fields.iter().find(|f| f.name == *field)?.ty.clone();
+            let mut fty = self.find_field_type(&cur, field)?;
+            for &idx in indices {
+                match &fty {
+                    Type::Array(elem, _) => {
+                        let esz = self.const_type_size(elem)?;
+                        total += idx * esz;
+                        fty = elem.as_ref().clone();
+                    }
+                    // Soft: treat pointer as array for offsetof(T, p[n]) rare cases.
+                    Type::Ptr(elem) => {
+                        let esz = self.const_type_size(elem)?;
+                        total += idx * esz;
+                        fty = elem.as_ref().clone();
+                    }
+                    _ => return None,
+                }
+            }
             cur = fty;
         }
         Some(total)
@@ -1536,6 +2113,88 @@ impl Parser {
         }
     }
 
+    /// Best-effort type of an expression for parse-time sizeof/array bounds.
+    /// Uses local_types (params + locals) and struct field layouts.
+    fn const_expr_type(&self, e: &Expr) -> Option<Type> {
+        match e {
+            Expr::Int(_) | Expr::Char(_) => Some(Type::Int),
+            Expr::Float(_) => Some(Type::Double),
+            Expr::String(s) => {
+                Some(Type::Array(Box::new(Type::Char), (s.len() + 1) as i64))
+            }
+            Expr::Var(name) => {
+                if let Some(t) = self.lookup_var_type(name) {
+                    return Some(t.clone());
+                }
+                if self.enum_values.contains_key(name) {
+                    return Some(Type::Int);
+                }
+                None
+            }
+            Expr::Member { base, field, arrow } => {
+                let mut bt = self.const_expr_type(base)?;
+                if *arrow {
+                    bt = match bt {
+                        Type::Ptr(inner) => *inner,
+                        Type::Array(inner, _) => *inner,
+                        _ => return None,
+                    };
+                }
+                self.find_field_type(&bt, field)
+            }
+            Expr::Unary {
+                op: UnaryOp::Deref,
+                expr,
+            } => match self.const_expr_type(expr)? {
+                Type::Ptr(i) | Type::Array(i, _) => Some(*i),
+                _ => None,
+            },
+            Expr::Unary {
+                op: UnaryOp::Addr,
+                expr,
+            } => Some(Type::Ptr(Box::new(self.const_expr_type(expr)?))),
+            Expr::Unary {
+                op: UnaryOp::Neg | UnaryOp::Not | UnaryOp::BitNot,
+                expr,
+            } => self.const_expr_type(expr),
+            Expr::Index { base, .. } => match self.const_expr_type(base)? {
+                Type::Ptr(i) | Type::Array(i, _) => Some(*i),
+                _ => None,
+            },
+            Expr::Cast { ty, .. } => Some(ty.clone()),
+            Expr::SizeofType(_) | Expr::SizeofExpr(_) => Some(Type::ULong),
+            Expr::Binary { left, right, .. } => {
+                // Prefer floating / pointer width when either side has it.
+                let lt = self.const_expr_type(left);
+                let rt = self.const_expr_type(right);
+                match (lt, rt) {
+                    (Some(Type::Double), _) | (_, Some(Type::Double)) => Some(Type::Double),
+                    (Some(Type::Float), _) | (_, Some(Type::Float)) => Some(Type::Float),
+                    (Some(Type::Ptr(p)), _) | (_, Some(Type::Ptr(p))) => {
+                        Some(Type::Ptr(p))
+                    }
+                    (Some(Type::ULong), _) | (_, Some(Type::ULong)) => Some(Type::ULong),
+                    (Some(Type::Long), _) | (_, Some(Type::Long)) => Some(Type::Long),
+                    _ => Some(Type::Int),
+                }
+            }
+            Expr::Cond {
+                then_e, else_e, ..
+            } => self
+                .const_expr_type(then_e)
+                .or_else(|| self.const_expr_type(else_e)),
+            Expr::Call { .. } => Some(Type::Int),
+            Expr::PreInc(e) | Expr::PreDec(e) | Expr::PostInc(e) | Expr::PostDec(e) => {
+                self.const_expr_type(e)
+            }
+            Expr::Assign { left, .. } | Expr::CompoundAssign { left, .. } => {
+                self.const_expr_type(left)
+            }
+            Expr::StmtExpr(_, final_e) => self.const_expr_type(final_e),
+            Expr::InitList { .. } => None,
+        }
+    }
+
     fn const_array_len(&self, e: &Expr) -> Option<i64> {
         // Try offsetof first (before generic cast peel loses Addr).
         if let Some(o) = self.const_offsetof(e) {
@@ -1564,9 +2223,58 @@ impl Parser {
                     BinOp::Mul => l.wrapping_mul(r),
                     BinOp::Div if r != 0 => l / r,
                     BinOp::Mod if r != 0 => l % r,
+                    BinOp::Shl => l.wrapping_shl((r as u32) & 63),
+                    BinOp::Shr => ((l as u64) >> ((r as u32) & 63)) as i64,
+                    BinOp::BitAnd => l & r,
+                    BinOp::BitOr => l | r,
+                    BinOp::BitXor => l ^ r,
+                    BinOp::Eq => (l == r) as i64,
+                    BinOp::Ne => (l != r) as i64,
+                    BinOp::Lt => (l < r) as i64,
+                    BinOp::Gt => (l > r) as i64,
+                    BinOp::Le => (l <= r) as i64,
+                    BinOp::Ge => (l >= r) as i64,
+                    BinOp::And => ((l != 0) && (r != 0)) as i64,
+                    BinOp::Or => ((l != 0) || (r != 0)) as i64,
                     _ => return None,
                 })
             }
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr,
+            } => Some((self.const_array_len(expr)? == 0) as i64),
+            Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr,
+            } => Some(!self.const_array_len(expr)?),
+            // GCC builtins used by kernel log2.h / order_base_2 / DEFINE "i"(…).
+            Expr::Call { name, args } => match name.as_str() {
+                "__builtin_constant_p" => {
+                    // 1 if argument is a foldable constant expression.
+                    Some(if args.len() == 1 && self.const_array_len(&args[0]).is_some() {
+                        1
+                    } else {
+                        0
+                    })
+                }
+                "__builtin_clzll" | "__builtin_clzl" | "__builtin_clz" => {
+                    let n = self.const_array_len(args.first()?)? as u64;
+                    if n == 0 {
+                        // GCC: undefined for 0; kernel const paths avoid it.
+                        return None;
+                    }
+                    let width = if name == "__builtin_clz" { 32u32 } else { 64u32 };
+                    Some((n.leading_zeros() - (64 - width)) as i64)
+                }
+                "__builtin_ctzll" | "__builtin_ctzl" | "__builtin_ctz" => {
+                    let n = self.const_array_len(args.first()?)? as u64;
+                    if n == 0 {
+                        return None;
+                    }
+                    Some(n.trailing_zeros() as i64)
+                }
+                _ => None,
+            },
             Expr::Cast { expr, .. } => {
                 // Cast may wrap offsetof; try offsetof on full expr first already done.
                 // Also try offsetof on inner with outer cast re-wrapped.
@@ -1578,10 +2286,23 @@ impl Parser {
             Expr::SizeofType(ty) => self.const_type_size(ty),
             Expr::SizeofExpr(ex) => match ex.as_ref() {
                 Expr::SizeofType(ty) | Expr::Cast { ty, .. } => self.const_type_size(ty),
+                Expr::String(s) => Some((s.len() + 1) as i64),
                 other => {
-                    // sizeof(var) — try typeof-ish via sizeof of expression type
-                    // For const eval, only constants matter.
-                    self.const_array_len(other)
+                    // sizeof(expr) must use the *type* of expr, not evaluate expr
+                    // as an integer. Critical for array bounds like:
+                    //   char dbFileVers[sizeof(pPager->dbFileVers)];
+                    // Previously this fell through to const_array_len(Member)
+                    // which returned None → unwrap_or(0) → zero-length array →
+                    // sqlite3OsRead(..., amt=0) and multi-connection cache
+                    // invalidation never saw peer writes.
+                    let ty = self.const_expr_type(other)?;
+                    match &ty {
+                        Type::Array(elem, n) if *n > 0 => {
+                            Some(self.const_type_size(elem)? * *n)
+                        }
+                        Type::Array(_, n) if *n <= 0 => None,
+                        other_ty => self.const_type_size(other_ty),
+                    }
                 }
             },
             Expr::Cond {
@@ -1602,47 +2323,27 @@ impl Parser {
     }
 
     /// Skip leftover `__attribute__` / `__section__` / similar after a declarator.
+    /// Does NOT consume `Weak` — that sticky token is ownership of the caller
+    /// (must set `is_weak` on Function for COND_SYSCALL).
     fn skip_trailing_gnu_attrs(&mut self) {
         loop {
             match self.peek_kind().clone() {
+                TokenKind::Section(sec) => {
+                    self.last_section = Some(sec);
+                    self.bump();
+                }
+                TokenKind::Packed | TokenKind::StringLit(_) => {
+                    self.bump();
+                }
+                TokenKind::Weak => break, // sticky — leave for parse_decl_or_func
                 TokenKind::Ident(s) => {
-                    let is_attr = s.starts_with("__attribute")
-                        || s == "__section__"
-                        || s == "__section"
-                        || s == "__asm"
-                        || s == "__asm__"
-                        || s == "asm"
-                        || (s.starts_with("__")
-                            && (s.contains("alloc")
-                                || s.contains("section")
-                                || s.contains("cold")
-                                || s.contains("hot")
-                                || s.contains("pure")
-                                || s.contains("noreturn")
-                                || s.contains("unused")
-                                || s.contains("used")
-                                || s.contains("weak")
-                                || s.contains("alias")
-                                || s.contains("aligned")
-                                || s.contains("packed")
-                                || s.contains("malloc")
-                                || s.contains("warn")
-                                || s.contains("error")
-                                || s.contains("deprecated")
-                                || s.contains("always")
-                                || s.contains("noinline")
-                                || s.contains("flatten")));
-                    if !is_attr {
+                    if !Self::is_gnu_attr_name(&s) {
                         break;
                     }
                     self.bump();
                     if self.at(&TokenKind::LParen) {
                         let _ = self.skip_balanced_parens();
                     }
-                }
-                // Bare nested parens residue from broken attribute expansion
-                TokenKind::LParen => {
-                    let _ = self.skip_balanced_parens();
                 }
                 _ => break,
             }
@@ -1654,11 +2355,11 @@ impl Parser {
         file_static: bool,
         file_extern: bool,
     ) -> Result<Vec<Item>, String> {
-        // Collect storage-class before/while type-specifier eats them.
         let mut is_static = file_static;
-        let mut saw_inline = false;
         let mut is_extern = file_extern;
+        let mut saw_inline = false;
         let mut is_register = false;
+        let mut is_weak = false;
         loop {
             if self.eat(TokenKind::Static) {
                 is_static = true;
@@ -1681,16 +2382,48 @@ impl Parser {
             if self.eat(TokenKind::Auto) {
                 continue;
             }
+            if self.eat(TokenKind::Weak) {
+                is_weak = true;
+                continue;
+            }
             break;
         }
         let _ = is_register;
+        let mut sec_attr: Option<String> = None;
+        if let TokenKind::Section(sec) = self.peek_kind().clone() {
+            sec_attr = Some(sec);
+            self.bump();
+        }
         let base = self.parse_type_specifier()?;
+        sec_attr = self.last_section.take().or(sec_attr);
+        if let TokenKind::Section(sec) = self.peek_kind().clone() {
+            sec_attr = Some(sec);
+            self.bump();
+        }
+        // `long __weak foo(...)` — weak sits between type and declarator.
+        while self.eat(TokenKind::Weak) {
+            is_weak = true;
+        }
+        while self.eat(TokenKind::Packed) {}
         // type_specifier may still consume residual static/inline interleaved
         // with type keywords; re-check is unnecessary for body-skip heuristics.
         // Could be: type name(...) { }  or type name, name2;
         // Function params are part of the declarator (including multi-suffix forms).
         let (name, mut ty, func_params) = self.parse_declarator(base.clone())?;
+        sec_attr = self.last_section.take().or(sec_attr);
+        if let TokenKind::Section(sec) = self.peek_kind().clone() {
+            sec_attr = Some(sec);
+            self.bump();
+        }
+        self.skip_trailing_gnu_attrs();
+        // Weak may appear after the declarator as sticky token.
+        while self.eat(TokenKind::Weak) {
+            is_weak = true;
+        }
         if name.is_empty() {
+            if self.eat(TokenKind::Semicolon) {
+                return Ok(Vec::new());
+            }
             return Err(format!(
                 "expected declarator name at {}:{}",
                 self.peek().line,
@@ -1698,9 +2431,25 @@ impl Parser {
             ));
         }
         if let Some((params, variadic)) = func_params {
-            // Skip residual GNU attributes / section macros after the declarator
-            // (lexer usually erases them; nested/broken expansions may leave idents).
-            self.skip_trailing_gnu_attrs();
+            // Skip residual GNU attributes / section macros / kernel function annotations after the declarator
+            loop {
+                self.skip_trailing_gnu_attrs();
+                while self.eat(TokenKind::Weak) {
+                    is_weak = true;
+                }
+                sec_attr = self.last_section.take().or(sec_attr);
+                if self.at(&TokenKind::LBrace) || self.at(&TokenKind::Semicolon) || self.at(&TokenKind::Eof) {
+                    break;
+                }
+                if let TokenKind::Ident(_) = self.peek_kind().clone() {
+                    self.bump();
+                    if self.at(&TokenKind::LParen) {
+                        let _ = self.skip_balanced_parens();
+                    }
+                    continue;
+                }
+                break;
+            }
             // Function prototype or definition
             if self.eat(TokenKind::Semicolon) {
                 return Ok(vec![Item::Func(Function {
@@ -1710,27 +2459,20 @@ impl Parser {
                     variadic,
                     body: None,
                     is_static,
+                    is_weak,
+                    section: sec_attr,
                 })]);
             }
             if self.at(&TokenKind::LBrace) {
-                // Soft body-skip policy (kernel fail-drive):
-                // - keep `main` + `common` (asm-offsets DEFINE/OFFSET generators)
-                // - keep early-boot / decompress names (empty stubs triple-fault)
-                // - GGCC_PARSE_ALL_BODIES=1: parse every body (use only on small TUs
-                //   like arch/x86/boot/compressed/* — full sched/mm still hangs)
-                // Empty Some([]) vs None: stubs link; prototypes do not define.
-                let parse_all = std::env::var_os("GGCC_PARSE_ALL_BODIES").is_some();
-                let keep = parse_all
-                    || name == "main"
-                    || name == "common"
-                    || Self::is_boot_critical_fn(&name);
-                let skip_body = !keep;
-                let body = if skip_body {
-                    self.skip_balanced_braces()?;
-                    Some(Vec::new())
-                } else {
-                    Some(self.parse_block()?)
-                };
+                let sec_attr = self.last_section.take().or(sec_attr);
+                // Params visible to sizeof in array bounds inside the body:
+                //   char dbFileVers[sizeof(pPager->dbFileVers)];
+                self.push_scope();
+                for (pn, pt) in &params {
+                    self.insert_local_type(pn, pt.clone());
+                }
+                let body = Some(self.parse_block()?);
+                self.pop_scope();
                 return Ok(vec![Item::Func(Function {
                     name,
                     ret: ty,
@@ -1738,6 +2480,8 @@ impl Parser {
                     variadic,
                     body,
                     is_static: is_static || saw_inline,
+                    is_weak,
+                    section: sec_attr,
                 })]);
             }
             if self.eat(TokenKind::Comma) {
@@ -1749,6 +2493,8 @@ impl Parser {
                     variadic,
                     body: None,
                     is_static,
+                    is_weak,
+                    section: sec_attr.clone(),
                 })];
                 loop {
                     let (n2, t2, fp2) = self.parse_declarator(base.clone())?;
@@ -1760,6 +2506,8 @@ impl Parser {
                             variadic: v2,
                             body: None,
                             is_static,
+                            is_weak,
+                            section: sec_attr.clone(),
                         }));
                         let _ = t2;
                     } else {
@@ -1774,6 +2522,8 @@ impl Parser {
                             init,
                             is_static,
                             is_extern,
+                            is_weak,
+                            section: sec_attr.clone(),
                         }));
                     }
                     if self.eat(TokenKind::Comma) {
@@ -1792,36 +2542,78 @@ impl Parser {
         }
         // variable(s)
         let mut items = Vec::new();
+        sec_attr = self.last_section.take().or(sec_attr);
+        if let TokenKind::Section(sec) = self.peek_kind().clone() {
+            sec_attr = Some(sec);
+            self.bump();
+        }
         let init = if self.eat(TokenKind::Assign) {
             Some(self.parse_initializer()?)
         } else {
             None
         };
         let ty = Self::infer_array_size(ty, &init);
+        // Sticky weak: once a name is declared __weak in this TU, later
+        // definitions (e.g. version.c #include of version-timestamp.c) stay weak.
+        let mut is_weak = is_weak;
+        if is_weak {
+            self.weak_names.insert(name.clone());
+        } else if self.weak_names.contains(&name) {
+            is_weak = true;
+        }
+        self.insert_global_type(&name, ty.clone());
         items.push(Item::Global(VarDecl {
-            name,
+            name: name.clone(),
             ty: ty.clone(),
             init,
             is_static,
             is_extern,
+            is_weak,
+            section: sec_attr.clone(),
         }));
         while self.eat(TokenKind::Comma) {
+            self.skip_trailing_gnu_attrs();
             let (n2, t2, _) = self.parse_declarator(base.clone())?;
+            self.skip_trailing_gnu_attrs();
+            let mut sec2 = self.last_section.take().or(sec_attr.clone());
+            if let TokenKind::Section(sec) = self.peek_kind().clone() {
+                sec2 = Some(sec);
+                self.bump();
+            }
             let init2 = if self.eat(TokenKind::Assign) {
                 Some(self.parse_initializer()?)
             } else {
                 None
             };
             let t2 = Self::infer_array_size(t2, &init2);
+            let mut w2 = is_weak;
+            if w2 {
+                self.weak_names.insert(n2.clone());
+            } else if self.weak_names.contains(&n2) {
+                w2 = true;
+            }
+            self.insert_global_type(&n2, t2.clone());
             items.push(Item::Global(VarDecl {
                 name: n2,
                 ty: t2,
                 init: init2,
                 is_static,
                 is_extern,
+                is_weak: w2,
+                section: sec2,
             }));
         }
-        self.expect(TokenKind::Semicolon)?;
+        while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Comma) && !self.at(&TokenKind::Eof) {
+            self.skip_trailing_gnu_attrs();
+            if self.at(&TokenKind::Semicolon) || self.at(&TokenKind::Comma) || self.at(&TokenKind::Eof) {
+                break;
+            }
+            self.bump();
+            if self.at(&TokenKind::LParen) {
+                let _ = self.skip_balanced_parens();
+            }
+        }
+        self.eat(TokenKind::Semicolon);
         let _ = &ty;
         Ok(items)
     }
@@ -1875,8 +2667,11 @@ impl Parser {
             let mut fields = Vec::new();
             while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
                 if self.eat(TokenKind::Dot) {
-                    // Nested designators: `.p4d.pgd = expr` and `.base[0] = expr`
-                    // (kernel timekeeping / page-table types).
+                    // Nested designators: `.memory.regions = expr` and `.base[0] = expr`
+                    // (kernel memblock / timekeeping / page-table types).
+                    // Keep the FULL path ("memory.regions") so codegen can apply
+                    // nested struct fields — innermost-only dropped regions/cnt/max
+                    // and left memblock.memory.regions NULL → panic in double_array.
                     let mut field = if let TokenKind::Ident(s) = self.peek_kind().clone() {
                         self.bump();
                         s
@@ -1887,8 +2682,7 @@ impl Parser {
                         if self.eat(TokenKind::Dot) {
                             if let TokenKind::Ident(s) = self.peek_kind().clone() {
                                 self.bump();
-                                // Keep innermost name for soft layout matching.
-                                field = s;
+                                field = format!("{field}.{s}");
                             } else {
                                 return Err("nested designated init field name".into());
                             }
@@ -1985,11 +2779,79 @@ impl Parser {
         Ok(stmts)
     }
 
+    fn skip_balanced_braces_offset(&self, start: usize) -> usize {
+        if !matches!(self.toks.get(start).map(|t| &t.kind), Some(TokenKind::LBrace)) {
+            return start;
+        }
+        let mut depth = 1i32;
+        let mut idx = start + 1;
+        while depth > 0 && idx < self.toks.len() {
+            match self.toks[idx].kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return idx + 1;
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        idx
+    }
+
+    /// Skip a balanced `(...)` starting at `start` index and return index after `)`.
+    fn skip_balanced_parens_offset(&self, start: usize) -> usize {
+        if !matches!(self.toks.get(start).map(|t| &t.kind), Some(TokenKind::LParen)) {
+            return start;
+        }
+        let mut depth = 1i32;
+        let mut idx = start + 1;
+        while depth > 0 && idx < self.toks.len() {
+            match self.toks[idx].kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return idx + 1;
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        idx
+    }
+
+    /// Skip GNU attributes starting at `idx` token offset.
+    fn skip_gnu_attrs_offset(&self, mut idx: usize) -> usize {
+        loop {
+            if idx < self.toks.len() && matches!(self.toks[idx].kind, TokenKind::Packed | TokenKind::Section(_)) {
+                idx += 1;
+                continue;
+            }
+            if idx < self.toks.len() && matches!(&self.toks[idx].kind, TokenKind::Ident(s) if s.starts_with("__attribute") || s == "attribute") {
+                idx += 1;
+                if idx < self.toks.len() && self.toks[idx].kind == TokenKind::LParen {
+                    idx = self.skip_balanced_parens_offset(idx);
+                }
+                continue;
+            }
+            break;
+        }
+        idx
+    }
+
     /// Skip a balanced `(...)` starting at the current token (must be `(`).
     fn skip_balanced_parens(&mut self) -> Result<(), String> {
         self.expect(TokenKind::LParen)?;
         let mut depth = 1i32;
         while depth > 0 && !self.at(&TokenKind::Eof) {
+            if self.at(&TokenKind::LBrace) {
+                let _ = self.skip_balanced_braces();
+                continue;
+            }
             if self.at(&TokenKind::LParen) {
                 depth += 1;
             } else if self.at(&TokenKind::RParen) {
@@ -2061,24 +2923,91 @@ impl Parser {
         // Kernel ALTERNATIVE/asm_inline macros can leave non-string tokens in the
         // template position. Prefer structured parse; on failure, skip balanced
         // `(...)` so headers still parse (DEFINE uses clean string templates).
+        //
+        // Special case: `asm(ALTERNATIVE("old", "new", CAP) : …)` when the
+        // preprocessor did not expand ALTERNATIVE (ggcc PP gap). Use the first
+        // string (oldinstr = default non-cap path) as the template so critical
+        // paths like `msr tpidr_el1` / `mrs tpidr_el1` are not dropped to empty
+        // (that left __my_cpu_offset == garbage and percpu FAR=0).
         if !self.at(&TokenKind::LParen) {
             // Bare `asm;` / broken macro residue — treat as empty asm.
             let _ = self.eat(TokenKind::Semicolon);
-            return Ok(Stmt::Asm { lines: Vec::new() });
+            return Ok(Stmt::Asm {
+                lines: Vec::new(),
+                in_loads: Vec::new(),
+                out_stores: Vec::new(),
+            });
         }
-        // Peek: if next after ( is not string and not ), fall back to skip.
         let after = self.toks.get(self.i + 1).map(|t| &t.kind);
+        let is_alternative = matches!(
+            after,
+            Some(TokenKind::Ident(s)) if s == "ALTERNATIVE" || s == "_ALTERNATIVE_CFG"
+                || s == "__ALTERNATIVE_CFG"
+        );
         let clean_template = matches!(
             after,
             Some(TokenKind::StringLit(_) | TokenKind::RParen)
-        );
+        ) || is_alternative;
         if !clean_template {
             self.skip_balanced_parens()?;
             let _ = self.eat(TokenKind::Semicolon);
-            return Ok(Stmt::Asm { lines: Vec::new() });
+            return Ok(Stmt::Asm {
+                lines: Vec::new(),
+                in_loads: Vec::new(),
+                out_stores: Vec::new(),
+            });
         }
 
         self.expect(TokenKind::LParen)?;
+
+        // Peel ALTERNATIVE("oldinstr", "newinstr", cap[, cfg…]) → oldinstr only.
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Ident(s) if s == "ALTERNATIVE"
+                || s == "_ALTERNATIVE_CFG"
+                || s == "__ALTERNATIVE_CFG"
+        ) {
+            self.bump();
+            self.expect(TokenKind::LParen)?;
+            // First arg: oldinstr (string or adjacent strings)
+            let mut old = String::new();
+            loop {
+                if let TokenKind::StringLit(s) = self.peek_kind().clone() {
+                    self.bump();
+                    old.push_str(&s);
+                } else {
+                    break;
+                }
+            }
+            // Skip remaining ALTERNATIVE args to matching ')'
+            let mut depth = 1i32;
+            while depth > 0 && !self.at(&TokenKind::Eof) {
+                if self.at(&TokenKind::LParen) {
+                    depth += 1;
+                } else if self.at(&TokenKind::RParen) {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.bump();
+                        break;
+                    }
+                }
+                self.bump();
+            }
+            // Operands follow ALTERNATIVE(...) inside outer asm(...).
+            if old.is_empty() {
+                while !self.at(&TokenKind::RParen) && !self.at(&TokenKind::Eof) {
+                    self.bump();
+                }
+                let _ = self.eat(TokenKind::RParen);
+                let _ = self.eat(TokenKind::Semicolon);
+                return Ok(Stmt::Asm {
+                    lines: Vec::new(),
+                    in_loads: Vec::new(),
+                    out_stores: Vec::new(),
+                });
+            }
+            return self.finish_asm_stmt_with_template(old);
+        }
 
         // Template: zero or more adjacent string literals (empty "" is a valid
         // memory-barrier asm used throughout the kernel).
@@ -2102,9 +3031,19 @@ impl Parser {
             }
             let _ = self.eat(TokenKind::RParen);
             let _ = self.eat(TokenKind::Semicolon);
-            return Ok(Stmt::Asm { lines: Vec::new() });
+            return Ok(Stmt::Asm {
+                lines: Vec::new(),
+                in_loads: Vec::new(),
+                out_stores: Vec::new(),
+            });
         }
 
+        self.finish_asm_stmt_with_template(template)
+    }
+
+    /// Shared tail of `parse_asm_stmt` after the template string is known
+    /// (plain string or first arg of unexpanded `ALTERNATIVE(...)`).
+    fn finish_asm_stmt_with_template(&mut self, template: String) -> Result<Stmt, String> {
         // Kernel ALTERNATIVE macros often expand to string + bare tokens + more strings.
         // If the template is not followed by `:` / `)`, abandon structured parse and
         // skip to the matching `)` for this asm (depth already open at template level).
@@ -2123,27 +3062,128 @@ impl Parser {
                 self.bump();
             }
             let _ = self.eat(TokenKind::Semicolon);
-            return Ok(Stmt::Asm { lines: Vec::new() });
+            return Ok(Stmt::Asm {
+                lines: Vec::new(),
+                in_loads: Vec::new(),
+                out_stores: Vec::new(),
+            });
         }
 
         // Optional : outputs : inputs : clobbers [ : goto-labels ]
-        // (asm goto has a 4th colon section for label names)
-        let mut imm_vals: Vec<i64> = Vec::new();
+        // Shared operand index space: outputs first (%0..), then inputs.
+        // Kind: 0=imm, 1=reg, 2=drop. reg ops carry (regno, Option<var>, is_out).
+        let mut op_kind: Vec<u8> = Vec::new();
+        let mut op_imm: Vec<i64> = Vec::new();
+        let mut op_reg: Vec<u8> = Vec::new();
+        let mut op_var: Vec<Option<String>> = Vec::new();
+        let mut op_is_out: Vec<bool> = Vec::new();
+        let mut next_reg: u8 = 0;
+        let mut alloc_reg = || -> u8 {
+            loop {
+                let r = next_reg;
+                next_reg = next_reg.saturating_add(1);
+                if r == 18 || r >= 29 {
+                    continue;
+                }
+                return r;
+            }
+        };
+        // kind: 0=imm, 1=reg, 2=drop, 3=matching (digit constraint → same reg as op N)
+        // For kind 3, op_imm holds the matched operand index until resolved.
+        let mut op_expr: Vec<Option<Expr>> = Vec::new();
+        let mut parse_ops = |p: &mut Parser, is_out: bool| -> Result<(), String> {
+            if p.at(&TokenKind::Colon) || p.at(&TokenKind::RParen) {
+                return Ok(());
+            }
+            loop {
+                p.skip_asm_operand_name();
+                if let TokenKind::StringLit(cstr) = p.peek_kind().clone() {
+                    p.bump();
+                    p.expect(TokenKind::LParen)?;
+                    if p.eat(TokenKind::RParen) {
+                        op_kind.push(2);
+                        op_imm.push(0);
+                        op_reg.push(0);
+                        op_var.push(None);
+                        op_is_out.push(is_out);
+                        op_expr.push(None);
+                    } else {
+                        let e = p.parse_assign()?;
+                        p.expect(TokenKind::RParen)?;
+                        // Matching constraint "0"/"1"/… → same register as that operand
+                        // (kernel RELOC_HIDE: asm("" : "=r"(p) : "0"(ptr))).
+                        let matching = {
+                            let t = cstr.trim();
+                            if t.len() == 1 && t.as_bytes()[0].is_ascii_digit() {
+                                Some((t.as_bytes()[0] - b'0') as i64)
+                            } else {
+                                None
+                            }
+                        };
+                        let is_imm_c = cstr.contains('i') || cstr.contains('n');
+                        let is_reg_c = cstr.contains('r') || cstr.contains('g');
+                        let imm = if is_imm_c && matching.is_none() {
+                            p.const_array_len(&e)
+                                .or_else(|| p.const_offsetof(&e))
+                                .or_else(|| p.eval_enum_const(&e))
+                        } else {
+                            None
+                        };
+                        if let Some(v) = imm {
+                            op_kind.push(0);
+                            op_imm.push(v);
+                            op_reg.push(0);
+                            op_var.push(None);
+                            op_is_out.push(is_out);
+                            op_expr.push(None);
+                        } else if let Some(mi) = matching {
+                            op_kind.push(3);
+                            op_imm.push(mi);
+                            op_reg.push(0); // filled after all ops known
+                            op_var.push(None);
+                            op_is_out.push(is_out);
+                            op_expr.push(Some(e));
+                        } else if is_reg_c {
+                            let reg = alloc_reg();
+                            let var = match &e {
+                                Expr::Var(n) => Some(n.clone()),
+                                _ => None,
+                            };
+                            op_kind.push(1);
+                            op_imm.push(0);
+                            op_reg.push(reg);
+                            op_var.push(var);
+                            op_is_out.push(is_out);
+                            op_expr.push(Some(e));
+                        } else {
+                            op_kind.push(2);
+                            op_imm.push(0);
+                            op_reg.push(0);
+                            op_var.push(None);
+                            op_is_out.push(is_out);
+                            op_expr.push(None);
+                        }
+                    }
+                    if p.eat(TokenKind::Comma) {
+                        continue;
+                    }
+                }
+                break;
+            }
+            Ok(())
+        };
+
         if self.eat(TokenKind::Colon) {
-            // outputs — skip "constraint" (expr) list (usually empty for DEFINE)
-            self.skip_asm_operand_list()?;
+            parse_ops(self, true)?;
             if self.eat(TokenKind::Colon) {
-                // inputs — collect "i" (const) values for %0, %1, ...
-                imm_vals = self.parse_asm_input_immediates()?;
+                parse_ops(self, false)?;
                 if self.eat(TokenKind::Colon) {
-                    // clobbers — skip string list
                     while let TokenKind::StringLit(_) = self.peek_kind().clone() {
                         self.bump();
                         if !self.eat(TokenKind::Comma) {
                             break;
                         }
                     }
-                    // asm goto labels: `: lab1, lab2`
                     if self.eat(TokenKind::Colon) {
                         while let TokenKind::Ident(_) = self.peek_kind().clone() {
                             self.bump();
@@ -2175,7 +3215,50 @@ impl Parser {
         }
         let _ = self.eat(TokenKind::Semicolon);
 
-        // Substitute %0, %1, ... with immediate values; %% → %
+        // Resolve matching constraints to the target operand's register.
+        for i in 0..op_kind.len() {
+            if op_kind[i] == 3 {
+                let mi = op_imm[i] as usize;
+                if mi < op_kind.len() && (op_kind[mi] == 1 || op_kind[mi] == 3) {
+                    // If target not yet a reg, allocate.
+                    if op_kind[mi] != 1 {
+                        let reg = alloc_reg();
+                        op_kind[mi] = 1;
+                        op_reg[mi] = reg;
+                    }
+                    op_reg[i] = op_reg[mi];
+                    op_kind[i] = 1; // treat as reg for substitution
+                } else if mi < op_kind.len() && op_kind[mi] == 1 {
+                    op_reg[i] = op_reg[mi];
+                    op_kind[i] = 1;
+                } else {
+                    // Soft: unmatched → fresh reg
+                    let reg = alloc_reg();
+                    op_reg[i] = reg;
+                    op_kind[i] = 1;
+                }
+            }
+        }
+
+        let mut in_loads: Vec<(u8, Expr)> = Vec::new();
+        let mut out_stores: Vec<(u8, String)> = Vec::new();
+        for i in 0..op_kind.len() {
+            if op_kind[i] != 1 {
+                continue;
+            }
+            if op_is_out[i] {
+                if let Some(ref v) = op_var[i] {
+                    out_stores.push((op_reg[i], v.clone()));
+                } else if let Some(Expr::Var(n)) = &op_expr[i] {
+                    out_stores.push((op_reg[i], n.clone()));
+                }
+            } else if let Some(e) = op_expr[i].clone() {
+                // Input: evaluate expression into the register (Var, Addr, Cast…).
+                in_loads.push((op_reg[i], e));
+            }
+        }
+
+        // Substitute %0, %1, ... with imm or xN; %% → %
         let mut out = String::new();
         let bytes = template.as_bytes();
         let mut i = 0usize;
@@ -2186,10 +3269,35 @@ impl Parser {
                     i += 2;
                     continue;
                 }
-                // %N or %cN / %nN etc. — take digits after optional letter
+                // Named operand %[foo] — leave intact so codegen filter drops the line
+                // unless we later map names (not yet).
+                if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                    out.push('%');
+                    i += 1;
+                    continue;
+                }
+                // %N or %wN / %xN / %cN — optional size/modifier letter then digits.
+                // Critical: %w0 must become wN (ldtrb/strh), not xN.
                 let mut j = i + 1;
+                let mut reg_prefix = 'x'; // AArch64 default for "r"
                 if j < bytes.len() && bytes[j].is_ascii_alphabetic() {
-                    j += 1; // skip modifier letter
+                    let c = bytes[j] as char;
+                    match c {
+                        'w' | 'x' | 'b' | 'h' => {
+                            reg_prefix = c;
+                            j += 1;
+                        }
+                        'c' | 'n' | 'a' | 'l' | 'p' | 'P' => {
+                            // print/modifier — skip letter, keep default width
+                            j += 1;
+                        }
+                        _ => {
+                            // Unknown letter: leave %… for filter
+                            out.push('%');
+                            i += 1;
+                            continue;
+                        }
+                    }
                 }
                 let start = j;
                 while j < bytes.len() && bytes[j].is_ascii_digit() {
@@ -2200,11 +3308,36 @@ impl Parser {
                         .ok()
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(usize::MAX);
-                    if let Some(v) = imm_vals.get(idx) {
-                        out.push_str(&format!("{v}"));
+                    if idx < op_kind.len() && op_kind[idx] == 0 {
+                        out.push_str(&format!("{}", op_imm[idx]));
+                    } else if idx < op_kind.len() && op_kind[idx] == 1 {
+                        out.push_str(&format!("{reg_prefix}{}", op_reg[idx]));
                     } else {
-                        out.push('%');
-                        out.push_str(std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""));
+                        // Drop unresolvable %N (codegen filters), TLBI ALL-form exception.
+                        let trimmed = out.trim_end();
+                        if trimmed.ends_with(',') {
+                            let before_comma = trimmed[..trimmed.len() - 1].trim_end();
+                            if before_comma.ends_with("vmalle1is")
+                                || before_comma.ends_with("vmalle1")
+                                || before_comma.ends_with("alle1")
+                                || before_comma.ends_with("alle2")
+                                || before_comma.ends_with("alle3")
+                                || before_comma.ends_with("ialluis")
+                                || before_comma.ends_with("iallu")
+                            {
+                                out.truncate(trimmed.len() - 1);
+                            } else {
+                                out.push('%');
+                                out.push_str(
+                                    std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""),
+                                );
+                            }
+                        } else {
+                            out.push('%');
+                            out.push_str(
+                                std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""),
+                            );
+                        }
                     }
                     i = j;
                     continue;
@@ -2214,13 +3347,16 @@ impl Parser {
             i += 1;
         }
 
-        // Split into lines for emission (template often starts with \n)
         let lines: Vec<String> = out
             .split('\n')
             .map(|s| s.trim_end().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        Ok(Stmt::Asm { lines })
+        Ok(Stmt::Asm {
+            lines,
+            in_loads,
+            out_stores,
+        })
     }
 
     /// Optional GNU named asm operand: `[name]` before the constraint string.
@@ -2244,8 +3380,10 @@ impl Parser {
             if let TokenKind::StringLit(_) = self.peek_kind().clone() {
                 self.bump();
                 self.expect(TokenKind::LParen)?;
-                let _ = self.parse_assign()?;
-                self.expect(TokenKind::RParen)?;
+                if !self.eat(TokenKind::RParen) {
+                    let _ = self.parse_assign()?;
+                    self.expect(TokenKind::RParen)?;
+                }
                 if self.eat(TokenKind::Comma) {
                     continue;
                 }
@@ -2255,7 +3393,7 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_asm_input_immediates(&mut self) -> Result<Vec<i64>, String> {
+    fn parse_asm_input_immediates(&mut self) -> Result<Vec<Option<i64>>, String> {
         let mut vals = Vec::new();
         if self.at(&TokenKind::Colon) || self.at(&TokenKind::RParen) {
             return Ok(vals);
@@ -2265,24 +3403,28 @@ impl Parser {
             if let TokenKind::StringLit(cstr) = self.peek_kind().clone() {
                 self.bump();
                 self.expect(TokenKind::LParen)?;
-                let e = self.parse_assign()?;
-                self.expect(TokenKind::RParen)?;
-                // "i" / "n" / "ri" etc. — evaluate as constant when possible.
-                // Kernel headers also use "i"(var) in non-DEFINE asm; fall back to 0
-                // so we can still parse the TU. kbuild DEFINE values must still fold.
-                if cstr.contains('i') || cstr.contains('n') {
-                    if let Some(v) = self.const_array_len(&e) {
-                        vals.push(v);
-                    } else if let Some(v) = self.const_offsetof(&e) {
-                        vals.push(v);
-                    } else if let Some(v) = self.eval_enum_const(&e) {
-                        vals.push(v);
-                    } else {
-                        vals.push(0);
-                    }
+                if self.eat(TokenKind::RParen) {
+                    vals.push(None);
                 } else {
-                    // non-immediate: push 0 placeholder so %N still substitutes something
-                    vals.push(0);
+                    let e = self.parse_assign()?;
+                    self.expect(TokenKind::RParen)?;
+                    // "i" / "n" / "ri" etc. — evaluate as constant when possible.
+                    // Kernel headers also use "i"(var) in non-DEFINE asm; fall back to 0
+                    // so we can still parse the TU. kbuild DEFINE values must still fold.
+                    if cstr.contains('i') || cstr.contains('n') {
+                        if let Some(v) = self.const_array_len(&e) {
+                            vals.push(Some(v));
+                        } else if let Some(v) = self.const_offsetof(&e) {
+                            vals.push(Some(v));
+                        } else if let Some(v) = self.eval_enum_const(&e) {
+                            vals.push(Some(v));
+                        } else {
+                            vals.push(None);
+                        }
+                    } else {
+                        // non-immediate (e.g. "r"): push None so %N trims trailing comma
+                        vals.push(None);
+                    }
                 }
                 if self.eat(TokenKind::Comma) {
                     continue;
@@ -2493,16 +3635,43 @@ impl Parser {
     }
 
     fn parse_local_decl(&mut self) -> Result<Stmt, String> {
-        // Detect storage class before type specifier (static is eaten inside
-        // parse_type_specifier too, so peek first).
+        self.skip_trailing_gnu_attrs();
+        // Detect storage class before type specifier (static/extern are eaten
+        // inside parse_type_specifier, so peek first).
+        // Block-scope `extern T name;` must NOT become a stack local — otherwise
+        // `&sqlite3_search_count` in Tcl_LinkVar points at a frame slot and
+        // SQLite index search-count tests always see 0.
         let is_static = self.at(&TokenKind::Static) || self.at(&TokenKind::Register);
+        let is_extern = self.at(&TokenKind::Extern);
+        let mut sec_attr: Option<String> = None;
+        if let TokenKind::Section(sec) = self.peek_kind().clone() {
+            sec_attr = Some(sec);
+            self.bump();
+        }
+        self.skip_trailing_gnu_attrs();
         let base = self.parse_type_specifier()?;
+        if let TokenKind::Section(sec) = self.peek_kind().clone() {
+            sec_attr = Some(sec);
+            self.bump();
+        }
         // multi-decl: int x, *p, **pp;
-        // For simplicity emit a block of decls; first returned as Decl, rest as Block if multiple
         let mut decls = Vec::new();
         loop {
-            let (name, ty, _) = self.parse_declarator(base.clone())?;
-            // Skip function prototype: name(...);
+            let (name, ty, func_params) = self.parse_declarator(base.clone())?;
+            sec_attr = self.last_section.take().or(sec_attr);
+            if let TokenKind::Section(sec) = self.peek_kind().clone() {
+                sec_attr = Some(sec);
+                self.bump();
+            }
+            // Block-scope function prototype: `extern const char *f(Tcl_Interp*);`
+            // parse_declarator already consumed `(params)` into func_params.
+            // Must NOT allocate a stack local (would make calls `blr` a null slot —
+            // SQLite tclsqlite main → TCLSH_INIT_PROC SEGV).
+            if func_params.is_some() {
+                self.expect(TokenKind::Semicolon)?;
+                return Ok(Stmt::Empty);
+            }
+            // Legacy skip: name(...) when declarator did not absorb params.
             if self.eat(TokenKind::LParen) {
                 let mut depth = 1;
                 while depth > 0 && !self.at(&TokenKind::Eof) {
@@ -2526,12 +3695,18 @@ impl Parser {
                 None
             };
             let ty = Self::infer_array_size(ty, &init);
+            // Record type for later sizeof(local) / sizeof(p->field) bounds.
+            if !is_extern {
+                self.insert_local_type(&name, ty.clone());
+            }
             decls.push(VarDecl {
                 name,
                 ty,
                 init,
                 is_static,
-                is_extern: false,
+                is_extern,
+                is_weak: false,
+                section: sec_attr.clone(),
             });
             if self.eat(TokenKind::Comma) {
                 continue;
@@ -2542,9 +3717,10 @@ impl Parser {
         if decls.len() == 1 {
             Ok(Stmt::Decl(decls.remove(0)))
         } else {
-            Ok(Stmt::Block(
-                decls.into_iter().map(Stmt::Decl).collect(),
-            ))
+            // DeclGroup — NOT Stmt::Block: Block enters/exits a nested scope and
+            // would drop multi-decl locals (`u64 cycles, last, ns`) before the
+            // rest of the function, turning them into soft globals (vdso ADRP).
+            Ok(Stmt::DeclGroup(decls))
         }
     }
 
@@ -2895,19 +4071,32 @@ impl Parser {
         }
         // Kernel/Linux: __builtin_offsetof(struct T, field) → constant int.
         // TYPE may be `struct name` / `union name` / typedef name.
-        // Also: offsetof(T, field[n]) / nested paths.
+        // Also: offsetof(T, field[n]) / nested paths (pt_regs.regs[2], etc.).
         if let TokenKind::Ident(name) = self.peek_kind().clone() {
             if name == "__builtin_offsetof" {
                 self.bump();
                 self.expect(TokenKind::LParen)?;
                 let ty = self.parse_type_name()?;
                 self.expect(TokenKind::Comma)?;
-                // Support nested paths: `tss.x86_tss.sp1` and `iname[1]`
-                let mut path: Vec<String> = Vec::new();
+                // Support nested paths: `tss.x86_tss.sp1` and `regs[2]`
+                // Each segment: (field_name, array_indices).
+                let mut path: Vec<(String, Vec<i64>)> = Vec::new();
                 loop {
                     if let TokenKind::Ident(f) = self.peek_kind().clone() {
                         self.bump();
-                        path.push(f);
+                        let mut indices: Vec<i64> = Vec::new();
+                        // Optional array indices: field[n] / field[n][m]
+                        while self.eat(TokenKind::LBracket) {
+                            if !self.at(&TokenKind::RBracket) {
+                                let e = self.parse_expr()?;
+                                let idx = self.const_array_len(&e).unwrap_or(0);
+                                indices.push(idx);
+                            } else {
+                                indices.push(0);
+                            }
+                            self.expect(TokenKind::RBracket)?;
+                        }
+                        path.push((f, indices));
                     } else {
                         return Err(format!(
                             "offsetof member name at {}:{}",
@@ -2915,20 +4104,12 @@ impl Parser {
                             self.peek().col
                         ));
                     }
-                    // Optional array index: field[n] / field[expr] — soft-ignore index
-                    // (offsetof(T, arr[1]) ≈ offsetof(T, arr) + 1*esz; use base for now).
-                    while self.eat(TokenKind::LBracket) {
-                        if !self.at(&TokenKind::RBracket) {
-                            let _ = self.parse_expr();
-                        }
-                        self.expect(TokenKind::RBracket)?;
-                    }
-                    if !self.eat(TokenKind::Dot) {
+                    if !self.eat(TokenKind::Dot) && !self.eat(TokenKind::Arrow) {
                         break;
                     }
                 }
                 self.expect(TokenKind::RParen)?;
-                // Soft-fallback 0 when layout is incomplete.
+                // Soft-fallback 0 when layout is incomplete (incomplete types mid-TU).
                 let off = self.const_offsetof_type_path(&ty, &path).unwrap_or(0);
                 return Ok(Expr::Int(off));
             }
@@ -2942,13 +4123,22 @@ impl Parser {
                 self.expect(TokenKind::Comma)?;
                 let ty = self.parse_type_name()?;
                 self.expect(TokenKind::RParen)?;
-                // Lower to (*(T*)__ggcc_va_arg(&ap)) soft form.
+                // Float/double variadic args on aarch64 Linux live in d0..d7 (AAPCS64),
+                // not the next GP slot. System-gcc callers pass them there; our soft
+                // GP-only cursor would read 0. Use a dedicated FP walker for those.
+                let is_fp = matches!(ty, Type::Float | Type::Double);
+                let helper = if is_fp {
+                    "__ggcc_va_arg_fp"
+                } else {
+                    "__ggcc_va_arg"
+                };
+                // Lower to (*(T*)helper(&ap)) soft form.
                 return Ok(Expr::Unary {
                     op: UnaryOp::Deref,
                     expr: Box::new(Expr::Cast {
                         ty: Type::Ptr(Box::new(ty)),
                         expr: Box::new(Expr::Call {
-                            name: "__ggcc_va_arg".into(),
+                            name: helper.into(),
                             args: vec![Expr::Unary {
                                 op: UnaryOp::Addr,
                                 expr: Box::new(ap),
@@ -2979,25 +4169,193 @@ impl Parser {
         self.parse_postfix()
     }
 
-    fn is_cast_start(&self) -> bool {
-        let mut j = self.i + 1; // after (
-        // optional stars then type keyword or typedef
-        while matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::Star)) {
+    /// Look-ahead: skip a cast type-name starting at token index `j`.
+    /// Returns the index of the token after the type (usually `)` or `[` of
+    /// abstract array), or `None` if tokens do not form a type.
+    ///
+    /// Critical: `struct Tag` / `union Tag` / `enum Tag` must consume the
+    /// optional tag identifier (and optional `{...}` body). The previous
+    /// one-token skip left `Tag` unconsumed, so `(struct sdshdr8 *)s` was
+    /// not recognized as a cast — Redis `sdslen` / SDS_HDR then silently
+    /// failed top-level recovery and never emitted.
+    fn skip_cast_type_tokens(&self, mut j: usize) -> Option<usize> {
+        // optional leading quals / signedness. Stars belong in the abstract
+        // declarator loop below so bare `(unsigned *)` works: consume
+        // `unsigned` as the type, then `*` as declarator.
+        // Bare `(unsigned)` / `(signed)` must also be accepted — SQLite uses
+        // `((unsigned)p[0]<<24)` heavily; missing this soft-skipped whole
+        // functions (Get4byte, VdbeExec, …) via top-level recovery.
+        let mut saw_sign = false;
+        while matches!(
+            self.toks.get(j).map(|t| &t.kind),
+            Some(
+                TokenKind::Const
+                    | TokenKind::Volatile
+                    | TokenKind::Restrict
+                    | TokenKind::Unsigned
+                    | TokenKind::Signed
+            )
+        ) {
+            if matches!(
+                self.toks.get(j).map(|t| &t.kind),
+                Some(TokenKind::Unsigned | TokenKind::Signed)
+            ) {
+                saw_sign = true;
+            }
             j += 1;
         }
         match self.toks.get(j).map(|t| &t.kind) {
+            Some(TokenKind::Struct | TokenKind::Union | TokenKind::Enum) => {
+                j += 1;
+                // optional tag name
+                if matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+                    j += 1;
+                }
+                // optional inline definition body: struct { ... }
+                if matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::LBrace)) {
+                    j = self.skip_balanced_braces_offset(j);
+                }
+            }
             Some(
                 TokenKind::Int
-                | TokenKind::Void
-                | TokenKind::Char
-                | TokenKind::Long
-                | TokenKind::Short
-                | TokenKind::Struct
-                | TokenKind::Union,
-            ) => true,
-            Some(TokenKind::Ident(s)) => self.typedefs.iter().any(|t| t == s),
-            _ => false,
+                    | TokenKind::Void
+                    | TokenKind::Char
+                    | TokenKind::Float
+                    | TokenKind::Double,
+            ) => {
+                j += 1;
+            }
+            Some(TokenKind::Long | TokenKind::Short) => {
+                // long / short / long long / long int / short int / long double
+                j += 1;
+                while matches!(
+                    self.toks.get(j).map(|t| &t.kind),
+                    Some(
+                        TokenKind::Long
+                            | TokenKind::Short
+                            | TokenKind::Int
+                            | TokenKind::Unsigned
+                            | TokenKind::Signed
+                            | TokenKind::Double
+                            | TokenKind::Float
+                            | TokenKind::Char
+                    )
+                ) {
+                    j += 1;
+                }
+            }
+            Some(TokenKind::Ident(s)) => {
+                if Self::is_typeof_kw(s) {
+                    j += 1;
+                    if matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::LParen)) {
+                        j = self.skip_balanced_parens_offset(j);
+                    }
+                } else if self.typedefs.iter().any(|t| t == s) {
+                    j += 1;
+                } else {
+                    return None;
+                }
+            }
+            // bare `unsigned` / `signed` / `const unsigned` → unsigned int / int
+            _ if saw_sign => {}
+            _ => return None,
         }
+        // abstract declarator: * / quals / [] / (*)(params)
+        loop {
+            match self.toks.get(j).map(|t| &t.kind) {
+                Some(
+                    TokenKind::Star
+                        | TokenKind::Const
+                        | TokenKind::Volatile
+                        | TokenKind::Restrict,
+                ) => j += 1,
+                Some(TokenKind::LBracket) => {
+                    // skip [ ... ] (balanced by depth of brackets)
+                    let mut depth = 1i32;
+                    j += 1;
+                    while depth > 0 && j < self.toks.len() {
+                        match self.toks[j].kind {
+                            TokenKind::LBracket => depth += 1,
+                            TokenKind::RBracket => {
+                                depth -= 1;
+                                j += 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        if depth > 0 {
+                            j += 1;
+                        }
+                    }
+                }
+                Some(TokenKind::LParen) => {
+                    // function-pointer abstract: (*)(int) etc.
+                    j = self.skip_balanced_parens_offset(j);
+                }
+                _ => break,
+            }
+        }
+        Some(j)
+    }
+
+    fn is_cast_start(&self) -> bool {
+        let Some(j) = self.skip_cast_type_tokens(self.i + 1) else {
+            return false;
+        };
+        // After `(type)`, a cast needs a unary operand. `(quicklist)->x` and
+        // `__f((quicklist), y)` are parenthesized expressions (Redis quicklist
+        // shadows the typedef name with a parameter of the same name).
+        if matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::RParen)) {
+            if !Self::token_can_start_unary(self.toks.get(j + 1).map(|t| &t.kind)) {
+                return false;
+            }
+            return true;
+        }
+        // Abstract array form inside cast type ends at `[` already consumed by
+        // skip; remaining must be `)`.
+        matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::RParen))
+    }
+
+    /// Tokens that may start a cast operand / unary expression (or compound lit `{`).
+    fn token_can_start_unary(k: Option<&TokenKind>) -> bool {
+        matches!(
+            k,
+            Some(
+                TokenKind::Ident(_)
+                    | TokenKind::IntLit(_)
+                    | TokenKind::FloatLit(_)
+                    | TokenKind::CharLit(_)
+                    | TokenKind::StringLit(_)
+                    | TokenKind::LParen
+                    | TokenKind::LBrace // compound literal (type){...}
+                    | TokenKind::Star
+                    | TokenKind::Amp
+                    | TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::Bang
+                    | TokenKind::Tilde
+                    | TokenKind::PlusPlus
+                    | TokenKind::MinusMinus
+                    | TokenKind::Sizeof
+            )
+        )
+    }
+
+    /// Like `is_cast_start`, but called after `(` was already consumed (primary).
+    fn is_cast_after_lparen(&self) -> bool {
+        let Some(j) = self.skip_cast_type_tokens(self.i) else {
+            return false;
+        };
+        if !matches!(self.toks.get(j).map(|t| &t.kind), Some(TokenKind::RParen)) {
+            return false;
+        }
+        if !Self::token_can_start_unary(self.toks.get(j + 1).map(|t| &t.kind)) {
+            return false;
+        }
+        true
     }
 
     fn parse_type_name(&mut self) -> Result<Type, String> {
@@ -3116,7 +4474,12 @@ impl Parser {
                         if self.at(&TokenKind::RParen) {
                             break;
                         }
-                        args.push(self.parse_assign()?);
+                        if self.is_typename() {
+                            let _ty = self.parse_type_name()?;
+                            args.push(Expr::Int(0));
+                        } else {
+                            args.push(self.parse_assign()?);
+                        }
                         if self.eat(TokenKind::Comma) {
                             continue;
                         }
@@ -3139,22 +4502,14 @@ impl Parser {
                     }
                 };
             } else if self.eat(TokenKind::Dot) {
-                let t = self.expect(TokenKind::Ident(String::new()))?;
-                let field = match t.kind {
-                    TokenKind::Ident(s) => s,
-                    _ => unreachable!(),
-                };
+                let field = self.parse_field_name()?;
                 e = Expr::Member {
                     base: Box::new(e),
                     field,
                     arrow: false,
                 };
             } else if self.eat(TokenKind::Arrow) {
-                let t = self.expect(TokenKind::Ident(String::new()))?;
-                let field = match t.kind {
-                    TokenKind::Ident(s) => s,
-                    _ => unreachable!(),
-                };
+                let field = self.parse_field_name()?;
                 e = Expr::Member {
                     base: Box::new(e),
                     field,
@@ -3201,11 +4556,42 @@ impl Parser {
                 Ok(Expr::Int(0))
             }
             TokenKind::Ident(name) if name == "__builtin_constant_p" => {
+                // Keep as Call so const_array_len can return 1 for foldable args
+                // (order_base_2 / ilog2 / kbuild DEFINE need the constant branch).
                 self.bump();
                 self.expect(TokenKind::LParen)?;
-                let _e = self.parse_assign()?;
+                let e = self.parse_assign()?;
                 self.expect(TokenKind::RParen)?;
-                Ok(Expr::Int(0))
+                Ok(Expr::Call {
+                    name: "__builtin_constant_p".into(),
+                    args: vec![e],
+                })
+            }
+            TokenKind::Ident(name)
+                if name == "__builtin_clzll"
+                    || name == "__builtin_clzl"
+                    || name == "__builtin_clz"
+                    || name == "__builtin_ctzll"
+                    || name == "__builtin_ctzl"
+                    || name == "__builtin_ctz" =>
+            {
+                let fname = name.clone();
+                self.bump();
+                self.expect(TokenKind::LParen)?;
+                let e = self.parse_assign()?;
+                self.expect(TokenKind::RParen)?;
+                // Fold immediately when possible so enum/DEFINE "i" see Int.
+                if let Some(v) = self.const_array_len(&Expr::Call {
+                    name: fname.clone(),
+                    args: vec![e.clone()],
+                }) {
+                    Ok(Expr::Int(v))
+                } else {
+                    Ok(Expr::Call {
+                        name: fname,
+                        args: vec![e],
+                    })
+                }
             }
             TokenKind::Ident(name) if name == "__builtin_expect" => {
                 self.bump();
@@ -3260,18 +4646,38 @@ impl Parser {
                 self.bump();
                 // GNU statement expression: ({ stmts; expr; })
                 // Kernel headers use this heavily (READ_ONCE, test_bit, etc.).
-                if self.at(&TokenKind::LBrace) {
-                    // Soft: kernel do/while(0) macro towers can thrash the
-                    // recursive parser for minutes. Soft-skip statement-expr
-                    // bodies and yield 0 for Stage C fail-drive progress.
-                    // (Correct READ_ONCE values remain a later correctness goal.)
-                    let _ = self.stmt_expr_depth;
-                    self.skip_balanced_braces()?;
+                if self.eat(TokenKind::LBrace) {
+                    self.push_scope();
+                    let mut stmts = Vec::new();
+                    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        stmts.push(self.parse_stmt()?);
+                    }
+                    self.expect(TokenKind::RBrace)?;
                     self.expect(TokenKind::RParen)?;
-                    return Ok(Expr::Int(0));
+                    self.pop_scope();
+
+                    while stmts.last().map_or(false, |s| matches!(s, Stmt::Empty)) {
+                        stmts.pop();
+                    }
+
+                    let final_expr = if let Some(Stmt::Expr(_)) = stmts.last() {
+                        if let Some(Stmt::Expr(e)) = stmts.pop() {
+                            Box::new(e)
+                        } else {
+                            Box::new(Expr::Int(0))
+                        }
+                    } else {
+                        Box::new(Expr::Int(0))
+                    };
+
+                    return Ok(Expr::StmtExpr(stmts, final_expr));
                 }
-                // compound literal: (type){ init }
-                if self.is_typename() {
+                // compound literal: (type){ init }  OR cast (type)expr.
+                // After consuming `(`, `is_cast_start` is no longer valid (it
+                // looks from before `(`).  Re-check from current type token and
+                // reject `(typedef_name)->field` — a parenthesized expression
+                // when a parameter shadows the typedef (Redis quicklist).
+                if self.is_typename() && self.is_cast_after_lparen() {
                     let ty = self.parse_type_name()?;
                     // more stars already in parse_type_name; allow abstract declarator *
                     while self.eat(TokenKind::Star) {
@@ -3286,12 +4692,33 @@ impl Parser {
                             expr: Box::new(init),
                         });
                     }
+                    // Soft: kernel macros may expand missing args to empty
+                    // `(unsigned long)()` — treat empty operand as 0.
+                    if self.eat(TokenKind::LParen) {
+                        if self.eat(TokenKind::RParen) {
+                            return Ok(Expr::Cast {
+                                ty,
+                                expr: Box::new(Expr::Int(0)),
+                            });
+                        }
+                        // `(type)(expr)` — parenthesized operand
+                        let e = self.parse_expr()?;
+                        self.expect(TokenKind::RParen)?;
+                        return Ok(Expr::Cast {
+                            ty,
+                            expr: Box::new(e),
+                        });
+                    }
                     // normal cast (type)expr
                     let e = self.parse_unary()?;
                     return Ok(Expr::Cast {
                         ty,
                         expr: Box::new(e),
                     });
+                }
+                // Soft: empty `()` as rvalue 0 (macro-expanded missing args).
+                if self.eat(TokenKind::RParen) {
+                    return Ok(Expr::Int(0));
                 }
                 let e = self.parse_expr()?;
                 self.expect(TokenKind::RParen)?;
@@ -3312,128 +4739,290 @@ enum Postfix {
     Func,
 }
 
-impl Parser {
-    /// Functions that must keep real bodies for kernel early-boot / decompress.
-    /// Empty soft-stubs here produce triple-fault right after setup console.
-    fn is_boot_critical_fn(name: &str) -> bool {
-        matches!(
-            name,
-            "extract_kernel"
-                | "decompress_kernel"
-                | "__decompress"
-                | "parse_elf"
-                | "handle_relocations"
-                | "__putstr"
-                | "__puthex"
-                | "__putdec"
-                | "__putnum"
-                | "scroll"
-                | "serial_putchar"
-                | "memmove"
-                | "memcpy"
-                | "memset"
-                | "memcmp"
-                | "strlen"
-                | "strnlen"
-                | "strchr"
-                | "strcmp"
-                | "strncmp"
-                | "configure_5level_paging"
-                | "initialize_identity_maps"
-                | "finalize_identity_maps"
-                | "add_identity_map"
-                | "kernel_add_identity_map"
-                | "alloc_pgt_page"
-                | "alloc_pgt_page_n"
-                | "p4d_offset"
-                | "pud_offset"
-                | "pmd_offset"
-                | "pte_offset"
-                | "p4d_alloc"
-                | "pud_alloc"
-                | "pmd_alloc"
-                | "pte_alloc"
-                | "ident_pmd_init"
-                | "ident_pud_init"
-                | "ident_p4d_init"
-                | "kernel_ident_mapping_init"
-                | "load_stage1_idt"
-                | "load_stage2_idt"
-                | "cleanup_exception_handling"
-                | "set_page_flags"
-                | "____memcpy"
-                | "__memcpy"
-                | "__memmove"
-                | "__memset"
-                | "parse_mem_encrypt"
-                | "console_init"
-                | "early_serial_init"
-                | "puts"
-                | "putchar"
-                | "sprintf"
-                | "vsprintf"
-                | "number"
-                | "skip_spaces"
-                | "boot_params"
-                | "sanitize_boot_params"
-                | "copy_bootdata"
-                | "x86_64_start_kernel"
-                | "x86_64_start_reservations"
-                | "start_kernel"
-                | "setup_arch"
-                | "setup_arch_memory"
-                | "early_cpu_init"
-                | "early_ioremap_setup"
-                | "idt_setup_early_handler"
-                | "idt_setup_early_traps"
-                | "trap_init"
-                | "mm_init"
-                | "softirq_init"
-                | "init_IRQ"
-                | "time_init"
-                | "calibrate_delay"
-                | "rest_init"
-                | "kernel_init"
-                | "kernel_init_freeable"
-                | "do_basic_setup"
-                | "do_initcalls"
-                | "do_pre_smp_initcalls"
-                | "console_on_rootfs"
-                | "prepare_namespace"
-                | "init_rootfs"
-                | "ramdisk_execute_command"
-                | "run_init_process"
-                | "try_to_run_init_process"
-        ) || name.starts_with("__decompress")
-            || name.starts_with("unxz")
-            || name.starts_with("gunzip")
-            || name.starts_with("unlzma")
-            || name.starts_with("unlzo")
-            || name.starts_with("unlz4")
-            || name.starts_with("unzstd")
-            || name.starts_with("xz_")
-            || name.starts_with("zlib_")
-            || name.starts_with("zstd_")
-            || name.starts_with("inflate")
-            || name.starts_with("crc32")
-            || name.starts_with("bcj_")
-            || name.starts_with("lzma")
-            || name.starts_with("dec_")
-            || name.starts_with("fill_")
-            || name.starts_with("flush_")
-            || name.starts_with("ident_")
-            || name.starts_with("kernel_ident")
-            || name.contains("identity_map")
-            || name.contains("IdentityMap")
-            || name.contains("decompress")
-            || name.contains("Decompress")
-            || name == "alloc_pgt_page"
-            || name == "alloc_pgt_page_n"
-    }
-}
+
 
 pub fn parse(src: &str) -> Result<Program, String> {
     let toks = crate::lexer::Lexer::tokenize(src)?;
     let mut p = Parser::new(toks);
     p.parse_program()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_gnu_attributes_in_pointer_and_func_declarator() {
+        let src = "
+            void * __no_caller_saved_registers__ delay_fn(unsigned long loops);
+            static void __no_sanitize_coverage delay_loop(unsigned long loops) {}
+            noinstr unsigned long spec_ctrl_current(void) { return 0; }
+        ";
+        let prog = parse(src);
+        assert!(prog.is_ok(), "failed to parse gnu attributes in declarators: {:?}", prog.err());
+    }
+
+    #[test]
+    fn test_parse_typeof_auto_type_and_leading_attributes() {
+        let src = "
+            void test_fn(void) {
+                __auto_type x = 10;
+                __attribute__((__section__(\".modinfo\"))) static const char info[] = \"test\";
+                __no_sanitize_coverage typeof(x) y = 20;
+            }
+        ";
+        let prog = parse(src);
+        assert!(prog.is_ok(), "failed to parse typeof/auto_type/attrs: {:?}", prog.err());
+    }
+
+    #[test]
+    fn test_parse_array_declarator_trailing_section_attribute() {
+        let src = r#"
+            char var[] __attribute__((__section__(".modinfo"))) = "test";
+            static const char var2[] __section__(".modinfo2") = "test2";
+        "#;
+        let prog = parse(src);
+        assert!(prog.is_ok(), "failed to parse array declarator section attribute: {:?}", prog.err());
+        let items = prog.unwrap().items;
+        assert_eq!(items.len(), 2);
+        if let Item::Global(ref v) = items[0] {
+            assert_eq!(v.name, "var");
+            assert_eq!(v.section.as_deref(), Some(".modinfo"));
+        } else {
+            panic!("expected Item::Global");
+        }
+        if let Item::Global(ref v) = items[1] {
+            assert_eq!(v.name, "var2");
+            assert_eq!(v.section.as_deref(), Some(".modinfo2"));
+        } else {
+            panic!("expected Item::Global");
+        }
+    }
+
+    #[test]
+    fn test_parse_arrow_expression_contexts() {
+        let src = r#"
+            typedef struct { int flags; void *lock; } class_irqsave_t;
+            struct task_struct { int flags; class_irqsave_t signal; };
+
+            static inline void test_fn(class_irqsave_t *_T, struct task_struct *p) {
+                _T->flags = 1;
+                (void)(_T->lock);
+                unsigned long x = __builtin_offsetof(struct task_struct, signal.lock);
+                unsigned long y = __builtin_offsetof(struct task_struct, signal->lock);
+                list_next_or_null_rcu(&p->signal.lock, &p->flags, struct task_struct, flags);
+            }
+        "#;
+        let prog = parse(src);
+        assert!(prog.is_ok(), "failed to parse arrow expression contexts: {:?}", prog.err());
+    }
+
+    /// `(struct Tag *)expr` must parse as cast (Redis SDS_HDR / sdslen).
+    #[test]
+    fn test_struct_tag_pointer_cast() {
+        let src = r#"
+            typedef char *sds;
+            struct sdshdr8 {
+                unsigned char len;
+                unsigned char alloc;
+                unsigned char flags;
+                char buf[];
+            };
+            static inline unsigned long sdslen(const sds s) {
+                unsigned char flags = s[-1];
+                switch (flags & 7) {
+                    case 0:
+                        return flags >> 3;
+                    case 1:
+                        return ((struct sdshdr8 *)((s) - (sizeof(struct sdshdr8))))->len;
+                }
+                return 0;
+            }
+            unsigned long f(sds s) { return sdslen(s); }
+        "#;
+        let prog = parse(src).expect("parse struct-tag cast / sdslen");
+        let names: Vec<_> = prog
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Func(f) if f.body.is_some() => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"sdslen"),
+            "sdslen body must parse, got funcs {:?}",
+            names
+        );
+        assert!(names.contains(&"f"), "f must parse, got {:?}", names);
+    }
+
+    /// Forward `struct T;` must not wipe a later full definition's layout.
+    #[test]
+    fn test_forward_decl_does_not_zero_layout() {
+        let src = r#"
+            struct task_struct;
+            struct task_struct {
+                int __state;
+                void *stack;
+                long flags;
+            };
+            struct task_struct init_task = {
+                .__state = 0,
+                .stack = 0,
+                .flags = 1,
+            };
+            unsigned long tsz = sizeof(struct task_struct);
+        "#;
+        let prog = parse(src).expect("parse forward+full");
+        // type_layouts must have non-empty fields for task_struct
+        let fields = prog
+            .type_layouts
+            .iter()
+            .find(|(n, _, _, _)| n == "task_struct")
+            .map(|(_, _, _, f)| f.len())
+            .unwrap_or(0);
+        assert!(fields >= 3, "task_struct fields in type_layouts, got {fields}");
+        // Also ensure empty StructDef items exist (forward) without erasing fields map
+        let empty_defs = prog.items.iter().filter(|i| matches!(i, Item::StructDef { name, fields } if name == "task_struct" && fields.is_empty())).count();
+        let full_defs = prog.items.iter().filter(|i| matches!(i, Item::StructDef { name, fields } if name == "task_struct" && !fields.is_empty())).count();
+        assert!(empty_defs + full_defs >= 1, "expected StructDef items");
+    }
+
+    /// Linux asm-offsets requires anonymous-union flatten + array-index offsetof.
+    #[test]
+    fn test_offsetof_anonymous_union_and_array_index() {
+        let src = r#"
+            struct thread_info {
+                unsigned long flags;
+                union {
+                    unsigned long preempt_count;
+                    struct {
+                        unsigned int count;
+                        unsigned int need_resched;
+                    } preempt;
+                };
+                unsigned int cpu;
+            };
+            struct pt_regs {
+                union {
+                    struct {
+                        unsigned long regs[31];
+                        unsigned long sp;
+                        unsigned long pc;
+                        unsigned long pstate;
+                    };
+                };
+                unsigned long orig_x0;
+                int syscallno;
+                unsigned int unused2;
+                unsigned long sdei_ttbr1;
+                unsigned long pmr_save;
+                unsigned long stackframe[2];
+                unsigned long lockdep_hardirqs;
+                unsigned long exit_rcu;
+            };
+            struct task_struct {
+                struct thread_info thread_info;
+                unsigned int __state;
+                void *stack;
+            };
+            unsigned long offs[] = {
+                __builtin_offsetof(struct thread_info, flags),
+                __builtin_offsetof(struct thread_info, preempt_count),
+                __builtin_offsetof(struct thread_info, cpu),
+                __builtin_offsetof(struct pt_regs, regs[0]),
+                __builtin_offsetof(struct pt_regs, regs[2]),
+                __builtin_offsetof(struct pt_regs, sp),
+                __builtin_offsetof(struct pt_regs, pc),
+                __builtin_offsetof(struct pt_regs, pstate),
+                __builtin_offsetof(struct pt_regs, syscallno),
+                sizeof(struct pt_regs),
+                __builtin_offsetof(struct task_struct, thread_info.preempt_count),
+                __builtin_offsetof(struct task_struct, stack),
+                sizeof(struct thread_info),
+            };
+        "#;
+        let prog = parse(src).expect("parse offsetof test");
+        // Extract Int constants; sizeof may remain SizeofType until codegen.
+        let mut vals: Vec<Option<i64>> = Vec::new();
+        for item in &prog.items {
+            if let Item::Global(v) = item {
+                if v.name == "offs" {
+                    if let Some(Expr::InitList { fields }) = &v.init {
+                        for (_, e) in fields {
+                            match e {
+                                Expr::Int(n) => vals.push(Some(*n)),
+                                Expr::SizeofType(_) => vals.push(None),
+                                other => panic!("unexpected init expr {:?}", other),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(vals.len(), 13, "offs array length");
+        // GCC reference: ti flags/preempt/cpu; pt_regs regs[0]/regs[2]/sp/pc/pstate/syscallno;
+        // sizeof(pt_regs); tsk.preempt; tsk.stack; sizeof(thread_info)
+        assert_eq!(vals[0], Some(0));
+        assert_eq!(vals[1], Some(8));
+        assert_eq!(vals[2], Some(16));
+        assert_eq!(vals[3], Some(0));
+        assert_eq!(vals[4], Some(16));
+        assert_eq!(vals[5], Some(248));
+        assert_eq!(vals[6], Some(256));
+        assert_eq!(vals[7], Some(264));
+        assert_eq!(vals[8], Some(280));
+        // vals[9] = sizeof(pt_regs) — folded at codegen
+        assert_eq!(vals[10], Some(8));
+        assert_eq!(vals[11], Some(32));
+        // vals[12] = sizeof(thread_info)
+    }
+
+    #[test]
+    fn test_parse_kernel_gnu_attributes_in_declarators() {
+        let src = r#"
+            int * __read_mostly ptr_var;
+            int arr_var[10] __ro_after_init = {0};
+            void * __no_caller_saved_registers delay_fn_1(unsigned long loops);
+            static void __no_sanitize_coverage __no_kasan_or_inline delay_loop_1(unsigned long loops) {}
+            void __no_profile __no_stack_protector test_fn_attr(void) {}
+        "#;
+        let prog = parse(src);
+        assert!(prog.is_ok(), "failed to parse kernel gnu attributes in declarators: {:?}", prog.err());
+    }
+
+    #[test]
+    fn test_decl_attr_hang() {
+        let src = r#"
+            typedef struct { void *lock; } class_preempt_t;
+            void foo(void) {
+                class_preempt_t _t, *_T __attribute__((__unused__)) = &_t;
+            }
+        "#;
+        let prog = parse(src);
+        assert!(prog.is_ok(), "failed to parse local decl with attr: {:?}", prog.err());
+    }
+}
+
+
+#[cfg(test)]
+mod weak_tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::ast::Item;
+
+    #[test]
+    fn weak_function_is_weak() {
+        let src = "long __attribute__((weak)) foo(void) { return 1; }";
+        let toks = Lexer::tokenize(src).unwrap();
+        assert!(toks.iter().any(|t| matches!(t.kind, crate::token::TokenKind::Weak)));
+        let mut p = Parser::new(toks);
+        let prog = p.parse_program().unwrap();
+        let f = prog.items.iter().find_map(|i| match i {
+            Item::Func(f) if f.name == "foo" => Some(f),
+            _ => None,
+        }).expect("foo fn");
+        assert!(f.is_weak, "foo should be weak, got is_weak={}", f.is_weak);
+    }
 }
