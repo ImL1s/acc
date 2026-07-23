@@ -1546,7 +1546,15 @@ impl Parser {
                 break;
             }
             let pb = self.parse_type_specifier()?;
-            let (pn, pt, _) = self.parse_declarator(pb)?;
+            let (pn, mut pt, fp) = self.parse_declarator(pb)?;
+            // D-redis / Phase B.2: C decays function-typed parameters to
+            // pointers. Redis dict.c uses old-style
+            // `void(callback)(dict*)` (== `void (*callback)(dict*)`).
+            // Without decay, the local is typed Void and codegen emits
+            // `bl callback` (undef) instead of load+blr.
+            if fp.is_some() {
+                pt = Type::Ptr(Box::new(pt));
+            }
             params.push((pn, pt));
             if self.eat(TokenKind::Comma) {
                 if self.eat(TokenKind::Ellipsis) {

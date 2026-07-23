@@ -1070,6 +1070,41 @@ pub fn preprocess_with_options_arch(
         "PTHREAD_CREATE_DETACHED".into(),
         MacroBody::Object("1".into()),
     );
+    // zlib — SQLite zipfile.c uses z_stream / inflateInit2 when <zlib.h> is
+    // silently skipped (ggcc has no default /usr/include). Soft macros mirror
+    // zlib.h Init2 wrappers so emitted calls link to libz (inflateInit2_…).
+    macros.insert("Z_OK".into(), MacroBody::Object("0".into()));
+    macros.insert("Z_STREAM_END".into(), MacroBody::Object("1".into()));
+    macros.insert("Z_NO_FLUSH".into(), MacroBody::Object("0".into()));
+    macros.insert("Z_FINISH".into(), MacroBody::Object("4".into()));
+    macros.insert("Z_DEFLATED".into(), MacroBody::Object("8".into()));
+    macros.insert("Z_DEFAULT_STRATEGY".into(), MacroBody::Object("0".into()));
+    macros.insert("ZLIB_VERSION".into(), MacroBody::Object("\"1.2.11\"".into()));
+    macros.insert(
+        "inflateInit2".into(),
+        MacroBody::Function {
+            params: vec!["strm".into(), "windowBits".into()],
+            body: "inflateInit2_((strm), (windowBits), ZLIB_VERSION, (int)sizeof(z_stream))"
+                .into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "deflateInit2".into(),
+        MacroBody::Function {
+            params: vec![
+                "strm".into(),
+                "level".into(),
+                "method".into(),
+                "windowBits".into(),
+                "memLevel".into(),
+                "strategy".into(),
+            ],
+            body: "deflateInit2_((strm), (level), (method), (windowBits), (memLevel), (strategy), ZLIB_VERSION, (int)sizeof(z_stream))"
+                .into(),
+            variadic: false,
+        },
+    );
     // Darwin arm64/x86_64: sizeof(jmp_buf)==192 (int[48]). Linux aarch64/x86_64 often
     // similar; oversize is safe for stack, undersize corrupts (Lua setjmp crash).
     // Mach soft types only when !for_linux — kernel vdso discards .data, and enum
@@ -1110,7 +1145,28 @@ pub fn preprocess_with_options_arch(
          typedef int jmp_buf[48];\n\
          typedef int sigjmp_buf[48];\n\
          int getpagesize(void);\n\
-         int getpid(void);\n"
+         int getpid(void);\n\
+         /* zlib soft header (guarded): SQLite zipfileInflate/Deflate need z_stream
+          * when angle <zlib.h> is skipped. Init2 macros expand to libz *_ forms. */\n\
+         #ifndef ZLIB_H\n\
+         #define ZLIB_H\n\
+         typedef unsigned char Byte;\n\
+         typedef Byte Bytef;\n\
+         typedef struct z_stream_s {\n\
+           Bytef *next_in; unsigned avail_in; unsigned long total_in;\n\
+           Bytef *next_out; unsigned avail_out; unsigned long total_out;\n\
+           char *msg; void *state; void *zalloc; void *zfree; void *opaque;\n\
+           int data_type; unsigned long adler; unsigned long reserved;\n\
+         } z_stream;\n\
+         int inflateInit2_(z_stream *, int, const char *, int);\n\
+         int inflate(z_stream *, int);\n\
+         int inflateEnd(z_stream *);\n\
+         int deflateInit2_(z_stream *, int, int, int, int, int, const char *, int);\n\
+         unsigned long deflateBound(z_stream *, unsigned long);\n\
+         int deflate(z_stream *, int);\n\
+         int deflateEnd(z_stream *);\n\
+         unsigned long crc32(unsigned long, const Bytef *, unsigned);\n\
+         #endif\n"
     } else {
         "typedef struct { char __s[64]; } pthread_mutex_t;\n\
          typedef struct { char __s[64]; } pthread_mutexattr_t;\n\

@@ -7729,6 +7729,37 @@ impl Codegen {
                     writeln!(self.out, "\tmov\tx{dest}, xzr").unwrap();
                     return Ok(Type::Int);
                 }
+                // D-redis / Phase B.2: glibc math.h expands fpclassify →
+                // __builtin_fpclassify(...); ggcc PP may leave either spelling.
+                // Map to libm __fpclassify / __fpclassifyf / __fpclassifyl.
+                if name == "fpclassify" || name == "__builtin_fpclassify" {
+                    let val = if name == "__builtin_fpclassify" && args.len() >= 6 {
+                        &args[5]
+                    } else if let Some(a) = args.first() {
+                        a
+                    } else {
+                        writeln!(self.out, "\tmov\tx{dest}, xzr").unwrap();
+                        return Ok(Type::Int);
+                    };
+                    let aty = self.typeof_expr(val, typedefs);
+                    let lib = match aty {
+                        Type::Float => "__fpclassifyf",
+                        Type::Double => "__fpclassify",
+                        // long double and unknown → double classifier
+                        _ => "__fpclassify",
+                    };
+                    self.emit_expr_rval(val, 0, typedefs)?;
+                    if !matches!(aty, Type::Float | Type::Double) {
+                        writeln!(self.out, "\tscvtf\td0, x0").unwrap();
+                    } else {
+                        writeln!(self.out, "\tfmov\td0, x0").unwrap();
+                    }
+                    writeln!(self.out, "\tbl\t{}", self.c_sym(lib)).unwrap();
+                    if dest != 0 {
+                        writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
+                    }
+                    return Ok(Type::Int);
+                }
                 // Kernel lockdep / tracing: return address of caller.
                 // Level 0 → link register (x30) saved at function entry is ideal;
                 // we expose current LR which is good enough for lockdep cookies.

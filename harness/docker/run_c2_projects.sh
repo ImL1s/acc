@@ -43,7 +43,7 @@ docker run --rm \
     LOG=/scratch/stage_c_projects.log
     log() { echo "$@" | tee -a "$LOG"; }
     log "container: $(uname -a)"
-    apt-get update -qq && apt-get install -y -qq tcl tcl-dev netcat-openbsd >/dev/null 2>&1 || true
+    apt-get update -qq && apt-get install -y -qq tcl tcl-dev zlib1g-dev netcat-openbsd >/dev/null 2>&1 || true
     export CARGO_TARGET_DIR=/work/target-linux
     cargo build --release 2>&1 | tee -a "$LOG" | tail -5
     export GGCC=/work/target-linux/release/ggcc
@@ -64,7 +64,8 @@ docker run --rm \
     ./configure --enable-tcl CC=gcc BCC=gcc CFLAGS="-O0" 2>&1 | tee -a "$LOG" | tail -40
     log "=== sqlite make lemon/tools with gcc, then testfixture with ggcc ==="
     set +e
-    make -j4 lemon mkkeywordhash mksourceid src-verify BCC=gcc CC=gcc 2>&1 | tee -a "$LOG" | tail -20
+    # Host code generators; names are produced as side effects of testfixture deps.
+    make -j4 lemon BCC=gcc CC=gcc 2>&1 | tee -a "$LOG" | tail -20
     # Rebuild sqlite3.o / testfixture objects with ggcc (own PP; no SYS_CPP)
     unset GGCC_USE_SYS_CPP || true
     export GGCC_USE_SYS_CPP=0
