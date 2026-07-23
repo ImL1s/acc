@@ -117,5 +117,14 @@ WEAK long task_sig(void) { return 0; }
 WEAK long try_to_migrate_one(void) { return 0; }
 WEAK long try_to_unmap_one(void) { return 0; }
 WEAK long update_rlimit_cpu(void) { return 0; }
+WEAK long local_bh_disable(void) { return 0; }
+WEAK long local_bh_enable(void) { return 0; }
+WEAK long filler(void) { return 0; }
+WEAK long balance_pgdat(void) { return 0; }
+WEAK long cpu_distance_fn(void) { return 0; }
+WEAK long kiocb_start_write(void) { return 0; }
+WEAK long kiocb_end_write(void) { return 0; }
+WEAK long lockdep_sb_freeze_release(void) { return 0; }
+WEAK long lockdep_sb_freeze_acquire(void) { return 0; }
 WEAK long zap_huge_pmd(void) { return 0; }
 WEAK long zap_huge_pud(void) { return 0; }

@@ -175,6 +175,7 @@ docker run --rm \
   -e JOBS="$JOBS" \
   -e GGCC_ALLOW_SOFT_SYSCC=0 \
   -e GGCC_SOFT_FREESTANDING=0 \
+  -e GGCC_KERNEL_FREESTANDING=1 \
   "$IMAGE" bash -lc '
     set -euo pipefail
     LOG=/scratch/stage_c_kernel.log
@@ -198,6 +199,7 @@ docker run --rm \
     # Soft freestanding body replacements OFF on C1 PASS path (emit real C).
     unset GGCC_SOFT_FREESTANDING || true
     export GGCC_SOFT_FREESTANDING=0
+    export GGCC_KERNEL_FREESTANDING=1
     export GGCC_ALLOW_SOFT_SYSCC=0
     WRAP=/work/harness/docker/ggcc_cc_wrapper.sh
     chmod +x "$WRAP"
@@ -213,29 +215,52 @@ docker run --rm \
 
     rm -rf /tmp/linux-src
     mkdir -p /tmp/linux-src
-    if [[ -f "/scratch/linux-$VER.tar.xz" ]]; then
-      log "extracting /scratch/linux-$VER.tar.xz to container-local /tmp/linux-src..."
-      tar -xJf "/scratch/linux-$VER.tar.xz" -C /tmp/linux-src --strip-components=1
-    elif [[ -d "/work/$KSRC_REL" ]]; then
-      log "copying /work/$KSRC_REL to container-local /tmp/linux-src..."
-      cp -r "/work/$KSRC_REL"/* /tmp/linux-src/ 2>/dev/null || true
-    fi
-    cd /tmp/linux-src
-    log "=== make ARCH=$KARCH tinyconfig ==="
-    make ARCH="$KARCH" defconfig 2>&1 | tee -a "$LOG" | tail -20 || true
-    make ARCH="$KARCH" tinyconfig 2>&1 | tee -a "$LOG" | tail -20
-    if [[ "$KERNEL_ARCH" == "x86_64" || "$KERNEL_ARCH" == "x86" ]]; then
-      echo "CONFIG_64BIT=y" >> .config
+    # Prefer in-place work-tree build when a known-good .config exists (avoids
+    # tinyconfig VDSO link failures and preserves C1 defconfig choices).
+    if [[ -f "/work/$KSRC_REL/.config" ]]; then
+      KBUILD="/work/$KSRC_REL"
+      log "using in-place kernel tree $KBUILD (existing .config)"
+      cd "$KBUILD"
+      # Ensure VDSO is off — ggcc .data/.bss in vgettimeofday breaks vdso link.
+      if [[ -x scripts/config ]]; then
+        scripts/config --file .config --disable VDSO 2>/dev/null || true
+        scripts/config --file .config --disable COMPAT_VDSO 2>/dev/null || true
+        make ARCH="$KARCH" olddefconfig 2>&1 | tee -a "$LOG" | tail -10 || true
+      fi
+      log "config: existing ($(wc -l < .config) lines); CONFIG_VDSO=$(grep -E '^CONFIG_VDSO' .config || echo unset)"
+    else
+      if [[ -f "/scratch/linux-$VER.tar.xz" ]]; then
+        log "extracting /scratch/linux-$VER.tar.xz to container-local /tmp/linux-src..."
+        tar -xJf "/scratch/linux-$VER.tar.xz" -C /tmp/linux-src --strip-components=1
+      elif [[ -d "/work/$KSRC_REL" ]]; then
+        log "copying /work/$KSRC_REL to container-local /tmp/linux-src..."
+        cp -r "/work/$KSRC_REL"/* /tmp/linux-src/ 2>/dev/null || true
+      fi
+      cd /tmp/linux-src
+      KBUILD=/tmp/linux-src
+      log "=== make ARCH=$KARCH tinyconfig ==="
+      make ARCH="$KARCH" defconfig 2>&1 | tee -a "$LOG" | tail -20 || true
+      make ARCH="$KARCH" tinyconfig 2>&1 | tee -a "$LOG" | tail -20
+      if [[ -x scripts/config ]]; then
+        scripts/config --file .config --disable VDSO 2>/dev/null || true
+        scripts/config --file .config --disable COMPAT_VDSO 2>/dev/null || true
+      fi
+      if [[ "$KERNEL_ARCH" == "x86_64" || "$KERNEL_ARCH" == "x86" ]]; then
+        echo "CONFIG_64BIT=y" >> .config
+      fi
       make ARCH="$KARCH" olddefconfig 2>&1 | tee -a "$LOG" | tail -20
-    fi
-
-    # Optional: enable early printk / serial for QEMU if config exists
-    if [[ -f .config ]]; then
-      # Keep tinyconfig minimal; document that full boot needs more symbols later
       log "config: tinyconfig generated ($(wc -l < .config) lines)"
     fi
 
-    log "=== make ARCH=$KARCH CC=ggcc_cc_wrapper HOSTCC=gcc (expect language fail) ==="
+    # Force remake of objects that may still carry soft-freestanding early stubs
+    # or lack mid-boot hard-keeper stubs after codegen policy changes.
+    log "=== force remake of boot-critical objects (soft=0 PASS path) ==="
+    rm -f arch/arm64/mm/*.o arch/arm64/kernel/setup.o \
+      mm/bootmem_info.o mm/mm_init.o mm/memblock.o \
+      init/main.o init/ggcc_init_payload.o \
+      kernel/sched/core.o kernel/softirq.o 2>/dev/null || true
+
+    log "=== make ARCH=$KARCH CC=ggcc_cc_wrapper HOSTCC=gcc Image ==="
     # HOSTCC=gcc: kconfig/fixdep host tools only — not kernel .c
     # CC=wrapper: kernel .c → ggcc only
     set +e
@@ -244,6 +269,7 @@ docker run --rm \
       HOSTCC=gcc \
       HOSTCXX=g++ \
       -j"$JOBS" \
+      Image \
       2>&1 | tee /scratch/kernel_make_full.log | tee -a "$LOG" | tail -80
     make_ec=${PIPESTATUS[0]}
     set -e
@@ -270,24 +296,33 @@ docker run --rm \
     if [[ -z "$bz" && -f vmlinux ]]; then bz=vmlinux; fi
     if [[ -n "$bz" ]]; then
       log "kernel_image: $bz"
-      log "=== QEMU boot attempt ==="
+      log "=== QEMU boot attempt (60s) ==="
       set +e
       if [[ "$KERNEL_ARCH" = arm64 || "$KERNEL_ARCH" = aarch64 ]]; then
-        timeout 30 qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel "$bz" \
-          -nographic -append "console=ttyAMA0" \
-          2>&1 | tee /scratch/qemu_boot.log | tee -a "$LOG" | tail -40
+        timeout 60 qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel "$bz" \
+          -nographic -append "console=ttyAMA0 earlycon=pl011,0x9000000" \
+          2>&1 | tee /scratch/qemu_boot.log | tee -a "$LOG" | tail -80
       else
-        timeout 30 qemu-system-x86_64 -kernel "$bz" \
+        timeout 60 qemu-system-x86_64 -kernel "$bz" \
           -nographic -append "console=ttyS0 earlyprintk=serial" \
           -serial mon:stdio -no-reboot \
-          2>&1 | tee /scratch/qemu_boot.log | tee -a "$LOG" | tail -40
+          2>&1 | tee /scratch/qemu_boot.log | tee -a "$LOG" | tail -80
       fi
       qec=${PIPESTATUS[0]}
       set -e
       log "qemu_ec=$qec"
-      if grep -qE "Linux version|Kernel command line|Run /init" /scratch/qemu_boot.log 2>/dev/null; then
-        log "BOOT_EVIDENCE: serial shows kernel start strings"
+      # C1 PASS bar: Linux version AND init/pid1 (not Linux-version-alone).
+      has_linux=0
+      has_pid1=0
+      grep -q "Linux version" /scratch/qemu_boot.log 2>/dev/null && has_linux=1
+      if grep -qE "Run /init|ggcc-init:|working init" /scratch/qemu_boot.log 2>/dev/null; then
+        has_pid1=1
+      fi
+      if [[ "$has_linux" -eq 1 && "$has_pid1" -eq 1 ]]; then
+        log "BOOT_EVIDENCE: Linux version + init/pid1 present"
         echo PASS_BOOT > /scratch/c1_boot_marker
+      elif [[ "$has_linux" -eq 1 ]]; then
+        log "BOOT_EVIDENCE: PARTIAL — Linux version without init/pid1 (no PASS_BOOT)"
       else
         log "BOOT_EVIDENCE: missing (no boot strings in serial log)"
       fi

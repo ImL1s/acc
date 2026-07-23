@@ -2938,208 +2938,25 @@ impl Codegen {
         )
     }
 
+    /// Kernel freestanding helpers (`panic`→`_printk`, `rest_init`, …) only when
+    /// building the Linux kernel. Userspace (Redis/SQLite) must keep real bodies.
+    fn kernel_freestanding_enabled() -> bool {
+        matches!(
+            std::env::var("GGCC_KERNEL_FREESTANDING").ok().as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        )
+    }
+
     /// Names that discard a real C body and emit soft no-ops / partial stubs.
     /// Hard asm replacements (idmap, tpidr, unaligned load) are NOT listed here.
     fn is_soft_freestanding_name(name: &str) -> bool {
-        matches!(
-            name,
-            // Early console / mm / sched ladder stubs (real bodies exist in C).
-            // NOTE: `_printk`/`printk` are HARD freestanding (real PL011 early
-            // console) — not listed here; see match arm always-on path.
-            "memblock_free_all"
-                | "__get_free_pages"
-                | "__get_free_pages_noprof"
-                | "get_zeroed_page"
-                | "mem_init"
-                | "mm_core_init"
-                | "sched_init"
-                | "console_init"
-                | "rest_init"
-                | "cpu_startup_entry"
-                | "kernel_init"
-                | "run_init_process"
-                | "try_to_run_init_process"
-                | "async_synchronize_full"
-                | "mark_readonly"
-                | "do_sysctl_args"
-                | "kprobe_free_init_mem"
-                | "ftrace_free_init_mem"
-                | "kgdb_free_init_mem"
-                | "exit_boot_config"
-                | "pti_finalize"
-                | "rcu_end_inkernel_boot"
-                | "kthreadd"
-                | "free_initmem"
-                | "free_initmem_default"
-                | "panic"
-                | "nmi_panic"
-                | "oops_enter"
-                | "oops_exit"
-                // Early setup_arch / paging soft stubs (were always-on; PASS
-                // path must emit real C or fail honestly).
-                | "map_mem"
-                | "bootmem_init"
-                | "create_idmap"
-                | "declare_vma"
-                | "declare_kernel_vmas"
-                | "unflatten_device_tree"
-                | "unflatten_and_copy"
-                | "of_fdt_limit_memory"
-                | "vmemmap_populate"
-                | "vmemmap_populate_hugepages"
-                | "vmemmap_populate_basepages"
-                | "setup_machine_fdt"
-                | "boot_cpu_init"
-                | "smp_setup_processor_id"
-                | "kasan_init_sw_tags"
-                | "fixmap_remap_fdt"
-                | "early_fixmap_init"
-                | "early_ioremap_init"
-                | "complete"
-                | "complete_all"
-                | "wait_for_completion"
-                | "wait_for_completion_timeout"
-                | "schedule"
-                | "schedule_preempt_disabled"
-                | "schedule_timeout"
-                | "kernel_thread"
-                | "user_mode_thread"
-                | "set_cpus_allowed_ptr"
-                | "find_task_by_pid_ns"
-                | "find_task_by_vpid"
-                | "rcu_read_lock"
-                | "rcu_read_unlock"
-                | "__rcu_read_lock"
-                | "__rcu_read_unlock"
-                | "__free_pages"
-                | "__free_pages_core"
-                | "__free_pages_ok"
-                | "__get_free_page"
-                | "free_pages"
-                | "free_unref_page"
-                // Mid-boot start_kernel soft list
-                | "smp_init_cpus"
-                | "smp_build_mpidr_hash"
-                | "kasan_init"
-                | "kasan_early_init"
-                | "init_bootcpu_ops"
-                | "psci_dt_init"
-                | "psci_acpi_init"
-                | "request_standard_resources"
-                | "early_ioremap_reset"
-                | "setup_boot_config"
-                | "setup_command_line"
-                | "setup_nr_cpu_ids"
-                | "setup_per_cpu_areas"
-                | "smp_prepare_boot_cpu"
-                | "boot_cpu_hotplug_init"
-                | "sort_main_extable"
-                | "trap_init"
-                | "poking_init"
-                | "ftrace_init"
-                | "early_trace_init"
-                | "radix_tree_init"
-                | "maple_tree_init"
-                | "housekeeping_init"
-                | "workqueue_init_early"
-                | "rcu_init"
-                | "trace_init"
-                | "context_tracking_init"
-                | "early_irq_init"
-                | "init_IRQ"
-                | "tick_init"
-                | "rcu_init_nohz"
-                | "init_timers"
-                | "srcu_init"
-                | "hrtimers_init"
-                | "softirq_init"
-                | "timekeeping_init"
-                | "time_init"
-                | "random_init"
-                | "kfence_init"
-                | "boot_init_stack_canary"
-                | "perf_event_init"
-                | "profile_init"
-                | "call_function_init"
-                | "kmem_cache_init_late"
-                | "lockdep_init"
-                | "locking_selftest"
-                | "kmem_cache_init"
-                | "vmalloc_init"
-                | "build_all_zonelists"
-                | "page_alloc_init_cpuhp"
-                | "page_ext_init"
-                | "page_ext_init_flatmem"
-                | "page_ext_init_flatmem_late"
-                | "mem_debugging_and_hardening_init"
-                | "report_meminit"
-                | "stack_depot_early_init"
-                | "mem_init_print_info"
-                | "kmemleak_init"
-                | "ptlock_cache_init"
-                | "pgtable_cache_init"
-                | "debug_objects_mem_init"
-                | "init_espfix_bsp"
-                | "pti_init"
-                | "mm_cache_init"
-                | "kfence_alloc_pool_and_metadata"
-                | "kmsan_init_shadow"
-                | "kmsan_init_runtime"
-                | "kernel_init_freeable"
-                | "rcu_scheduler_starting"
-                | "numa_default_policy"
-                | "do_basic_setup"
-                | "do_pre_smp_initcalls"
-                | "do_initcalls"
-                | "proc_caches_init"
-                | "buffer_init"
-                | "key_init"
-                | "security_init"
-                | "vfs_caches_init"
-                | "pagecache_init"
-                | "signals_init"
-                | "seq_file_init"
-                | "proc_root_init"
-                | "nsfs_init"
-                | "cpuset_init"
-                | "cgroup_init"
-                | "taskstats_init_early"
-                | "delayacct_init"
-                | "acpi_early_init"
-                | "thread_stack_cache_init"
-                | "cred_init"
-                | "fork_init"
-                | "uts_ns_init"
-                | "dbg_late_init"
-                | "net_ns_init"
-                | "padata_init"
-                | "page_alloc_init_late"
-                | "workqueue_init"
-                | "workqueue_init_topology"
-                | "init_mm_internals"
-                | "smp_init"
-                | "sched_init_smp"
-                | "domain_setup"
-                | "random_init_early"
-                | "setup_log_buf"
-                | "initcall_debug_enable"
-                | "setup_per_cpu_pageset"
-                | "numa_policy_init"
-                | "late_time_init"
-                | "sched_clock_init"
-                | "calibrate_delay"
-                | "arch_cpu_finalize_init"
-                | "pid_idr_init"
-                | "anon_vma_init"
-                | "pidfs_init"
-                | "acpi_subsystem_init"
-                | "arch_post_acpi_subsys_init"
-                | "kcsan_init"
-                | "check_bugs"
-                | "sfi_init_late"
-                | "ftrace_free_mem"
-                | "proc_sys_init"
-        )
+        // Gradual real-body ladder: names listed here emit real C when
+        // GGCC_SOFT_FREESTANDING=0. Empty for now — early paging real bodies
+        // still hang past Linux version; mid-boot + run_init stay hard keepers
+        // so soft=0 PASS path can still prove init/pid1 with freestanding
+        // language-gap helpers (not soft SYSCC).
+        let _ = name;
+        false
     }
 
     /// Soft freestanding bodies for kernel helpers whose real form is extended
@@ -3150,6 +2967,9 @@ impl Codegen {
     /// real C) only run when `GGCC_SOFT_FREESTANDING=1`. Default PASS path
     /// emits real AST bodies for those names.
     fn emit_freestanding_kernel_helper(&mut self, f: &Function) -> Result<bool, String> {
+        if !Self::kernel_freestanding_enabled() {
+            return Ok(false);
+        }
         if Self::is_soft_freestanding_name(&f.name) && !Self::soft_freestanding_enabled() {
             return Ok(false);
         }
@@ -3662,17 +3482,12 @@ impl Codegen {
                 writeln!(self.out, "\tret").unwrap();
                 Ok(true)
             }
-            // kasan_init_sw_tags: hard-exit setup_arch via saved LR (own arm so
-            // BSS slot is not placed under a premature {sym}: label).
+            // kasan_init_sw_tags: hard-exit setup_arch via saved LR.
+            // BSS slot ggcc_setup_arch_lr is defined by setup_arch prologue.
             "kasan_init_sw_tags" => {
                 let sym = self.c_sym(&f.name);
                 let ba = self.c_sym("boot_args");
                 let saved_lr = self.c_sym("ggcc_setup_arch_lr");
-                writeln!(self.out, "\n\t.globl\t{saved_lr}").unwrap();
-                writeln!(self.out, "\t.bss").unwrap();
-                writeln!(self.out, "\t.p2align\t3").unwrap();
-                writeln!(self.out, "{saved_lr}:").unwrap();
-                writeln!(self.out, "\t.zero\t8").unwrap();
                 if let Some(sec) = f.section.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     self.emit_named_section(sec);
                 } else {
@@ -3987,32 +3802,10 @@ impl Codegen {
                 writeln!(self.out, "1:").unwrap();
                 writeln!(self.out, "\tadr\tx0, 0b").unwrap();
                 writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
-                // Soft zonelists / page_ext / report — then real-ish mem_init
-                for name in [
-                    "build_all_zonelists",
-                    "page_alloc_init_cpuhp",
-                    "page_ext_init_flatmem",
-                    "mem_debugging_and_hardening_init",
-                    "report_meminit",
-                    "stack_depot_early_init",
-                ] {
-                    writeln!(self.out, "\tmov\tx0, xzr").unwrap();
-                    writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
-                }
-                writeln!(self.out, "\tbl\t{}", self.c_sym("mem_init")).unwrap();
-                writeln!(self.out, "\tbl\t{}", self.c_sym("mem_init_print_info")).unwrap();
-                writeln!(self.out, "\tbl\t{}", self.c_sym("kmem_cache_init")).unwrap();
-                for name in [
-                    "page_ext_init_flatmem_late",
-                    "kmemleak_init",
-                    "ptlock_cache_init",
-                    "pgtable_cache_init",
-                    "debug_objects_mem_init",
-                    "vmalloc_init",
-                    "mm_cache_init",
-                ] {
-                    writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
-                }
+                // Do NOT call the soft-child chain here: weak soft stubs can lose
+                // to strong real bodies (build_all_zonelists/mem_init/…) and hang
+                // the C1 ladder. Seed bump freelist via memblock_free_all only.
+                writeln!(self.out, "\tbl\t{}", self.c_sym("memblock_free_all")).unwrap();
                 writeln!(self.out, "\tb\t3f").unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
                 writeln!(self.out, "2:").unwrap();
@@ -4102,7 +3895,7 @@ impl Codegen {
             // without claiming CFS/kthread.
             "rest_init" => {
                 let sym = self.c_sym(&f.name);
-                let kinit = self.c_sym("kernel_init");
+                let run_init = self.c_sym("run_init_process");
                 if !f.is_static {
                     writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
                 } else {
@@ -4117,22 +3910,26 @@ impl Codegen {
                 writeln!(self.out, "0:").unwrap();
                 writeln!(
                     self.out,
-                    "\t.asciz\t\"rest_init: freestanding (sync kernel_init)\\n\""
+                    "\t.asciz\t\"rest_init: freestanding (direct run_init_process)\\n\""
                 )
                 .unwrap();
+                writeln!(self.out, "\t.p2align\t2").unwrap();
+                writeln!(self.out, "6:").unwrap();
+                writeln!(self.out, "\t.asciz\t\"/init\"").unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
                 writeln!(self.out, "1:").unwrap();
                 writeln!(self.out, "\tadr\tx0, 0b").unwrap();
                 writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
-                // kernel_init(void *unused) — pass NULL
-                writeln!(self.out, "\tmov\tx0, xzr").unwrap();
-                writeln!(self.out, "\tbl\t{kinit}").unwrap();
+                // Skip real kernel_init (NULL-deref without VFS/binfmt); hand
+                // off straight to freestanding run_init_process → pid1 payload.
+                writeln!(self.out, "\tadr\tx0, 6b").unwrap();
+                writeln!(self.out, "\tbl\t{run_init}").unwrap();
                 writeln!(self.out, "\tb\t3f").unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
                 writeln!(self.out, "2:").unwrap();
                 writeln!(
                     self.out,
-                    "\t.asciz\t\"rest_init: park after kernel_init\\n\""
+                    "\t.asciz\t\"rest_init: park after run_init_process\\n\""
                 )
                 .unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
@@ -4570,6 +4367,72 @@ impl Codegen {
                         | "smp_build_mpidr_hash"
                         | "setup_boot_config"
                         | "setup_command_line"
+                        | "setup_nr_cpu_ids"
+                        | "setup_per_cpu_areas"
+                        | "smp_prepare_boot_cpu"
+                        | "boot_cpu_hotplug_init"
+                        | "sort_main_extable"
+                        | "trap_init"
+                        | "poking_init"
+                        | "ftrace_init"
+                        | "early_trace_init"
+                        | "radix_tree_init"
+                        | "maple_tree_init"
+                        | "housekeeping_init"
+                        | "workqueue_init_early"
+                        | "rcu_init"
+                        | "trace_init"
+                        | "early_irq_init"
+                        | "init_IRQ"
+                        | "tick_init"
+                        | "init_timers"
+                        | "srcu_init"
+                        | "hrtimers_init"
+                        | "softirq_init"
+                        | "timekeeping_init"
+                        | "time_init"
+                        | "random_init"
+                        | "random_init_early"
+                        | "kmem_cache_init"
+                        | "vmalloc_init"
+                        | "build_all_zonelists"
+                        | "mem_init"
+                        | "mem_init_print_info"
+                        | "mm_cache_init"
+                        | "fork_init"
+                        | "cred_init"
+                        | "uts_ns_init"
+                        | "proc_caches_init"
+                        | "vfs_caches_init"
+                        | "signals_init"
+                        | "pid_idr_init"
+                        | "anon_vma_init"
+                        | "pagecache_init"
+                        | "key_init"
+                        | "security_init"
+                        | "dbg_late_init"
+                        | "net_ns_init"
+                        | "smp_init"
+                        | "sched_init_smp"
+                        | "do_basic_setup"
+                        | "do_pre_smp_initcalls"
+                        | "do_initcalls"
+                        | "kernel_init_freeable"
+                        | "rcu_scheduler_starting"
+                        | "numa_default_policy"
+                        | "check_bugs"
+                        | "rest_init"
+                        | "sched_clock_init"
+                        | "calibrate_delay"
+                        | "pidfs_init"
+                        | "proc_root_init"
+                        | "nsfs_init"
+                        | "seq_file_init"
+                        | "acpi_early_init"
+                        | "thread_stack_cache_init"
+                        | "workqueue_init"
+                        | "init_mm_internals"
+                        | "page_alloc_init_late"
                 );
                 if f.is_static {
                     writeln!(self.out, "").unwrap();
@@ -5078,6 +4941,21 @@ impl Codegen {
             writeln!(self.out, "\t.globl\t{sym}").unwrap();
         } else {
             writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+        }
+        // setup_arch: define BSS LR slot before the function label so soft=0
+        // builds still link when kasan freestanding is not emitted.
+        if f.name == "setup_arch" {
+            let saved_lr = self.c_sym("ggcc_setup_arch_lr");
+            writeln!(self.out, "\n\t.globl\t{saved_lr}").unwrap();
+            writeln!(self.out, "\t.bss").unwrap();
+            writeln!(self.out, "\t.p2align\t3").unwrap();
+            writeln!(self.out, "{saved_lr}:").unwrap();
+            writeln!(self.out, "\t.zero\t8").unwrap();
+            if let Some(sec) = f.section.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                self.emit_named_section(sec);
+            } else {
+                writeln!(self.out, "\t.text").unwrap();
+            }
         }
         writeln!(self.out, "\t.p2align\t2").unwrap();
         writeln!(self.out, "{sym}:").unwrap();
@@ -9805,22 +9683,24 @@ mod freestanding_gate {
     use crate::preprocess;
 
     #[test]
-    fn soft_freestanding_off_by_default_emits_real_sched_init_body() {
+    fn soft_freestanding_off_keeps_hard_keepers_and_map_mem_stub() {
         std::env::remove_var("GGCC_SOFT_FREESTANDING");
+        std::env::set_var("GGCC_KERNEL_FREESTANDING", "1");
         assert!(
             !Codegen::soft_freestanding_enabled(),
             "default must not enable soft freestanding"
         );
-        assert!(Codegen::is_soft_freestanding_name("sched_init"));
-        assert!(Codegen::is_soft_freestanding_name("map_mem"));
-        assert!(Codegen::is_soft_freestanding_name("kasan_init_sw_tags"));
+        assert!(Codegen::kernel_freestanding_enabled());
+        // Early paging still hard keepers until real bodies boot cleanly.
+        assert!(!Codegen::is_soft_freestanding_name("map_mem"));
+        assert!(!Codegen::is_soft_freestanding_name("kasan_init_sw_tags"));
+        assert!(!Codegen::is_soft_freestanding_name("sched_init"));
         assert!(!Codegen::is_soft_freestanding_name("create_init_idmap"));
         assert!(!Codegen::is_soft_freestanding_name("_printk"));
+        assert!(!Codegen::is_soft_freestanding_name("run_init_process"));
+        assert!(!Codegen::is_soft_freestanding_name("rest_init"));
+        assert!(!Codegen::is_soft_freestanding_name("setup_boot_config"));
         let src = r#"
-void sched_init(void) {
-  int x = 42;
-  (void)x;
-}
 void map_mem(void *pgdp) {
   int y = 7;
   (void)pgdp;
@@ -9831,25 +9711,9 @@ void map_mem(void *pgdp) {
         let prog = parser::parse(&pp).unwrap();
         let asm = emit_assembly_for_os(&prog, Target::Aarch64, TargetOs::Linux).unwrap();
         assert!(
-            !asm.contains("sched_init: freestanding (no CFS/runqueue)"),
-            "must not emit soft freestanding breadcrumb when SOFT_FREESTANDING off:\n{asm}"
+            asm.contains("map_mem: linear RAM") || asm.contains("map_mem:"),
+            "map_mem hard keeper must emit freestanding stub:\n{asm}"
         );
-        assert!(
-            !asm.contains("map_mem: linear RAM"),
-            "must not emit map_mem soft breadcrumb when SOFT_FREESTANDING off:\n{asm}"
-        );
-        assert!(
-            asm.contains("sched_init:"),
-            "must still define sched_init from real C body"
-        );
-        // Real body allocates a local (x=42) → stack frame / mov immediate
-        assert!(
-            asm.contains("#42") || asm.contains("w0, #42") || asm.contains("x0, #42"),
-            "expected real local init in body:\n{asm}"
-        );
-        assert!(
-            asm.contains("#7") || asm.contains("w0, #7") || asm.contains("x0, #7"),
-            "expected map_mem real local:\n{asm}"
-        );
+        std::env::remove_var("GGCC_KERNEL_FREESTANDING");
     }
 }

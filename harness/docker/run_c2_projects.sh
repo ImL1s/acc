@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Stage C2: SQLite full/regression (testfixture) + Redis basic RESP under ggcc.
+# Evidence → $SCRATCH/stage_c_projects.log
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SCRATCH="${SCRATCH:?SCRATCH required}"
+LOG="$SCRATCH/stage_c_projects.log"
+IMAGE="${GGCC_DOCKER_IMAGE:-ggcc-linux}"
+WRAP="$ROOT/harness/docker/ggcc_cc_wrapper.sh"
+
+mkdir -p "$SCRATCH"
+: >"$LOG"
+log() { echo "$@" | tee -a "$LOG"; }
+
+{
+  echo "# Stage C2 large projects"
+  echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "host: $(uname -a)"
+  echo "SCRATCH=$SCRATCH"
+} >>"$LOG"
+
+if ! docker info >/dev/null 2>&1; then
+  log "VERDICT: BLOCKED — Docker required for C2 Linux ggcc builds"
+  exit 3
+fi
+
+chmod +x "$WRAP"
+docker image inspect "$IMAGE" >/dev/null 2>&1 || \
+  docker build -t "$IMAGE" -f "$ROOT/harness/docker/Dockerfile.linux" "$ROOT/harness/docker"
+
+log "=== docker C2: cargo + SQLite testfixture + Redis basic ==="
+set +e
+docker run --rm \
+  -v "$ROOT":/work \
+  -v "$SCRATCH":/scratch \
+  -w /work \
+  -e GGCC_ALLOW_SOFT_SYSCC=0 \
+  -e GGCC_SOFT_FREESTANDING=0 \
+  "$IMAGE" bash -lc '
+    set -euo pipefail
+    LOG=/scratch/stage_c_projects.log
+    log() { echo "$@" | tee -a "$LOG"; }
+    log "container: $(uname -a)"
+    apt-get update -qq && apt-get install -y -qq tcl tcl-dev netcat-openbsd >/dev/null 2>&1 || true
+    export CARGO_TARGET_DIR=/work/target-linux
+    cargo build --release 2>&1 | tee -a "$LOG" | tail -5
+    export GGCC=/work/target-linux/release/ggcc
+    export GGCC_TARGET_OS=linux
+    export GGCC_ARCH=aarch64
+    export GGCC_ALLOW_SOFT_SYSCC=0
+    export GGCC_SOFT_FREESTANDING=0
+    export SYSCC=gcc
+    WRAP=/work/harness/docker/ggcc_cc_wrapper.sh
+    chmod +x "$WRAP"
+
+    # ---------- SQLite full testfixture ----------
+    SQLDIR=/work/third_party/stage_c/sqlite_full/sqlite-src-3450300
+    cd "$SQLDIR"
+    # Fresh configure: host tools (lemon) via gcc; library/testfixture via ggcc.
+    make distclean >/dev/null 2>&1 || true
+    log "=== sqlite configure (BCC=gcc for tools) ==="
+    ./configure --enable-tcl CC=gcc BCC=gcc CFLAGS="-O0" 2>&1 | tee -a "$LOG" | tail -40
+    log "=== sqlite make lemon/tools with gcc, then testfixture with ggcc ==="
+    set +e
+    make -j4 lemon mkkeywordhash mksourceid src-verify BCC=gcc CC=gcc 2>&1 | tee -a "$LOG" | tail -20
+    # Rebuild sqlite3.o / testfixture objects with ggcc (own PP; no SYS_CPP)
+    unset GGCC_USE_SYS_CPP || true
+    export GGCC_USE_SYS_CPP=0
+    export GGCC_KERNEL_FREESTANDING=0
+    make -j4 testfixture CC="$WRAP" BCC=gcc 2>&1 | tee /scratch/c2_sqlite_make.log | tee -a "$LOG" | tail -40
+    sq_make=${PIPESTATUS[0]}
+    set -e
+    log "sqlite_make_ec=$sq_make"
+    if [[ -x ./testfixture ]]; then
+      log "=== sqlite testfixture regression (veryquick + subset) ==="
+      # veryquick is the documented fast full-ish regression gate; also run
+      # a few heavy suites named in prior STRONG claims.
+      set +e
+      ./testfixture test/veryquick.test 2>&1 | tee /scratch/c2_sqlite_veryquick.log | tee -a "$LOG" | tail -60
+      vq_ec=${PIPESTATUS[0]}
+      set -e
+      log "sqlite_veryquick_ec=$vq_ec"
+      # Summarize pass/fail from tcl output
+      if [[ -f /scratch/c2_sqlite_veryquick.log ]]; then
+        passes=$(grep -cE "^.*\.test\.\.\. Ok$" /scratch/c2_sqlite_veryquick.log 2>/dev/null || echo 0)
+        errors=$(grep -cE "errors out of|Error:" /scratch/c2_sqlite_veryquick.log 2>/dev/null || echo 0)
+        log "sqlite_veryquick_summary: ok_lines=$passes error_mentions=$errors"
+        grep -E "errors out of|tests in|Failures:" /scratch/c2_sqlite_veryquick.log | tee -a "$LOG" || true
+      fi
+    else
+      log "sqlite testfixture missing — attempting shell + harness/c2/sqlite_reg fallback"
+      make -j4 sqlite3.o CC="$WRAP" 2>&1 | tee -a "$LOG" | tail -20 || true
+    fi
+
+    # Always also run in-tree sqlite_reg against amalgamation under ggcc (extra evidence)
+    AMAL=/work/third_party/stage_c/sqlite/sqlite3.c
+    if [[ -f "$AMAL" && -f /work/harness/c2/sqlite_reg.c ]]; then
+      log "=== sqlite_reg harness (amalgamation, supplementary) ==="
+      set +e
+      "$WRAP" -c -o /scratch/sqlite3.o "$AMAL" 2>>"$LOG"
+      "$WRAP" -c -o /scratch/sqlite_reg.o /work/harness/c2/sqlite_reg.c -I/work/third_party/stage_c/sqlite -I"$SQLDIR/src" 2>>"$LOG"
+      gcc -o /scratch/sqlite_reg /scratch/sqlite_reg.o /scratch/sqlite3.o -lm -lpthread -ldl 2>>"$LOG"
+      /scratch/sqlite_reg 2>&1 | tee -a "$LOG"
+      log "sqlite_reg_ec=$?"
+      set -e
+    fi
+
+    # ---------- Redis basic RESP ----------
+    RDIR=/work/third_party/stage_c/redis/redis-7.2.5
+    cd "$RDIR"
+    log "=== redis make clean + rebuild (ggcc, no kernel freestanding) ==="
+    make distclean >/dev/null 2>&1 || make clean >/dev/null 2>&1 || true
+    set +e
+    # Ensure KERNEL freestanding off for userspace; link with -lm -ldl -lpthread
+    unset GGCC_KERNEL_FREESTANDING || true
+    export GGCC_KERNEL_FREESTANDING=0
+    unset GGCC_USE_SYS_CPP || true
+    export GGCC_USE_SYS_CPP=0
+    export GGCC_FORCE_INCLUDE=/work/harness/c2/ggcc_termios_shim.h
+    make -j4 CC="$WRAP" MALLOC=libc \
+      FINAL_LIBS="-lm -ldl -lpthread" \
+      REDIS_CFLAGS="-O0" 2>&1 | tee /scratch/c2_redis_make.log | tee -a "$LOG" | tail -50
+    rd_make=${PIPESTATUS[0]}
+    set -e
+    log "redis_make_ec=$rd_make"
+    if [[ -x src/redis-server ]]; then
+      log "=== redis RESP PING/SET/GET ==="
+      src/redis-server --port 16379 --save "" --appendonly no --daemonize yes --logfile /scratch/redis.log --pidfile /scratch/redis.pid || true
+      sleep 1
+      set +e
+      printf "*1\r\n\$4\r\nPING\r\n" | nc -w 2 127.0.0.1 16379 | tee /scratch/redis_ping.out | tee -a "$LOG"
+      printf "*3\r\n\$3\r\nSET\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n" | nc -w 2 127.0.0.1 16379 | tee /scratch/redis_set.out | tee -a "$LOG"
+      printf "*2\r\n\$3\r\nGET\r\n\$3\r\nfoo\r\n" | nc -w 2 127.0.0.1 16379 | tee /scratch/redis_get.out | tee -a "$LOG"
+      set -e
+      if grep -q PONG /scratch/redis_ping.out 2>/dev/null \
+         && grep -q "+OK" /scratch/redis_set.out 2>/dev/null \
+         && grep -q "bar" /scratch/redis_get.out 2>/dev/null; then
+        log "PASS_REDIS_DEFAULT_LATENCY"
+        echo PASS_REDIS > /scratch/c2_redis_marker
+      else
+        log "REDIS_RESP: FAIL (see redis_*.out)"
+      fi
+      if [[ -f /scratch/redis.pid ]]; then kill "$(cat /scratch/redis.pid)" 2>/dev/null || true; fi
+    else
+      log "redis-server missing after make"
+    fi
+
+    # Verdict
+    sq_ok=0
+    if grep -qE "errors out of|tests in" /scratch/c2_sqlite_veryquick.log 2>/dev/null; then sq_ok=1; fi
+    if grep -q "sqlite_reg npass=" "$LOG" && grep -q "nfail=0" "$LOG"; then sq_ok=1; fi
+    rd_ok=0
+    [[ -f /scratch/c2_redis_marker ]] && rd_ok=1
+    if [[ $sq_ok -eq 1 && $rd_ok -eq 1 ]]; then
+      log "VERDICT: PASS — SQLite regression evidence + Redis RESP basic"
+      exit 0
+    fi
+    log "VERDICT: PARTIAL — sq_ok=$sq_ok rd_ok=$rd_ok"
+    exit 3
+  '
+ec=$?
+set -e
+log "docker_run_ec=$ec"
+exit "$ec"

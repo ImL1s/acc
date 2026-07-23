@@ -33,6 +33,13 @@ if [[ "${GGCC_SOFT_FREESTANDING:-0}" == "1" ]]; then
 else
   export GGCC_SOFT_FREESTANDING=0
 fi
+# Kernel freestanding helpers (panic→_printk, rest_init, …). Opt-in so
+# userspace Redis/SQLite keep real bodies. Kernel build_kernel.sh sets =1.
+if [[ "${GGCC_KERNEL_FREESTANDING:-0}" == "1" ]]; then
+  export GGCC_KERNEL_FREESTANDING=1
+else
+  export GGCC_KERNEL_FREESTANDING=0
+fi
 # Map kernel ARCH → ggcc -m
 case "$ARCH" in
   x86_64|x86|i386) GGCC_M=x86_64 ;;
@@ -51,6 +58,10 @@ other_inputs=()  # .o .a ...
 passthru_sys=()  # flags kept for system as/ld only
 ignored=()
 ggcc_flags=()    # -I/-D forwarded to ggcc
+# Optional forced -include (C2 termios shim for Redis linenoise).
+if [[ -n "${GGCC_FORCE_INCLUDE:-}" ]]; then
+  ggcc_flags+=("-include" "$GGCC_FORCE_INCLUDE")
+fi
 
 i=0
 args=("$@")
@@ -384,9 +395,63 @@ if [[ ${#c_sources[@]} -eq 0 ]]; then
 fi
 
 # --- .c present: ggcc only for C, then system as for objects ---
+# Multi-.c invocations (SQLite testfixture link line): compile each .c to .o
+# via ggcc, then system-link the objects. Never feed .c to system cc.
 if [[ ${#c_sources[@]} -gt 1 ]]; then
-  echo "ggcc_cc_wrapper: multiple .c in one invocation not supported yet: ${c_sources[*]}" >&2
-  exit 1
+  if [[ "$mode" != "link" && "$mode" != "compile" ]]; then
+    echo "ggcc_cc_wrapper: multi-.c only supported for -c or link, got mode=$mode" >&2
+    exit 1
+  fi
+  objs=()
+  for src in "${c_sources[@]}"; do
+    work="$(mktemp -d "${TMPDIR:-/tmp}/ggcc-wrap.XXXXXX")"
+    asm_out="$work/out.s"
+    obj_one="$work/out.o"
+    ggcc_src="$src"
+    if [[ "${GGCC_USE_SYS_CPP:-0}" == "1" ]]; then
+      pp_out="$work/pp.i"
+      set +e
+      "$SYSCC" -E "${passthru_sys[@]}" "${ggcc_flags[@]}" -o "$pp_out" "$src" 2>"$work/cpp.err"
+      cpp_ec=$?
+      set -e
+      if [[ $cpp_ec -ne 0 ]]; then
+        echo "ggcc_cc_wrapper: system cpp failed on $src ec=$cpp_ec" >&2
+        head -20 "$work/cpp.err" >&2 || true
+        rm -rf "$work"
+        exit "$cpp_ec"
+      fi
+      ggcc_src="$pp_out"
+    fi
+    set +e
+    "$GGCC" --target-os "$TARGET_OS" -m "$GGCC_M" "${ggcc_flags[@]}" -S -o "$asm_out" "$ggcc_src" 2>"$work/ggcc.err"
+    ec=$?
+    set -e
+    if [[ $ec -ne 0 ]]; then
+      echo "ggcc_cc_wrapper: ggcc failed on $src ec=$ec" >&2
+      head -40 "$work/ggcc.err" >&2 || true
+      rm -rf "$work"
+      exit "$ec"
+    fi
+    "$SYSAS" -o "$obj_one" "$asm_out"
+    # Keep obj outside temp (temp cleaned) — move to sibling path
+    kept="${src%.c}.ggcc.o"
+    # Prefer outputting next to source with unique name under /tmp
+    kept="$(mktemp "${TMPDIR:-/tmp}/ggcc-obj.XXXXXX.o")"
+    mv "$obj_one" "$kept"
+    objs+=("$kept")
+    rm -rf "$work"
+  done
+  if [[ "$mode" == "compile" && -n "$out" ]]; then
+    # Unusual: -c with multiple .c — not generally used; link objs into out as relocatable
+    exec "$SYSCC" -r -o "$out" "${objs[@]}"
+  fi
+  # link — libraries (-l/-L in passthru_sys) must follow objects
+  set +e
+  "$SYSCC" ${out:+-o "$out"} "${objs[@]}" "${other_inputs[@]}" "${passthru_sys[@]}" -lm -ldl -lpthread
+  ec=$?
+  set -e
+  rm -f "${objs[@]}"
+  exit "$ec"
 fi
 src="${c_sources[0]}"
 
@@ -408,7 +473,22 @@ asm_out="$work/out.s"
 obj_out="$work/out.o"
 
 set +e
-"$GGCC" --target-os "$TARGET_OS" -m "$GGCC_M" "${ggcc_flags[@]}" -S -o "$asm_out" "$src" 2>"$work/ggcc.err"
+# Optional: system cpp for full macro expansion (userspace Redis/SQLite), then
+# ggcc lowers the preprocessed TU. Kernel builds leave this unset and use
+# ggcc's own preprocessor. Never feeds .c to system cc as the C compiler.
+ggcc_src="$src"
+if [[ "${GGCC_USE_SYS_CPP:-0}" == "1" ]]; then
+  pp_out="$work/pp.i"
+  "$SYSCC" -E "${passthru_sys[@]}" "${ggcc_flags[@]}" -o "$pp_out" "$src" 2>"$work/cpp.err"
+  cpp_ec=$?
+  if [[ $cpp_ec -ne 0 ]]; then
+    echo "ggcc_cc_wrapper: system cpp failed on $src ec=$cpp_ec" >&2
+    head -20 "$work/cpp.err" >&2 || true
+    exit "$cpp_ec"
+  fi
+  ggcc_src="$pp_out"
+fi
+"$GGCC" --target-os "$TARGET_OS" -m "$GGCC_M" "${ggcc_flags[@]}" -S -o "$asm_out" "$ggcc_src" 2>"$work/ggcc.err"
 ec=$?
 set -e
 if [[ $ec -ne 0 ]]; then

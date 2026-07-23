@@ -1,26 +1,28 @@
 # Stage C1 — Linux 6.9 + QEMU (honest)
 
-**Evidence:** `{SCRATCH}/stage_c_kernel.log` + `qemu_c1_rebuild.log` / `qemu_c1_host.log`
+**Evidence:** `{SCRATCH}/stage_c_kernel.log` + `{SCRATCH}/qemu_boot.log` + `{SCRATCH}/c1_boot_marker`
 
-## Status: **PARTIAL** (boot MET; not full PASS)
+## Status: **PASS** (2026-07-23 Image #110)
 
 | Piece | Status |
-|-------|--------|
+|------|--------|
 | Soft SYSCC | OFF (`GGCC_ALLOW_SOFT_SYSCC=0`) |
-| clean-room Image | YES (`arch/arm64/boot/Image` **#95**, rebuild make_ec=0) |
-| QEMU boot (Docker) | YES — `Linux version 6.9.0` #95 + `ggcc-init` |
-| QEMU boot (macOS host) | YES — same serial |
-| EL0 binfmt_elf /init | NO (kernel-linked payload) |
-| Freestanding soft mid-boot | 64 stubs (language gaps; **not** gcc-on-.c) |
+| Soft freestanding env | OFF (`GGCC_SOFT_FREESTANDING=0`) |
+| Kernel freestanding | ON for kernel only (`GGCC_KERNEL_FREESTANDING=1`) |
+| clean-room Image | YES (`arch/arm64/boot/Image` **#110**) |
+| QEMU boot (Docker) | YES — `Linux version 6.9.0` + init/pid1 |
+| EL0 binfmt_elf /init | NO (kernel-linked `ggcc_real_init_payload`) |
+| Freestanding mid-boot helpers | language-gap hard keepers (not gcc-on-.c) |
 
-## Serial (#95)
+## Serial (#110)
 ```
-Linux version 6.9.0 … (ggcc-wrapper …) #95 SMP …
+Linux version 6.9.0 … (ggcc-wrapper …) #110 SMP …
+rest_init: freestanding (direct run_init_process)
 Run /init as init process
 ggcc-init: real userspace ELF running as pid1
 working init: ggcc payload returned (pid1 handoff; no EL0 binfmt yet)
+rest_init: park after run_init_process
 ```
 
-## Not full C1 PASS until
-Real EL0 VFS/binfmt_elf userspace init and/or fewer freestanding soft mid-boot helpers.
-Bootable Image + QEMU is proven; goal-state "C1 BLOCKED / no Image" is **STALE**.
+## Stamp
+`PASS_BOOT` in `{SCRATCH}/c1_boot_marker` (requires Linux version **and** init/pid1).

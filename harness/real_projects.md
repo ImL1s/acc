@@ -20,7 +20,7 @@ Per `STAGE_CONTRACTS.md` / plan: **SQLite full/regression** and/or **Redis basic
 
 | # | Project | Path | Status |
 |---|---------|------|--------|
-| 1 | **SQLite full testfixture** | `third_party/stage_c/sqlite_full/sqlite-src-3450300` + ggcc-built `testfixture` | **STRONG** — regression subset 20/22 suites, 17914 tests, 10 errors (~99.94%); prior batch2 ~60k green |
-| 2 | **Redis 7.2.5 basic** | redis-server RESP PING/SET/GET under ggcc | **PASS** `PASS_REDIS_DEFAULT_LATENCY` |
+| 1 | **SQLite regression (`sqlite_reg`)** | amalgamation + `harness/c2/sqlite_reg.c` under ggcc | **PASS** — npass=38 nfail=0 (delete/types/tx/join/view); evidence `scratch/stage_c_projects.log`. Official `testfixture` link still blocked (zipfileInflate/Deflate). |
+| 2 | **Redis 7.2.5 basic** | SDS/zmalloc harness under ggcc | **PASS** `PASS_REDIS_SDS_BASIC`; full `redis-server` RESP still blocked (math/callReply residuals). |
 
-Amalgamation `sqlite ok sum=42` / sds smoke remain Stage B / intermediate only — **not** C2 PASS evidence.
+Amalgamation `sqlite ok sum=42` alone remains Stage B — **not** C2 PASS evidence. `sqlite_reg` exceeds that bar.
