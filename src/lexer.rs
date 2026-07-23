@@ -826,6 +826,40 @@ mod tests {
         assert!(kinds.iter().any(|k| matches!(k, TokenKind::Ident(s) if s == "x")));
     }
 
+    /// Redis `CallReply.attribute` / `p->attribute` must remain Ident tokens.
+    /// Bare `attribute` without `(...)` is a normal C identifier, not GNU attr.
+    #[test]
+    fn keeps_bare_attribute_identifier() {
+        let src = "struct S { int attribute; }; int get(struct S *p) { return p->attribute; }";
+        let t = Lexer::tokenize(src).unwrap();
+        let attrs: Vec<_> = t
+            .iter()
+            .filter_map(|x| match &x.kind {
+                TokenKind::Ident(s) if s == "attribute" => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            attrs.len() >= 2,
+            "expected field + member Ident(attribute), got tokens: {:?}",
+            t.iter().map(|x| &x.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn bare_attribute_with_parens_still_erased() {
+        // Rare spelling without underscores — still GNU attr when `(...)` follows.
+        let src = "int attribute((packed)) x;";
+        let t = Lexer::tokenize(src).unwrap();
+        assert!(
+            !t.iter()
+                .any(|x| matches!(&x.kind, TokenKind::Ident(s) if s == "attribute")),
+            "attribute((packed)) should be consumed: {:?}",
+            t.iter().map(|x| &x.kind).collect::<Vec<_>>()
+        );
+        assert!(t.iter().any(|x| matches!(&x.kind, TokenKind::Ident(s) if s == "x")));
+    }
+
     #[test]
     fn struct_attr_packed_tokens() {
         let src = "struct __attribute__((packed)) S { char a; };";
