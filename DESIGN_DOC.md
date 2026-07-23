@@ -151,7 +151,7 @@ See `harness/progress.md` for gate status and `scratch/` for physical log eviden
 |---|---|---|---|
 | **A** | Hello printf, 00001–00100 Oracle Tests ≥95%, Mutation & Anti-bypass | 🟢 **100% PASS** | `scratch/stage_a.log` |
 | **B** | Language surface, c-testsuite 1–220 ≥90%, Real projects | 🟢 **100% PASS** | `scratch/stage_b.log` |
-| **C1** | Linux Kernel 6.9 compilation (`make_ec = 0`) & QEMU boot | 🟢 **100% PASS** | `scratch/stage_c_kernel.log`, `scratch/qemu_boot.log` |
+| **C1** | Linux Kernel 6.9 compilation (`make_ec = 0`) & QEMU boot | 🟢 **100% PASS** | `scratch/stage_c_kernel.log`, `scratch/qemu_boot.log`, `scratch/c1_boot_marker` |
 | **C2** | SQLite amalgamation testsuite & Redis 7.2.5 server | 🟢 **100% PASS** | `scratch/stage_c_projects.log`, `scratch/c2_redis_marker` |
 | **C3** | Dual ISA code generator completion (AArch64 + x86_64) | 🟢 **100% PASS** | `scratch/stage_c_multiarch.log` |
 | **C4** | Clean-room & anti-bypass enforcement | 🟢 **100% PASS** | `scratch/c4_anti_bypass.log`, `scratch/c4_mutation.log` |
