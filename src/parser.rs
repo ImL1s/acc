@@ -295,8 +295,11 @@ impl Parser {
     }
 
     fn is_gnu_attr_name(s: &str) -> bool {
+        // Do NOT treat bare `attribute` as a GNU attr name: Redis and other
+        // C code use it as a struct field / identifier (callReplyAttribute
+        // bodies use `rep->attribute`). Lexer already keeps bare `attribute`
+        // without `(...`). Only `__attribute` / `__attribute__` spellings.
         s.starts_with("__attribute")
-            || s == "attribute"
             || s == "__section__"
             || s == "__section"
             || s == "__asm"
@@ -2831,7 +2834,14 @@ impl Parser {
                 idx += 1;
                 continue;
             }
-            if idx < self.toks.len() && matches!(&self.toks[idx].kind, TokenKind::Ident(s) if s.starts_with("__attribute") || s == "attribute") {
+            // Require `(` after attr spelling so bare Ident `attribute` (Redis
+            // field) is never skipped as a GNU attribute.
+            if idx < self.toks.len()
+                && matches!(
+                    &self.toks[idx].kind,
+                    TokenKind::Ident(s) if s.starts_with("__attribute")
+                )
+            {
                 idx += 1;
                 if idx < self.toks.len() && self.toks[idx].kind == TokenKind::LParen {
                     idx = self.skip_balanced_parens_offset(idx);

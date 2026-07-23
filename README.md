@@ -16,15 +16,15 @@ A high-ceiling, systems-level C compiler written completely from scratch in Rust
 
 All 7 Hard Gates across Stage A, Stage B, and Stage C (C1–C5) have been audited and certified **100% COMPLETE** by an independent 3-phase Victory Auditor (`7f5ba677-5e01-494a-9cb0-618989616e00`).
 
-| Stage / Gate | Hard Gate Description | Status | Evidence & Metrics |
-|---|---|---|---|
-| **Stage A** | Hello printf, 00001–00100 Oracle Tests ≥95%, Mutation & Anti-bypass | 🟢 **100% PASS** | **100 / 100 PASS (100.0%)** — `scratch/stage_a.log` |
-| **Stage B** | Language surface, c-testsuite 1–220 ≥90%, Real projects | 🟢 **100% PASS** | **210 / 220 PASS (95.45%)**; Miniz, Lua 5.4.6, SQLite verified — `scratch/stage_b.log` |
-| **Stage C1** | Linux Kernel 6.9 compilation (`make_ec = 0`) & QEMU boot to PID 1 | 🟢 **100% PASS** | Compiled ARM64 `vmlinux` (**63.96 MB**) & `Image` (**17.74 MB**); QEMU boot to real userspace `pid1` (`ggcc-init`); stamped `PASS_BOOT` in `scratch/c1_boot_marker` |
-| **Stage C2** | Large real-world projects: SQLite full testsuite & Redis 7.2.5 server | 🟢 **100% PASS** | SQLite amalgamation regression (`sqlite_reg`) 38/38 PASS, 75 TCL test suites green (~86,515 tests, 99.94%+); Redis 7.2.5 server (131 `.o` files linked, native TCP listener & RESP `PING`/`SET`/`GET`/`INCR` 100% PASS), stamped `PASS_REDIS_DEFAULT_LATENCY` |
-| **Stage C3** | Dual ISA code generator completion (AArch64 + x86_64) | 🟢 **100% PASS** | **40 / 40 PASS (100.0%)** (20 AArch64 + 20 x86_64) — `scratch/stage_c_multiarch.log` |
-| **Stage C4** | Clean-room & anti-bypass enforcement | 🟢 **100% PASS** | `GGCC_ALLOW_SOFT_SYSCC=0` strictly enforced; zero fallback to host `gcc`/`clang`/`ccc`; `freestanding_count = 0` (zero body skipping) |
-| **Stage C5** | Double-run consistency | 🟢 **100% PASS** | **`PASS_SET_IDENTICAL = yes`** across consecutive runs (0 test drift) — `scratch/stage_c_rerun.log` |
+| Stage / Gate | Hard Gate Description | Status | Evidence & Metrics | Log Reference |
+|---|---|---|---|---|
+| **Stage A** | Hello printf, 00001–00100 Oracle Tests ≥95%, Mutation & Anti-bypass | 🟢 **100% PASS** | **100 / 100 PASS (100.0%)** | `scratch/stage_a.log` |
+| **Stage B** | Language surface, c-testsuite 1–220 ≥90%, Real projects | 🟢 **100% PASS** | **210 / 220 PASS (95.45%)**; Miniz, Lua 5.4.6, SQLite verified | `scratch/stage_b.log` |
+| **Stage C1** | Linux Kernel 6.9 compilation (`make_ec = 0`) & QEMU boot to PID 1 | 🟢 **100% PASS** | Compiled ARM64 `vmlinux` (**63.96 MB**) & `Image` (**17.74 MB**); QEMU boot to real userspace `pid1` (`ggcc-init`); stamped `PASS_BOOT` | `scratch/stage_c_kernel.log`, `scratch/qemu_boot.log`, `scratch/c1_boot_marker` |
+| **Stage C2** | Large real-world projects: SQLite full testsuite & Redis 7.2.5 server | 🟢 **100% PASS** | SQLite amalgamation regression (`sqlite_reg`) 38/38 PASS, 75 TCL test suites green (~86,515 tests, 99.94%+); Redis 7.2.5 server (131 `.o` files linked, native TCP listener & RESP `PING`/`SET`/`GET`/`INCR` 100% PASS), stamped `PASS_REDIS_DEFAULT_LATENCY` | `scratch/stage_c_projects.log`, `scratch/c2_redis_marker` |
+| **Stage C3** | Dual ISA code generator completion (AArch64 + x86_64) | 🟢 **100% PASS** | **40 / 40 PASS (100.0%)** (20 AArch64 + 20 x86_64) | `scratch/stage_c_multiarch.log` |
+| **Stage C4** | Clean-room & anti-bypass enforcement | 🟢 **100% PASS** | `GGCC_ALLOW_SOFT_SYSCC=0` strictly enforced; zero fallback to host `gcc`/`clang`/`ccc`; `freestanding_count = 0` (zero body skipping) | `scratch/c4_anti_bypass.log`, `scratch/c4_mutation.log` |
+| **Stage C5** | Double-run consistency | 🟢 **100% PASS** | **`PASS_SET_IDENTICAL = yes`** across consecutive runs (0 test drift) | `scratch/stage_c_rerun.log` |
 
 ---
 
@@ -63,7 +63,7 @@ All 7 Hard Gates across Stage A, Stage B, and Stage C (C1–C5) have been audite
                                |
                                v
                        +---------------+
-                       |   codegen     |   AArch64 (codegen.rs) | x86_64 (codegen_x86_64.rs)
+                       |    codegen    |   AArch64 (codegen.rs) | x86_64 (codegen_x86_64.rs)
                        +---------------+
                                |
                                v
@@ -147,10 +147,10 @@ See [`BUILDING_LINUX.txt`](BUILDING_LINUX.txt) for step-by-step instructions.
 ./harness/docker/build_kernel.sh
 ```
 
-### SQLite Amalgamation & Regression (Stage C2)
+### SQLite Amalgamation & Redis Server (Stage C2)
 
 ```bash
-# Build & run Stage B real-world project wrappers
+# Build & run Stage B & Stage C real-world project wrappers
 CC=$PWD/target/release/ggcc third_party/real/sqlite/build.sh test
 CC=$PWD/target/release/ggcc third_party/real/redis/build.sh test
 CC=$PWD/target/release/ggcc third_party/real/miniz/build.sh test

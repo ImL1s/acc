@@ -525,7 +525,23 @@ impl<'a> Lexer<'a> {
                     if s == "__ggcc_weak_attr" || s == "__weak" {
                         return Ok(self.make(TokenKind::Weak, t.line, t.col));
                     }
-                    if s == "__attribute__" || s == "__attribute" || s == "attribute" || s == "__section__" || s == "__section" || s == "__signed_wrap" {
+                    // D-redis / Phase B.2: bare Ident `attribute` is a valid C
+                    // identifier (Redis `CallReply.attribute`, `p->attribute`).
+                    // Only treat attribute-like spellings as GNU attrs when a
+                    // `(` suffix follows; otherwise keep the Ident token.
+                    if s == "__attribute__"
+                        || s == "__attribute"
+                        || s == "attribute"
+                        || s == "__section__"
+                        || s == "__section"
+                        || s == "__signed_wrap"
+                    {
+                        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+                            self.bump();
+                        }
+                        if self.peek() != Some(b'(') {
+                            return Ok(t);
+                        }
                         let (packed, weak, sec) = self.scan_gnu_attribute_suffix(s);
                         if let Some(sname) = sec {
                             return Ok(self.make(TokenKind::Section(sname), t.line, t.col));
