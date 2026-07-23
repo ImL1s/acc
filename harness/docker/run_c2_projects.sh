@@ -124,13 +124,18 @@ docker run --rm \
     export GGCC_FORCE_INCLUDE=/work/harness/c2/ggcc_termios_shim.h
     make -j4 CC="$WRAP" MALLOC=libc \
       FINAL_LIBS="-lm -ldl -lpthread" \
-      REDIS_CFLAGS="-O0" 2>&1 | tee /scratch/c2_redis_make.log | tee -a "$LOG" | tail -50
+      REDIS_CFLAGS="-O0" \
+      REDIS_LDFLAGS="-g -ggdb" \
+      redis-server 2>&1 | tee /scratch/c2_redis_make.log | tee -a "$LOG" | tail -50
     rd_make=${PIPESTATUS[0]}
     set -e
     log "redis_make_ec=$rd_make"
     if [[ -x src/redis-server ]]; then
       log "=== redis RESP PING/SET/GET ==="
-      src/redis-server --port 16379 --save "" --appendonly no --daemonize yes --logfile /scratch/redis.log --pidfile /scratch/redis.pid || true
+      # --protected-mode no: local RESP smoke; ggcc/Docker may present
+      # IPv6-mapped loopback that Redis connSocketIsLocal ("127." / "::1") rejects.
+      src/redis-server --port 16379 --save "" --appendonly no --protected-mode no \
+        --daemonize yes --logfile /scratch/redis.log --pidfile /scratch/redis.pid || true
       sleep 1
       set +e
       printf "*1\r\n\$4\r\nPING\r\n" | nc -w 2 127.0.0.1 16379 | tee /scratch/redis_ping.out | tee -a "$LOG"
@@ -153,10 +158,12 @@ docker run --rm \
     # Verdict — strict C2: testfixture+veryquick + Redis RESP only.
     # sqlite_reg / PASS_REDIS_SDS* are supplementary smoke only and must NEVER set ok bits.
     sq_ok=0
+    # SQLite 3.45+ tester.tcl prints "errors out of N tests on HOST"; older
+    # fuzzcheck-style lines used "tests in". Accept either; require exit 0.
     if [[ -x "$SQLDIR/testfixture" ]] \
        && [[ -f /scratch/c2_sqlite_veryquick.log ]] \
        && grep -q "errors out of" /scratch/c2_sqlite_veryquick.log \
-       && grep -q "tests in" /scratch/c2_sqlite_veryquick.log \
+       && grep -qE "tests (in|on)" /scratch/c2_sqlite_veryquick.log \
        && grep -qE '^sqlite_veryquick_ec=0$' "$LOG"; then
       sq_ok=1
     fi

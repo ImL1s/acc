@@ -5684,6 +5684,26 @@ impl Codegen {
                             return Ok(());
                         }
                     }
+                    // `char buf[] = "hi";` / `unsigned char zHex[] = "0123..."`:
+                    // string rvalue is a pointer; must memcpy bytes into the
+                    // array slot. Storing the pointer made hexio BinToHex index
+                    // stack garbage (SQLite alter2/hexio_get_int → 0).
+                    if let (Type::Array(elem, n), Expr::String(s)) = (&ty, init) {
+                        if matches!(elem.as_ref(), Type::Char | Type::SChar) {
+                            let id = self.intern_str(s);
+                            let slab = format!("l_str_{id}");
+                            self.emit_fp_addr(off, 0);
+                            self.emit_adrp_add(1, &slab);
+                            let copy_n = if *n > 0 {
+                                *n
+                            } else {
+                                (s.len() + 1) as i64
+                            };
+                            self.emit_imm(copy_n, 2);
+                            writeln!(self.out, "\tbl\t{}", self.c_sym("memcpy")).unwrap();
+                            return Ok(());
+                        }
+                    }
                     self.emit_expr_rval(init, 0, typedefs)?;
                     if matches!(ty, Type::Float | Type::Double) {
                         let rty = self.typeof_expr(init, typedefs);
@@ -9672,8 +9692,10 @@ mod sqlite_diag {
 
 #[cfg(test)]
 mod bare_unsigned_cast {
+    use super::*;
     use crate::parser;
     use crate::preprocess;
+    use crate::{Target, TargetOs};
 
     /// SQLite amalgamation uses `((unsigned)p[0]<<24)` extensively. Bare
     /// `(unsigned)` must parse as a cast (→ unsigned int), not soft-skip the
@@ -9704,6 +9726,20 @@ int main(void) {
         assert!(f.body.is_some(), "body must not be soft-skipped");
         assert!(f.body.as_ref().unwrap().len() >= 1);
         assert!(super::reachable_funcs(&prog).contains("sqlite3Get4byte"));
+    }
+
+    #[test]
+    fn test_char_array_string_initializer_memcpy() {
+        let src = r#"
+int main(void) {
+    char buf[] = "hello";
+    return buf[0];
+}
+"#;
+        let pp = preprocess::preprocess(src).unwrap();
+        let prog = parser::parse(&pp).unwrap();
+        let asm = emit_assembly_for_os(&prog, Target::Aarch64, TargetOs::Linux).unwrap();
+        assert!(asm.contains("memcpy"), "char array string initializer must emit memcpy:\n{asm}");
     }
 }
 
