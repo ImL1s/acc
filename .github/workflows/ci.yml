@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build & Test (Ubuntu Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh build-essential gcc g++ make qemu-system-arm tcl-dev
+
+      - name: Cargo Check & Unit Tests
+        run: |
+          cargo check
+          cargo test --release
+          cargo build --release
+
+      - name: Run In-Repo Oracle Suite
+        run: |
+          ./harness/run_oracle.sh
+
+      - name: Run Public c-testsuite (Stage A & B)
+        run: |
+          CTEST_MIN_PASS=200 ./harness/run_ctestsuite.sh
+
+      - name: Run Dual-ISA Multiarch Suite (Stage C3)
+        run: |
+          ./harness/run_multiarch.sh
+
+      - name: Run Mutation & Anti-Bypass Audit (Stage C4)
+        run: |
+          ./harness/mutation_check.sh
+          ./scripts/anti_bypass_audit.sh
+
+      - name: Run Real-World Project Wrappers (Stage B)
+        run: |
+          CC=$PWD/target/release/ggcc third_party/real/miniz/build.sh test
+          CC=$PWD/target/release/ggcc third_party/real/lua/build.sh test
+          CC=$PWD/target/release/ggcc third_party/real/sqlite/build.sh test
