@@ -6,27 +6,28 @@
 |------|--------|-------|
 | **A** | PASS | |
 | **B** | PASS | |
-| **C1** | **PARTIAL** | freestanding_count=0; hard printk; QEMU prints **Linux version 6.9.0**; hangs at setup_arch soft stubs; no full init/pid1 |
-| **C2** | **STRONG** | SQLite full testfixture 17914 tests (~99.94%); Redis basic MET |
+| **C1** | **PARTIAL** | Linux version on QEMU with hard `_printk`; mid-boot + early setup_arch soft stubs now **opt-in only** (`GGCC_SOFT_FREESTANDING=0`). Full rebuild + QEMU pending Docker. |
+| **C2** | **STRONG** | SQLite full testfixture ~99.94% (17914 tests); Redis basic MET |
 | **C3/C5** | PASS | |
-| **C4** | PASS policy | soft SYSCC off; mid-boot freestanding gated |
+| **C4** | PASS policy | soft SYSCC off; soft freestanding gated (expanded list) |
 
-### This session wins
-1. Bare `(unsigned)` cast → SQLite bodies restored
-2. Soft freestanding **default OFF** (unit test + Image freestanding marker = 0)
-3. C2 SQLite **full** regression (not smoke)
-4. Image rebuild under SOFT_FREESTANDING=0; QEMU shows Linux version with hard early printk
+### Latest code change
+- Expanded `is_soft_freestanding_name` to cover always-on early stubs:
+  `map_mem`, `bootmem_init`, `create_idmap`, `setup_machine_fdt`,
+  `kasan_init_sw_tags`, `smp_setup_processor_id`, schedule/completion, …
+- Unit test asserts `map_mem` real body when soft freestanding off
+- Hard keepers: `_printk`, `create_init_idmap`, tpidr helpers, unaligned load
 
 ### blocked_reason
 ```
-C1 not PASS: early setup_arch still soft-stubs map_mem/bootmem_init/create_idmap/…;
-QEMU reaches setup_arch:done then hangs — no init/pid1.
-Need real early paging/bootmem without soft body discard.
+C1: Docker daemon unavailable this turn — cannot rebuild Image / re-run QEMU.
+    Code gates early soft stubs; need Docker remake of setup_arch path objects
+    then QEMU until init/pid1.
 ```
 
 ### Next
-1. Gate/remove remaining always-on soft early helpers (map_mem, bootmem_init, …) or make them real.
-2. QEMU until init/pid1; stamp PASS_BOOT.
-3. Optional SQLite delete/types errors.
+1. Docker up → remake kernel objects under SOFT_FREESTANDING=0 → QEMU
+2. Fix real-body failures exposed when soft stubs are off
+3. Stamp PASS_BOOT only with init/pid1 evidence
 
-Updated: 2026-07-23T01:28:00Z
+Updated: 2026-07-23T01:48:00Z

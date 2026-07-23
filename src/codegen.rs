@@ -2975,6 +2975,48 @@ impl Codegen {
                 | "nmi_panic"
                 | "oops_enter"
                 | "oops_exit"
+                // Early setup_arch / paging soft stubs (were always-on; PASS
+                // path must emit real C or fail honestly).
+                | "map_mem"
+                | "bootmem_init"
+                | "create_idmap"
+                | "declare_vma"
+                | "declare_kernel_vmas"
+                | "unflatten_device_tree"
+                | "unflatten_and_copy"
+                | "of_fdt_limit_memory"
+                | "vmemmap_populate"
+                | "vmemmap_populate_hugepages"
+                | "vmemmap_populate_basepages"
+                | "setup_machine_fdt"
+                | "boot_cpu_init"
+                | "smp_setup_processor_id"
+                | "kasan_init_sw_tags"
+                | "fixmap_remap_fdt"
+                | "early_fixmap_init"
+                | "early_ioremap_init"
+                | "complete"
+                | "complete_all"
+                | "wait_for_completion"
+                | "wait_for_completion_timeout"
+                | "schedule"
+                | "schedule_preempt_disabled"
+                | "schedule_timeout"
+                | "kernel_thread"
+                | "user_mode_thread"
+                | "set_cpus_allowed_ptr"
+                | "find_task_by_pid_ns"
+                | "find_task_by_vpid"
+                | "rcu_read_lock"
+                | "rcu_read_unlock"
+                | "__rcu_read_lock"
+                | "__rcu_read_unlock"
+                | "__free_pages"
+                | "__free_pages_core"
+                | "__free_pages_ok"
+                | "__get_free_page"
+                | "free_pages"
+                | "free_unref_page"
                 // Mid-boot start_kernel soft list
                 | "smp_init_cpus"
                 | "smp_build_mpidr_hash"
@@ -9770,11 +9812,19 @@ mod freestanding_gate {
             "default must not enable soft freestanding"
         );
         assert!(Codegen::is_soft_freestanding_name("sched_init"));
+        assert!(Codegen::is_soft_freestanding_name("map_mem"));
+        assert!(Codegen::is_soft_freestanding_name("kasan_init_sw_tags"));
         assert!(!Codegen::is_soft_freestanding_name("create_init_idmap"));
+        assert!(!Codegen::is_soft_freestanding_name("_printk"));
         let src = r#"
 void sched_init(void) {
   int x = 42;
   (void)x;
+}
+void map_mem(void *pgdp) {
+  int y = 7;
+  (void)pgdp;
+  (void)y;
 }
 "#;
         let pp = preprocess::preprocess(src).unwrap();
@@ -9785,6 +9835,10 @@ void sched_init(void) {
             "must not emit soft freestanding breadcrumb when SOFT_FREESTANDING off:\n{asm}"
         );
         assert!(
+            !asm.contains("map_mem: linear RAM"),
+            "must not emit map_mem soft breadcrumb when SOFT_FREESTANDING off:\n{asm}"
+        );
+        assert!(
             asm.contains("sched_init:"),
             "must still define sched_init from real C body"
         );
@@ -9792,6 +9846,10 @@ void sched_init(void) {
         assert!(
             asm.contains("#42") || asm.contains("w0, #42") || asm.contains("x0, #42"),
             "expected real local init in body:\n{asm}"
+        );
+        assert!(
+            asm.contains("#7") || asm.contains("w0, #7") || asm.contains("x0, #7"),
+            "expected map_mem real local:\n{asm}"
         );
     }
 }
