@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stage C2: SQLite full/regression (testfixture) + Redis basic RESP under ggcc.
+# Stage C2: SQLite testfixture+veryquick + Redis RESP under ggcc.
+# PASS requires real suite evidence + RESP marker; sqlite_reg/SDS never set PASS.
 # Evidence → $SCRATCH/stage_c_projects.log
 set -euo pipefail
 
@@ -109,6 +110,8 @@ docker run --rm \
     # ---------- Redis basic RESP ----------
     RDIR=/work/third_party/stage_c/redis/redis-7.2.5
     cd "$RDIR"
+    # Drop stale markers so SDS / prior runs cannot PASS by file existence alone.
+    rm -f /scratch/c2_redis_marker
     log "=== redis make clean + rebuild (ggcc, no kernel freestanding) ==="
     make distclean >/dev/null 2>&1 || make clean >/dev/null 2>&1 || true
     set +e
@@ -137,7 +140,7 @@ docker run --rm \
          && grep -q "+OK" /scratch/redis_set.out 2>/dev/null \
          && grep -q "bar" /scratch/redis_get.out 2>/dev/null; then
         log "PASS_REDIS_DEFAULT_LATENCY"
-        echo PASS_REDIS > /scratch/c2_redis_marker
+        echo PASS_REDIS_DEFAULT_LATENCY > /scratch/c2_redis_marker
       else
         log "REDIS_RESP: FAIL (see redis_*.out)"
       fi
@@ -146,17 +149,30 @@ docker run --rm \
       log "redis-server missing after make"
     fi
 
-    # Verdict
+    # Verdict — strict C2: testfixture+veryquick + Redis RESP only.
+    # sqlite_reg / PASS_REDIS_SDS* are supplementary smoke only and must NEVER set ok bits.
     sq_ok=0
-    if grep -qE "errors out of|tests in" /scratch/c2_sqlite_veryquick.log 2>/dev/null; then sq_ok=1; fi
-    if grep -q "sqlite_reg npass=" "$LOG" && grep -q "nfail=0" "$LOG"; then sq_ok=1; fi
+    if [[ -x "$SQLDIR/testfixture" ]] \
+       && [[ -f /scratch/c2_sqlite_veryquick.log ]] \
+       && grep -q "errors out of" /scratch/c2_sqlite_veryquick.log \
+       && grep -q "tests in" /scratch/c2_sqlite_veryquick.log \
+       && grep -qE '^sqlite_veryquick_ec=0$' "$LOG"; then
+      sq_ok=1
+    fi
     rd_ok=0
-    [[ -f /scratch/c2_redis_marker ]] && rd_ok=1
+    if [[ -f /scratch/c2_redis_marker ]] \
+       && [[ "$(tr -d '[:space:]' </scratch/c2_redis_marker)" == "PASS_REDIS_DEFAULT_LATENCY" ]]; then
+      rd_ok=1
+    fi
     if [[ $sq_ok -eq 1 && $rd_ok -eq 1 ]]; then
-      log "VERDICT: PASS — SQLite regression evidence + Redis RESP basic"
+      log "VERDICT: PASS — SQLite testfixture+veryquick + Redis RESP"
       exit 0
     fi
-    log "VERDICT: PARTIAL — sq_ok=$sq_ok rd_ok=$rd_ok"
+    if [[ $sq_ok -eq 0 && $rd_ok -eq 0 ]]; then
+      log "VERDICT: FAIL — sq_ok=0 rd_ok=0 (require testfixture+veryquick + Redis RESP; sqlite_reg/SDS do not count)"
+    else
+      log "VERDICT: PARTIAL — sq_ok=$sq_ok rd_ok=$rd_ok (require testfixture+veryquick + Redis RESP; sqlite_reg/SDS do not count)"
+    fi
     exit 3
   '
 ec=$?

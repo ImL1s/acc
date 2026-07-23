@@ -160,13 +160,24 @@ while [[ $i -lt $# ]]; do
       ggcc_flags+=("$a"); ignored+=("$a"); i=$((i+1)); continue
       ;;
     -isystem|-iquote|-idirafter)
+      # Forward as -I to ggcc (quoted + angle includes) and keep original for system cpp.
       ggcc_flags+=("-I" "${args[$((i+1))]:-}")
       ignored+=("$a" "${args[$((i+1))]:-}")
       i=$((i+2)); continue
       ;;
     -isystem*|-iquote*|-idirafter*)
-      ggcc_flags+=("-I${a#-isystem}")
-      ignored+=("$a"); i=$((i+1)); continue
+      # Glued forms: strip the correct prefix (-isystem / -iquote / -idirafter).
+      _inc_dir=""
+      case "$a" in
+        -isystem*) _inc_dir="${a#-isystem}" ;;
+        -iquote*)  _inc_dir="${a#-iquote}" ;;
+        -idirafter*) _inc_dir="${a#-idirafter}" ;;
+      esac
+      if [[ -n "$_inc_dir" ]]; then
+        ggcc_flags+=("-I${_inc_dir}")
+      fi
+      ignored+=("$a"); unset _inc_dir
+      i=$((i+1)); continue
       ;;
     -U)
       ignored+=("$a" "${args[$((i+1))]:-}")
@@ -390,8 +401,9 @@ if [[ ${#c_sources[@]} -eq 0 ]]; then
     fi
     exit "$ec"
   fi
-  # link
-  exec "$SYSCC" "${passthru_sys[@]}" "${ignored[@]}" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}"
+  # link — objects/archives first, then -l/-L (passthru_sys), then trailing libm/dl/pthread
+  # (same order as multi-.c link). Do not put libraries before inputs.
+  exec "$SYSCC" ${out:+-o "$out"} "${s_sources[@]}" "${other_inputs[@]}" "${passthru_sys[@]}" -lm -ldl -lpthread
 fi
 
 # --- .c present: ggcc only for C, then system as for objects ---
@@ -581,12 +593,13 @@ case "$mode" in
     exit 0
     ;;
   link)
-    # compile C → asm → obj, then link with any other inputs
+    # compile C → asm → obj, then link: objects/archives first, libs last
+    # (same order as multi-.c: objs, other_inputs, passthru_sys, -lm -ldl -lpthread)
     "$SYSCC" -c -o "$obj_out" "$asm_out"
     if [[ -n "$out" ]]; then
-      "$SYSCC" -o "$out" "$obj_out" "${passthru_sys[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+      "$SYSCC" -o "$out" "$obj_out" "${s_sources[@]}" "${other_inputs[@]}" "${passthru_sys[@]}" -lm -ldl -lpthread
     else
-      "$SYSCC" -o a.out "$obj_out" "${passthru_sys[@]}" "${s_sources[@]}" "${other_inputs[@]}"
+      "$SYSCC" -o a.out "$obj_out" "${s_sources[@]}" "${other_inputs[@]}" "${passthru_sys[@]}" -lm -ldl -lpthread
     fi
     exit 0
     ;;

@@ -14,13 +14,13 @@ Build each with `CC=$PWD/target/release/ggcc`.
 - **lua 5.4.6**: PASS — multi-file, `print("lua ok", 6*7)` → 42
 - **sqlite amalgamation**: PASS — `third_party/stage_c/sqlite/sqlite3.c` under ggcc → link → open :memory: SUM 40+2=42
 
-## Stage C2 (≥2 large) — frozen bar (no smoke-only PASS)
+## Stage C2 (≥2 large) — CCC-strict frozen bar
 
-Per `STAGE_CONTRACTS.md` / plan: **SQLite full/regression** and/or **Redis basic** (not amalgamation/sds smoke alone).
+Per `STAGE_CONTRACTS.md` / `docs/plans/2026-07-23-ccc-full-parity.md`:
 
-| # | Project | Path | Status |
-|---|---------|------|--------|
-| 1 | **SQLite regression (`sqlite_reg`)** | amalgamation + `harness/c2/sqlite_reg.c` under ggcc | **PASS** — npass=38 nfail=0 (delete/types/tx/join/view); evidence `scratch/stage_c_projects.log`. Official `testfixture` link still blocked (zipfileInflate/Deflate). |
-| 2 | **Redis 7.2.5 basic** | SDS/zmalloc harness under ggcc | **PASS** `PASS_REDIS_SDS_BASIC`; full `redis-server` RESP still blocked (math/callReply residuals). |
+| # | Project | Required PASS evidence | Soft evidence (NOT C2 PASS) |
+|---|---------|------------------------|-----------------------------|
+| 1 | **SQLite** | Official **`testfixture`** + **`test/veryquick.test`** under ggcc (suite summary in log; nfail=0 or documented ledger skips only) | `sqlite_reg` 38/38, amalgamation `sqlite ok sum=42` |
+| 2 | **Redis** | Built **`redis-server`** + live RESP **`PING`→`PONG`**, **`SET`/`GET`** | SDS harness / `PASS_REDIS_SDS*` |
 
-Amalgamation `sqlite ok sum=42` alone remains Stage B — **not** C2 PASS evidence. `sqlite_reg` exceeds that bar.
+Amalgamation smoke remains Stage B. **`sqlite_reg` and SDS are explicitly not C2 PASS** after the honesty reset.

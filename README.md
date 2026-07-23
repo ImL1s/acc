@@ -1,12 +1,18 @@
 # ggcc — Clean-Room C Compiler in Rust
 
-A C compiler written completely from scratch in Rust. Frontend (preprocessor, lexer, parser) and dual ISA code generators (**AArch64** and **x86_64**) are implemented in-tree. System `as` / `ld` / `cc` are used **only** to assemble and link assembly that **this** compiler emitted — user `.c` files are **never** passed to external compilers.
+[![CI](https://github.com/ImL1s/ggcc/actions/workflows/ci.yml/badge.svg)](https://github.com/ImL1s/ggcc/actions/workflows/ci.yml)
+[![Victory Audit](https://img.shields.io/badge/victory%20audit-CONFIRMED-success.svg)](harness/progress.md)
+[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
+[![Architecture](https://img.shields.io/badge/architecture-AArch64%20%7C%20x86__64-blue.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Clean-Room Commitment:** This repository does **not** contain, vendor, or derive from [anthropics/claudes-c-compiler](https://github.com/anthropics/claudes-c-compiler) `src/`. Evaluation methodology and acceptance criteria (public oracles, real-world projects, Linux kernel boot) are inspired by the CCC experiment's *human-side methodology*, executed entirely independently.
+A high-ceiling, systems-level C compiler written completely from scratch in Rust. Frontend (preprocessor, lexer, parser) and dual ISA code generators (**AArch64** and **x86_64**) are implemented in-tree. System `as` / `ld` / `cc` are used **only** to assemble and link assembly that **this** compiler emitted — user `.c` files are **never** passed to external compilers.
+
+> 🛡️ **Clean-Room Commitment:** This repository does **not** contain, vendor, or derive from [anthropics/claudes-c-compiler](https://github.com/anthropics/claudes-c-compiler) `src/`. Evaluation methodology and acceptance criteria (public oracles, real-world projects, Linux kernel boot) are inspired by the CCC experiment's *human-side methodology*, executed entirely independently.
 
 ---
 
-## Final Project Status — Certified `VERDICT: VICTORY CONFIRMED`
+## 🏆 Final Project Status — Certified `VERDICT: VICTORY CONFIRMED`
 
 All 7 Hard Gates across Stage A, Stage B, and Stage C (C1–C5) have been audited and certified **100% COMPLETE** by an independent 3-phase Victory Auditor (`7f5ba677-5e01-494a-9cb0-618989616e00`).
 
@@ -22,7 +28,7 @@ All 7 Hard Gates across Stage A, Stage B, and Stage C (C1–C5) have been audite
 
 ---
 
-## Highlights & Capabilities
+## 🌟 Highlights & System-Level Capabilities
 
 ### 1. Linux Kernel 6.9 Compilation & QEMU Boot
 `ggcc` compiles the Linux Kernel 6.9 ARM64 source tree natively (producing a **63.96 MB** `vmlinux` ELF and **17.74 MB** `Image`). Under `qemu-system-aarch64`, the generated kernel initializes MMU, page tables, memory zones (`vmemmap_populate`), SMP CPUs, `start_kernel()`, `kernel_init()`, and executes a real userspace PID 1 binary (`ggcc-init`).
@@ -35,7 +41,7 @@ All 7 Hard Gates across Stage A, Stage B, and Stage C (C1–C5) have been audite
 
 ---
 
-## High-Level Architecture
+## 🏗️ High-Level Architecture
 
 ```
                        C Source File (.c)
@@ -72,15 +78,7 @@ Unlike CCC, `ggcc` emits clean, human-readable textual assembly (`.s`) and deleg
 
 ---
 
-## Prerequisites
-
-- **Rust** (stable, 2021 edition) — [rustup.rs](https://rustup.rs/)
-- Host **macOS (Apple Silicon arm64)** or **Linux** with `as` / `ld` / `cc` available only for assembling `.s`
-- Stage C / Linux Kernel bring-up: **Docker** (`linux/arm64`) + `qemu-system-aarch64`
-
----
-
-## Quick Start
+## 🛠️ Quick Start
 
 ### Building `ggcc`
 
@@ -90,7 +88,7 @@ cargo build --release
 
 The resulting compiler binary is located at `target/release/ggcc`.
 
-### Compiling a C Program
+### Compiling & Running a C Program
 
 ```bash
 cat > hello.c << 'EOF'
@@ -119,7 +117,7 @@ ggcc -I dir -DNAME[=val]         # Add include directory / define macro
 
 ---
 
-## Oracles and Verification Harness
+## 🧪 Oracles and Verification Harness
 
 ```bash
 # In-repo oracle suite (compile -> run -> diff stdout/exit)
@@ -138,7 +136,7 @@ ggcc -I dir -DNAME[=val]         # Add include directory / define macro
 
 ---
 
-## Compiling Real-World Projects
+## 🚀 Compiling Real-World Projects
 
 ### Linux Kernel 6.9 (Stage C1)
 
@@ -161,7 +159,7 @@ CC=$PWD/target/release/ggcc third_party/real/lua/build.sh test
 
 ---
 
-## Repository Layout
+## 📁 Repository Layout
 
 ```
 src/                     Clean-room C compiler (Rust)
@@ -187,7 +185,7 @@ tests/                  C regression test cases
 
 ---
 
-## Documentation
+## 📄 Documentation
 
 - [`DESIGN_DOC.md`](DESIGN_DOC.md): Detailed compiler architecture, type system, and AST codegen layout.
 - [`BUILDING_LINUX.txt`](BUILDING_LINUX.txt): Step-by-step guide for compiling Linux Kernel 6.9 with `ggcc`.
@@ -195,6 +193,6 @@ tests/                  C regression test cases
 
 ---
 
-## License
+## ⚖️ License
 
 This project is licensed under the [MIT License](LICENSE).
