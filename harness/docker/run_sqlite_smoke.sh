@@ -2,8 +2,8 @@
 # Stage C2: attempt SQLite amalgamation with host-produced Linux asm (no external C on .c).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SCRATCH="${SCRATCH:-/tmp/ggcc-scratch}"
-GGCC="${GGCC:-$ROOT/target/release/ggcc}"
+SCRATCH="${SCRATCH:-/tmp/acc-scratch}"
+ACC="${ACC_BIN:-$ROOT/target/release/acc}"
 SQL="$ROOT/third_party/stage_c/sqlite"
 mkdir -p "$SCRATCH/sqlite"
 # Compile shell + amalgamation is multi-file; for smoke: one-file program using sqlite3
@@ -26,16 +26,16 @@ C
 cp "$SQL/sqlite3.h" "$SCRATCH/sqlite/" 2>/dev/null || true
 # Try compiling amalgamation alone first
 set +e
-"$GGCC" --target-os linux -S -o "$SCRATCH/sqlite/sqlite3.s" "$SQL/sqlite3.c" 2>"$SCRATCH/sqlite/sqlite3_err.txt"
+"$ACC" --target-os linux -S -o "$SCRATCH/sqlite/sqlite3.s" "$SQL/sqlite3.c" 2>"$SCRATCH/sqlite/sqlite3_err.txt"
 ec1=$?
-"$GGCC" --target-os linux -S -o "$SCRATCH/sqlite/smain.s" "$SCRATCH/sqlite/smain.c" 2>"$SCRATCH/sqlite/smain_err.txt"
+"$ACC" --target-os linux -S -o "$SCRATCH/sqlite/smain.s" "$SCRATCH/sqlite/smain.c" 2>"$SCRATCH/sqlite/smain_err.txt"
 ec2=$?
-echo "ggcc_sqlite3_s_ec=$ec1"
-echo "ggcc_smain_s_ec=$ec2"
+echo "acc_sqlite3_s_ec=$ec1"
+echo "acc_smain_s_ec=$ec2"
 head -20 "$SCRATCH/sqlite/sqlite3_err.txt"
 head -20 "$SCRATCH/sqlite/smain_err.txt"
 # If both .s exist, assemble in docker
 if [[ $ec1 -eq 0 && $ec2 -eq 0 ]]; then
-  docker run --rm -v "$SCRATCH/sqlite":/w -w /w ggcc-linux \
+  docker run --rm -v "$SCRATCH/sqlite":/w -w /w acc-linux \
     bash -lc 'cc -o smoke smain.s sqlite3.s -lm && ./smoke'
 fi

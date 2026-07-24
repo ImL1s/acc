@@ -475,6 +475,15 @@ pub fn preprocess_with_options_arch(
     macros.insert("S_IRUSR".into(), MacroBody::Object("256".into()));
     macros.insert("S_IWUSR".into(), MacroBody::Object("128".into()));
     macros.insert("S_IXUSR".into(), MacroBody::Object("64".into()));
+    macros.insert("S_IRWXU".into(), MacroBody::Object("448".into())); // 0700
+    macros.insert("S_IRGRP".into(), MacroBody::Object("32".into()));
+    macros.insert("S_IWGRP".into(), MacroBody::Object("16".into()));
+    macros.insert("S_IXGRP".into(), MacroBody::Object("8".into()));
+    macros.insert("S_IRWXG".into(), MacroBody::Object("56".into())); // 0070
+    macros.insert("S_IROTH".into(), MacroBody::Object("4".into()));
+    macros.insert("S_IWOTH".into(), MacroBody::Object("2".into()));
+    macros.insert("S_IXOTH".into(), MacroBody::Object("1".into()));
+    macros.insert("S_IRWXO".into(), MacroBody::Object("7".into())); // 0007
     // mode test macros (function-like)
     macros.insert(
         "S_ISDIR".into(),
@@ -648,11 +657,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("__SIZEOF_LONG__".into(), MacroBody::Object("8".into()));
     // Kernel uapi/linux/types.h gates __u128 on this (cmpxchg128 etc.).
     macros.insert("__SIZEOF_INT128__".into(), MacroBody::Object("16".into()));
-    // stdint/stddef limits. ggcc uses signed idiv for `/`, so SIZE_MAX must
-    // fit signed 64-bit or `SIZE_MAX/2` collapses to 0 (redis zmalloc OOM).
-    // 2^63-1 is correct for SSIZE_MAX/PTRDIFF and safe for size checks.
-    macros.insert("SIZE_MAX".into(), MacroBody::Object("9223372036854775807UL".into()));
-    macros.insert("UINT64_MAX".into(), MacroBody::Object("9223372036854775807ULL".into()));
+    // True unsigned maxima via cast so soft's IntLit path cannot lose the U
+    // suffix and signed-idiv SIZE_MAX/2 to 0 (redis) or cmpl-lie (postgres).
+    macros.insert("SIZE_MAX".into(), MacroBody::Object("((size_t)-1)".into()));
+    macros.insert("UINT64_MAX".into(), MacroBody::Object("((unsigned long long)-1)".into()));
     macros.insert("UINT32_MAX".into(), MacroBody::Object("4294967295U".into()));
     macros.insert("INT64_MAX".into(), MacroBody::Object("9223372036854775807LL".into()));
     macros.insert("INT32_MAX".into(), MacroBody::Object("2147483647".into()));
@@ -767,12 +775,15 @@ pub fn preprocess_with_options_arch(
     macros.insert("S_IRUSR".into(), MacroBody::Object("256".into()));
     macros.insert("S_IWUSR".into(), MacroBody::Object("128".into()));
     macros.insert("S_IXUSR".into(), MacroBody::Object("64".into()));
+    macros.insert("S_IRWXU".into(), MacroBody::Object("448".into())); // 0700 — postgres PG_DIR_MODE_OWNER
     macros.insert("S_IRGRP".into(), MacroBody::Object("32".into()));
     macros.insert("S_IWGRP".into(), MacroBody::Object("16".into()));
     macros.insert("S_IXGRP".into(), MacroBody::Object("8".into()));
+    macros.insert("S_IRWXG".into(), MacroBody::Object("56".into())); // 0070
     macros.insert("S_IROTH".into(), MacroBody::Object("4".into()));
     macros.insert("S_IWOTH".into(), MacroBody::Object("2".into()));
     macros.insert("S_IXOTH".into(), MacroBody::Object("1".into()));
+    macros.insert("S_IRWXO".into(), MacroBody::Object("7".into())); // 0007
     macros.insert("S_IFMT".into(), MacroBody::Object("61440".into()));
     macros.insert("S_IFREG".into(), MacroBody::Object("32768".into()));
     macros.insert("S_IFDIR".into(), MacroBody::Object("16384".into()));
@@ -904,7 +915,7 @@ pub fn preprocess_with_options_arch(
         // `__weak` → `__attribute__((__weak__))` it would be erased below.
         macros.insert(
             "__weak".into(),
-            MacroBody::Object("__ggcc_weak_attr".into()),
+            MacroBody::Object("__acc_weak_attr".into()),
         );
         macros.insert(
             "__attribute__".into(),
@@ -943,7 +954,9 @@ pub fn preprocess_with_options_arch(
             "notrace",
             "__notrace",
             "__sched",
-            "__always_inline",
+            // NOT "__always_inline" — must expand to `inline` so parser sets
+            // is_static (saw_inline) and avoids .globl multi-def across TUs
+            // (`extern __always_inline native_save_fl` in asm/irqflags.h).
             "__gnu_inline",
             "__cold",
             "__hot",
@@ -962,6 +975,11 @@ pub fn preprocess_with_options_arch(
         ] {
             macros.insert(q.into(), MacroBody::Object("".into()));
         }
+        // Preserve inline semantics for linkage (see native_save_fl multi-def).
+        macros.insert(
+            "__always_inline".into(),
+            MacroBody::Object("inline".into()),
+        );
         // EXPORT_SYMBOL* expand to multi-line asm/section soup that our asm
         // parser cannot consume; kbuild linking does not need them for .o
         // generation under Stage C fail-drive (symbols stay global via .globl).
@@ -991,14 +1009,14 @@ pub fn preprocess_with_options_arch(
             );
         }
     }
-    // stdarg: ggcc uses a char* cursor into the GP regsave for internal
+    // stdarg: acc uses a char* cursor into the GP regsave for internal
     // va_arg (sqlite3_mprintf etc.). Linux libc v*printf needs AAPCS64
     // va_list — codegen converts at the call site.
     macros.insert(
         "va_start".into(),
         MacroBody::Function {
             params: vec!["ap".into(), "last".into()],
-            body: "((void)(last), (ap) = __ggcc_va_start())".into(),
+            body: "((void)(last), (ap) = __acc_va_start())".into(),
             variadic: false,
         },
     );
@@ -1007,8 +1025,8 @@ pub fn preprocess_with_options_arch(
         MacroBody::Function {
             params: vec!["ap".into(), "type".into()],
             // type is substituted textually (may include `*`).
-            // Codegen rewrites *(double*)__ggcc_va_arg to the VR walker.
-            body: "(*(type*)__ggcc_va_arg(&(ap)))".into(),
+            // Codegen rewrites *(double*)__acc_va_arg to the VR walker.
+            body: "(*(type*)__acc_va_arg(&(ap)))".into(),
             variadic: false,
         },
     );
@@ -1070,15 +1088,145 @@ pub fn preprocess_with_options_arch(
         "PTHREAD_CREATE_DETACHED".into(),
         MacroBody::Object("1".into()),
     );
+    // setjmp.h is silently skipped when /usr/include is absent; expand to glibc
+    // entry points so `sigsetjmp(env,1)` does not become an external call.
+    macros.insert(
+        "setjmp".into(),
+        MacroBody::Function {
+            params: vec!["env".into()],
+            body: "__setjmp((env))".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "sigsetjmp".into(),
+        MacroBody::Function {
+            params: vec!["env".into(), "savemask".into()],
+            body: "__sigsetjmp((env), (savemask))".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "longjmp".into(),
+        MacroBody::Function {
+            params: vec!["env".into(), "val".into()],
+            body: "_longjmp((env), (val))".into(),
+            variadic: false,
+        },
+    );
+    // glibc exports `siglongjmp` / `_longjmp` / `longjmp` but NOT `__siglongjmp`
+    // (unlike `__sigsetjmp`). Parenthesize the callee so the function-like
+    // macro does not recurse: `(siglongjmp)(env, val)`.
+    // IMPORTANT: do NOT wrap args as `((env), (val))` — that turns a later
+    // prototype `void siglongjmp(sigjmp_buf, int);` into the invalid
+    // `void (siglongjmp)((sigjmp_buf), (int));` and soft-skips the decl.
+    macros.insert(
+        "siglongjmp".into(),
+        MacroBody::Function {
+            params: vec!["env".into(), "val".into()],
+            body: "(siglongjmp)(env, val)".into(),
+            variadic: false,
+        },
+    );
+    // Soft IPv6 / select macros when <netinet/in.h> / <sys/select.h> are skipped.
+    macros.insert(
+        "IN6_IS_ADDR_UNSPECIFIED".into(),
+        MacroBody::Function {
+            params: vec!["a".into()],
+            body: "(((const unsigned long *)(a))[0]==0 && ((const unsigned long *)(a))[1]==0)"
+                .into(),
+            variadic: false,
+        },
+    );
+    macros.insert("FD_SETSIZE".into(), MacroBody::Object("1024".into()));
+    macros.insert(
+        "__ACC_NFDBITS".into(),
+        MacroBody::Object("((int)(8*sizeof(unsigned long)))".into()),
+    );
+    macros.insert(
+        "FD_ZERO".into(),
+        MacroBody::Function {
+            params: vec!["s".into()],
+            body: "do { unsigned long *_b=(s)->__fds_bits; int _i; for(_i=0;_i<(int)(sizeof(*(s))/sizeof(unsigned long));_i++) _b[_i]=0; } while(0)".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "FD_SET".into(),
+        MacroBody::Function {
+            params: vec!["d".into(), "s".into()],
+            body: "((void)(((s)->__fds_bits[((d)/__ACC_NFDBITS)]) |= (1UL<<((unsigned)(d)%(unsigned)__ACC_NFDBITS))))".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "FD_CLR".into(),
+        MacroBody::Function {
+            params: vec!["d".into(), "s".into()],
+            body: "((void)(((s)->__fds_bits[((d)/__ACC_NFDBITS)]) &= ~(1UL<<((unsigned)(d)%(unsigned)__ACC_NFDBITS))))".into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "FD_ISSET".into(),
+        MacroBody::Function {
+            params: vec!["d".into(), "s".into()],
+            body: "(!!(((s)->__fds_bits[((d)/__ACC_NFDBITS)]) & (1UL<<((unsigned)(d)%(unsigned)__ACC_NFDBITS))))".into(),
+            variadic: false,
+        },
+    );
     // zlib — SQLite zipfile.c uses z_stream / inflateInit2 when <zlib.h> is
-    // silently skipped (ggcc has no default /usr/include). Soft macros mirror
+    // silently skipped (acc has no default /usr/include). Soft macros mirror
     // zlib.h Init2 wrappers so emitted calls link to libz (inflateInit2_…).
     macros.insert("Z_OK".into(), MacroBody::Object("0".into()));
     macros.insert("Z_STREAM_END".into(), MacroBody::Object("1".into()));
+    macros.insert("Z_STREAM_ERROR".into(), MacroBody::Object("(-2)".into()));
     macros.insert("Z_NO_FLUSH".into(), MacroBody::Object("0".into()));
     macros.insert("Z_FINISH".into(), MacroBody::Object("4".into()));
     macros.insert("Z_DEFLATED".into(), MacroBody::Object("8".into()));
     macros.insert("Z_DEFAULT_STRATEGY".into(), MacroBody::Object("0".into()));
+    // zlib default compression level (−1); postgres compression.c / basebackup.
+    macros.insert("Z_DEFAULT_COMPRESSION".into(), MacroBody::Object("(-1)".into()));
+    macros.insert("Z_NULL".into(), MacroBody::Object("0".into()));
+    // SysV IPC (sys/ipc.h) — postgres shmem/dsm without system cpp.
+    macros.insert("IPC_RMID".into(), MacroBody::Object("0".into()));
+    macros.insert("IPC_SET".into(), MacroBody::Object("1".into()));
+    macros.insert("IPC_STAT".into(), MacroBody::Object("2".into()));
+    macros.insert("IPC_INFO".into(), MacroBody::Object("3".into()));
+    macros.insert("IPC_CREAT".into(), MacroBody::Object("512".into())); // 01000
+    macros.insert("IPC_EXCL".into(), MacroBody::Object("1024".into())); // 02000
+    macros.insert("IPC_NOWAIT".into(), MacroBody::Object("2048".into())); // 04000
+    macros.insert("IPC_PRIVATE".into(), MacroBody::Object("0".into()));
+    // Linux signal / signalfd / epoll flags used by latch.c.
+    macros.insert("SIGURG".into(), MacroBody::Object("23".into()));
+    macros.insert("SFD_CLOEXEC".into(), MacroBody::Object("524288".into())); // 02000000
+    macros.insert("SFD_NONBLOCK".into(), MacroBody::Object("2048".into())); // 00004000
+    macros.insert("EPOLL_CLOEXEC".into(), MacroBody::Object("524288".into()));
+    // locale.h mask bits (glibc): (1 << LC_*).
+    macros.insert("LC_CTYPE".into(), MacroBody::Object("0".into()));
+    macros.insert("LC_NUMERIC".into(), MacroBody::Object("1".into()));
+    macros.insert("LC_TIME".into(), MacroBody::Object("2".into()));
+    macros.insert("LC_COLLATE".into(), MacroBody::Object("3".into()));
+    macros.insert("LC_MONETARY".into(), MacroBody::Object("4".into()));
+    macros.insert("LC_MESSAGES".into(), MacroBody::Object("5".into()));
+    macros.insert("LC_ALL".into(), MacroBody::Object("6".into()));
+    macros.insert("LC_CTYPE_MASK".into(), MacroBody::Object("1".into()));
+    macros.insert("LC_NUMERIC_MASK".into(), MacroBody::Object("2".into()));
+    macros.insert("LC_TIME_MASK".into(), MacroBody::Object("4".into()));
+    macros.insert("LC_COLLATE_MASK".into(), MacroBody::Object("8".into()));
+    macros.insert("LC_MONETARY_MASK".into(), MacroBody::Object("16".into()));
+    macros.insert("LC_MESSAGES_MASK".into(), MacroBody::Object("32".into()));
+    macros.insert("LC_ALL_MASK".into(), MacroBody::Object("63".into()));
+    // termios (sprompt.c / simple_prompt) — without system cpp.
+    macros.insert("ECHO".into(), MacroBody::Object("8".into())); // 0000010
+    macros.insert("ECHOE".into(), MacroBody::Object("16".into()));
+    macros.insert("ECHOK".into(), MacroBody::Object("32".into()));
+    macros.insert("ECHONL".into(), MacroBody::Object("64".into()));
+    macros.insert("ICANON".into(), MacroBody::Object("2".into()));
+    macros.insert("ISIG".into(), MacroBody::Object("1".into()));
+    macros.insert("TCSANOW".into(), MacroBody::Object("0".into()));
+    macros.insert("TCSADRAIN".into(), MacroBody::Object("1".into()));
+    macros.insert("TCSAFLUSH".into(), MacroBody::Object("2".into()));
     macros.insert("ZLIB_VERSION".into(), MacroBody::Object("\"1.2.11\"".into()));
     macros.insert(
         "inflateInit2".into(),
@@ -1086,6 +1234,14 @@ pub fn preprocess_with_options_arch(
             params: vec!["strm".into(), "windowBits".into()],
             body: "inflateInit2_((strm), (windowBits), ZLIB_VERSION, (int)sizeof(z_stream))"
                 .into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "inflateInit".into(),
+        MacroBody::Function {
+            params: vec!["strm".into()],
+            body: "inflateInit2_((strm), 15, ZLIB_VERSION, (int)sizeof(z_stream))".into(),
             variadic: false,
         },
     );
@@ -1101,6 +1257,15 @@ pub fn preprocess_with_options_arch(
                 "strategy".into(),
             ],
             body: "deflateInit2_((strm), (level), (method), (windowBits), (memLevel), (strategy), ZLIB_VERSION, (int)sizeof(z_stream))"
+                .into(),
+            variadic: false,
+        },
+    );
+    macros.insert(
+        "deflateInit".into(),
+        MacroBody::Function {
+            params: vec!["strm".into(), "level".into()],
+            body: "deflateInit2_((strm), (level), 8, 15, 8, 0, ZLIB_VERSION, (int)sizeof(z_stream))"
                 .into(),
             variadic: false,
         },
@@ -1144,6 +1309,16 @@ pub fn preprocess_with_options_arch(
          typedef struct { long __s[7]; } pthread_rwlock_t;\n\
          typedef int jmp_buf[48];\n\
          typedef int sigjmp_buf[48];\n\
+         int __setjmp(jmp_buf __env);\n\
+         int __sigsetjmp(sigjmp_buf __env, int __savemask);\n\
+         void _longjmp(jmp_buf __env, int __val);\n\
+         void siglongjmp(sigjmp_buf __env, int __val);\n\
+         #ifndef setjmp\n\
+         #define setjmp(env) __setjmp(env)\n\
+         #define sigsetjmp(env, savemask) __sigsetjmp((env), (savemask))\n\
+         #define longjmp(env, val) _longjmp((env), (val))\n\
+         #define siglongjmp(env, val) (siglongjmp)(env, val)\n\
+         #endif\n\
          int getpagesize(void);\n\
          int getpid(void);\n\
          /* zlib soft header (guarded): SQLite zipfileInflate/Deflate need z_stream
@@ -1158,6 +1333,8 @@ pub fn preprocess_with_options_arch(
            char *msg; void *state; void *zalloc; void *zfree; void *opaque;\n\
            int data_type; unsigned long adler; unsigned long reserved;\n\
          } z_stream;\n\
+         typedef z_stream *z_streamp;\n\
+         typedef struct gzFile_s *gzFile;\n\
          int inflateInit2_(z_stream *, int, const char *, int);\n\
          int inflate(z_stream *, int);\n\
          int inflateEnd(z_stream *);\n\
@@ -1166,6 +1343,13 @@ pub fn preprocess_with_options_arch(
          int deflate(z_stream *, int);\n\
          int deflateEnd(z_stream *);\n\
          unsigned long crc32(unsigned long, const Bytef *, unsigned);\n\
+         gzFile gzopen(const char *, const char *);\n\
+         gzFile gzdopen(int, const char *);\n\
+         int gzread(gzFile, void *, unsigned);\n\
+         int gzwrite(gzFile, const void *, unsigned);\n\
+         int gzclose(gzFile);\n\
+         int gzeof(gzFile);\n\
+         const char *gzerror(gzFile, int *);\n\
          #endif\n"
     } else {
         "typedef struct { char __s[64]; } pthread_mutex_t;\n\
@@ -1179,6 +1363,16 @@ pub fn preprocess_with_options_arch(
          typedef int pthread_rwlock_t;\n\
          typedef int jmp_buf[48];\n\
          typedef int sigjmp_buf[48];\n\
+         int __setjmp(jmp_buf __env);\n\
+         int __sigsetjmp(sigjmp_buf __env, int __savemask);\n\
+         void _longjmp(jmp_buf __env, int __val);\n\
+         void siglongjmp(sigjmp_buf __env, int __val);\n\
+         #ifndef setjmp\n\
+         #define setjmp(env) __setjmp(env)\n\
+         #define sigsetjmp(env, savemask) __sigsetjmp((env), (savemask))\n\
+         #define longjmp(env, val) _longjmp((env), (val))\n\
+         #define siglongjmp(env, val) (siglongjmp)(env, val)\n\
+         #endif\n\
          typedef unsigned int task_t;\n\
          typedef unsigned int mach_port_t;\n\
          typedef int mach_msg_type_number_t;\n\
@@ -1192,6 +1386,35 @@ pub fn preprocess_with_options_arch(
          int proc_pidinfo(int, int, unsigned long long, void *, int);\n\
          int getpagesize(void);\n\
          int getpid(void);\n"
+    };
+    let nlink_and_stat = match arch {
+        "x86_64" | "x86" | "amd64" => {
+            /* glibc x86_64: nlink_t is 64-bit; field order is ino,nlink,mode (not mode,nlink). */
+            "/* Linux x86_64: nlink_t is unsigned long; wrong size/order breaks S_ISREG. */\n\
+             typedef unsigned long nlink_t;\n\
+             /* glibc x86_64 struct stat (sizeof 144): st_nlink@16, st_mode@24, st_size@48. */\n\
+             struct stat {\n\
+               dev_t st_dev; ino_t st_ino; nlink_t st_nlink; mode_t st_mode;\n\
+               uid_t st_uid; gid_t st_gid; int __pad0;\n\
+               dev_t st_rdev; off_t st_size; blksize_t st_blksize; blkcnt_t st_blocks;\n\
+               struct timespec st_atim; struct timespec st_mtim; struct timespec st_ctim;\n\
+               long __glibc_reserved[3];\n\
+             };\n"
+        }
+        _ => {
+            "/* Linux aarch64: nlink_t is 32-bit; wrong size shifts st_mode reads. */\n\
+             typedef unsigned int nlink_t;\n\
+             /* Layout matches glibc aarch64 struct stat (sizeof 128): st_mode@16,\n\
+              * st_size@48, timespec times. libc lstat fills this; wrong layout made\n\
+              * S_ISLNK/size checks and SQLite unix VFS misbehave. */\n\
+             struct stat {\n\
+               dev_t st_dev; ino_t st_ino; mode_t st_mode; nlink_t st_nlink;\n\
+               uid_t st_uid; gid_t st_gid; dev_t st_rdev; dev_t __st_pad1;\n\
+               off_t st_size; blksize_t st_blksize; int __st_pad2; blkcnt_t st_blocks;\n\
+               struct timespec st_atim; struct timespec st_mtim; struct timespec st_ctim;\n\
+               int __glibc_reserved[2];\n\
+             };\n"
+        }
     };
     let out_prefix = format!(
         "typedef int int32_t;\n\
@@ -1208,14 +1431,23 @@ pub fn preprocess_with_options_arch(
          typedef unsigned long uint64_t;\n\
          typedef unsigned long long uintmax_t;\n\
          typedef long long intmax_t;\n\
+         /* wchar / BSD network types — needed when system <wchar.h>/<sys/types.h>
+          * typedefs are soft-skipped so casts like (wint_t) and decls like
+          * `u_int words[N]` still parse (postgres ts_locale / inet_net_ntop). */\n\
+         typedef int wchar_t;\n\
+         typedef unsigned int wint_t;\n\
+         typedef unsigned char u_char;\n\
+         typedef unsigned short u_short;\n\
+         typedef unsigned int u_int;\n\
+         typedef unsigned long u_long;\n\
          /* char* cursor into GP regsave; VR (d0..d7) tracked via codegen\n\
-          * side state for AAPCS64 system-gcc callers (see __ggcc_va_arg_fp). */\n\
+          * side state for AAPCS64 system-gcc callers (see __acc_va_arg_fp). */\n\
          typedef char *va_list;\n\
          /* errno: Linux userspace uses __errno_location (codegen); keep a bare\n\
           * declaration for kernel soft/freestanding. Do NOT #define errno — it\n\
           * breaks `int foo(int errno)` parameter names in kernel headers. */\n\
          extern int errno;\n\
-         extern int __ggcc_errno;\n\
+         extern int __acc_errno;\n\
          int *__errno_location(void);\n\
          typedef long off_t;\n\
          typedef int pid_t;\n\
@@ -1226,8 +1458,6 @@ pub fn preprocess_with_options_arch(
          typedef unsigned long ino_t;\n\
          typedef long blksize_t;\n\
          typedef long blkcnt_t;\n\
-         /* Linux aarch64/x86_64: nlink_t is 32-bit; wrong size shifts st_mode reads. */\n\
-         typedef unsigned int nlink_t;\n\
          typedef long clock_t;\n\
          typedef int socklen_t;\n\
          typedef unsigned char uuid_t[16];\n\
@@ -1238,6 +1468,10 @@ pub fn preprocess_with_options_arch(
          typedef long suseconds_t;\n\
          struct timespec {{ time_t tv_sec; long tv_nsec; }};\n\
          struct timeval {{ time_t tv_sec; suseconds_t tv_usec; }};\n\
+         /* Linux: setitimer(2). Missing layout zeroed only 8B and wrote
+          * tv_usec at the wrong offset -> EINVAL enabling the real timer. */\n\
+         struct itimerval {{ struct timeval it_interval; struct timeval it_value; }};\n\
+         {nlink_and_stat}\
          struct tm {{\n\
            int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon;\n\
            int tm_year; int tm_wday; int tm_yday; int tm_isdst;\n\
@@ -1252,29 +1486,40 @@ pub fn preprocess_with_options_arch(
          struct dirent {{ ino_t d_ino; off_t d_off; unsigned short d_reclen;\n\
            unsigned char d_type; char d_name[256]; }};\n\
          typedef struct DIR DIR;\n\
-         /* Layout matches glibc aarch64 struct stat (sizeof 128): st_mode@16,\n\
-          * st_size@48, timespec times. libc lstat fills this; wrong layout made\n\
-          * S_ISLNK/size checks and SQLite unix VFS misbehave. */\n\
-         struct stat {{\n\
-           dev_t st_dev; ino_t st_ino; mode_t st_mode; nlink_t st_nlink;\n\
-           uid_t st_uid; gid_t st_gid; dev_t st_rdev; dev_t __st_pad1;\n\
-           off_t st_size; blksize_t st_blksize; int __st_pad2; blkcnt_t st_blocks;\n\
-           struct timespec st_atim; struct timespec st_mtim; struct timespec st_ctim;\n\
-           int __glibc_reserved[2];\n\
-         }};\n\
-         /* glibc aarch64 addrinfo sizeof=48: pad after ai_addrlen so ai_addr@24.
-          * Missing layout made Redis getaddrinfo results mis-read → socket()
+         /* glibc aarch64 addrinfo sizeof=48: pad after ai_addrlen so ai_addr@24.\n\
+          * Missing layout made Redis getaddrinfo results mis-read → socket()\n\
           * \"ai_socktype not supported\" and failed listen. */\n\
          typedef unsigned short sa_family_t;\n\
+         struct in_addr {{ unsigned int s_addr; }};\n\
+         struct in6_addr {{ unsigned char s6_addr[16]; }};\n\
          struct sockaddr {{ sa_family_t sa_family; char sa_data[14]; }};\n\
          struct sockaddr_in {{\n\
-           sa_family_t sin_family; unsigned short sin_port; unsigned int sin_addr;\n\
+           sa_family_t sin_family; unsigned short sin_port; struct in_addr sin_addr;\n\
            char sin_zero[8];\n\
          }};\n\
          struct sockaddr_in6 {{\n\
            sa_family_t sin6_family; unsigned short sin6_port; unsigned int sin6_flowinfo;\n\
-           unsigned char sin6_addr[16]; unsigned int sin6_scope_id;\n\
+           struct in6_addr sin6_addr; unsigned int sin6_scope_id;\n\
          }};\n\
+         /* select(2) fd_set — needed when <sys/select.h> is soft-skipped\n\
+          * (postgres ServerLoop / RADIUS auth). */\n\
+         #ifndef FD_SETSIZE\n\
+         #define FD_SETSIZE 1024\n\
+         #endif\n\
+         typedef struct {{\n\
+           unsigned long __fds_bits[(1024)/(8*sizeof(unsigned long))];\n\
+         }} fd_set;\n\
+         #ifndef FD_ZERO\n\
+         #define __ACC_NFDBITS ((int)(8*sizeof(unsigned long)))\n\
+         #define FD_ZERO(s) do {{ unsigned long *_b=(s)->__fds_bits; int _i; for(_i=0;_i<(int)(sizeof(*(s))/sizeof(unsigned long));_i++) _b[_i]=0; }} while(0)\n\
+         #define FD_SET(d,s) ((void)(((s)->__fds_bits[((d)/__ACC_NFDBITS)]) |= (1UL<<((unsigned)(d)%(unsigned)__ACC_NFDBITS))))\n\
+         #define FD_CLR(d,s) ((void)(((s)->__fds_bits[((d)/__ACC_NFDBITS)]) &= ~(1UL<<((unsigned)(d)%(unsigned)__ACC_NFDBITS))))\n\
+         #define FD_ISSET(d,s) (!!(((s)->__fds_bits[((d)/__ACC_NFDBITS)]) & (1UL<<((unsigned)(d)%(unsigned)__ACC_NFDBITS))))\n\
+         #endif\n\
+         /* IPv6 addr classifiers — <netinet/in.h> often soft-skipped. */\n\
+         #ifndef IN6_IS_ADDR_UNSPECIFIED\n\
+         #define IN6_IS_ADDR_UNSPECIFIED(a) (((const unsigned long *)(a))[0]==0 && ((const unsigned long *)(a))[1]==0)\n\
+         #endif\n\
          struct addrinfo {{\n\
            int ai_flags; int ai_family; int ai_socktype; int ai_protocol;\n\
            socklen_t ai_addrlen; int __ai_pad;\n\
@@ -1291,25 +1536,44 @@ pub fn preprocess_with_options_arch(
          }};\n\
          {stdio_syms}\
          {pthread_stubs}"
+    ,
+        nlink_and_stat = nlink_and_stat,
+        stdio_syms = stdio_syms,
+        pthread_stubs = pthread_stubs,
     );
     let mut out = out_prefix;
-    preprocess_into(
-        src,
-        include_dir,
-        extra_includes,
-        &mut macros,
-        &mut out,
-        true,
-        source_name,
-    )?;
     if for_linux {
-        out = soften_kernel_pp_residue(&out);
+        // Kernel-only post-PP passes mutate expanded source without full string
+        // awareness; running them on PostgreSQL/Redis/SQLite breaks string
+        // escape state (explain.c: bare `\` at column ~581 after octal paths).
+        preprocess_into(
+            src,
+            include_dir,
+            extra_includes,
+            &mut macros,
+            &mut out,
+            true,
+            source_name,
+        )?;
+        if out.contains("__KERNEL__") {
+            out = soften_kernel_pp_residue(&out);
+            out = strip_expanded_export_soup(&out);
+            out = break_glued_kernel_lines(&out);
+        }
         out = soften_kernel_builtins(&out);
-        out = strip_expanded_export_soup(&out);
-        // Kernel headers glue entire functions onto one physical line after PP;
-        // break after `;` / `}` outside strings so lex/parse stay O(n).
-        out = break_glued_kernel_lines(&out);
+    } else {
+        preprocess_into(
+            src,
+            include_dir,
+            extra_includes,
+            &mut macros,
+            &mut out,
+            true,
+            source_name,
+        )?;
     }
+    // Macro expansion can reintroduce `\`+newline after per-chunk splicing.
+    out = splice_backslash_newlines(&out);
     Ok(out)
 }
 
@@ -1729,12 +1993,88 @@ fn soften_kernel_pp_residue(src: &str) -> String {
 
 /// Soft-replace heavy GCC builtins left after kernel header expansion.
 /// These explode into multi-KB expressions that thrash the parser on large TUs.
+/// Skips string/char/comment regions so userspace sources (PostgreSQL explain.c)
+/// keep escape sequences intact.
 fn soften_kernel_builtins(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
     let mut i = 0usize;
+    let mut in_str = false;
+    let mut in_chr = false;
+    let mut in_block = false;
+    let mut in_line = false;
     while i < bytes.len() {
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+        let c = bytes[i];
+        if in_line {
+            out.push(c as char);
+            if c == b'\n' {
+                in_line = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block {
+            out.push(c as char);
+            if c == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                out.push('/');
+                i += 2;
+                in_block = false;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_str {
+            out.push(c as char);
+            if c == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_chr {
+            out.push(c as char);
+            if c == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if c == b'\'' {
+                in_chr = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            out.push_str("/*");
+            i += 2;
+            in_block = true;
+            continue;
+        }
+        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            out.push_str("//");
+            i += 2;
+            in_line = true;
+            continue;
+        }
+        if c == b'"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if c == b'\'' {
+            in_chr = true;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == b'_' {
             let start = i;
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -1748,9 +2088,9 @@ fn soften_kernel_builtins(src: &str) -> String {
                 // DEFINE("i"(…)) need the constant branch. Soft-0 forced
                 // NR_CPUS_BITS=xzr in bounds.h and broke page-flag masks.
                 // choose_expr(c,a,b) → a (first alternative); good enough for soft
-                "__builtin_choose_expr" => Some("__ggcc_choose"),
+                "__builtin_choose_expr" => Some("__acc_choose"),
                 // expect(x,c) → (x)
-                "__builtin_expect" => Some("__ggcc_expect"),
+                "__builtin_expect" => Some("__acc_expect"),
                 // noreturn sink — soft to no-op expression (kernel heads use it)
                 "__builtin_unreachable" => Some("((void)0)"),
                 // Map freestanding builtins to libc/kernel helpers (compressed boot
@@ -1762,14 +2102,14 @@ fn soften_kernel_builtins(src: &str) -> String {
                 "__builtin_strlen" => Some("strlen"),
                 // Soft: map bswap builtins to freestanding helpers (emitted by codegen)
                 // so kernel crc32/etc. does not leave undef __builtin_bswap* at link.
-                "__builtin_bswap16" => Some("__ggcc_bswap16"),
-                "__builtin_bswap32" => Some("__ggcc_bswap32"),
-                "__builtin_bswap64" => Some("__ggcc_bswap64"),
+                "__builtin_bswap16" => Some("__acc_bswap16"),
+                "__builtin_bswap32" => Some("__acc_bswap32"),
+                "__builtin_bswap64" => Some("__acc_bswap64"),
                 // C11 _Generic is multi-assoc type switch; kernel uses it in
                 // READ_ONCE-style helpers. Soft → 0 to avoid parse thrash.
                 "_Generic" => Some("0"),
                 // typeof(expr)/typeof(type) in kernel READ_ONCE/percpu — soft to long.
-                "typeof" | "__typeof" | "__typeof__" => Some("__ggcc_typeof"),
+                "typeof" | "__typeof" | "__typeof__" => Some("__acc_typeof"),
                 _ => None,
             };
             if let Some(rep) = soft {
@@ -1778,7 +2118,7 @@ fn soften_kernel_builtins(src: &str) -> String {
                     i += 1;
                 }
                 if i < bytes.len() && bytes[i] == b'(' {
-                    if rep == "__ggcc_choose" {
+                    if rep == "__acc_choose" {
                         // keep first non-condition arg: choose_expr(c, a, b) → (a)
                         let args_start = i + 1;
                         let after = skip_balanced_parens(bytes, i);
@@ -1799,7 +2139,7 @@ fn soften_kernel_builtins(src: &str) -> String {
                         i = after;
                         continue;
                     }
-                    if rep == "__ggcc_expect" {
+                    if rep == "__acc_expect" {
                         // expect(x, c) → (x)
                         let args_start = i + 1;
                         let after = skip_balanced_parens(bytes, i);
@@ -1814,7 +2154,7 @@ fn soften_kernel_builtins(src: &str) -> String {
                         i = after;
                         continue;
                     }
-                    if rep == "__ggcc_typeof" {
+                    if rep == "__acc_typeof" {
                         // typeof(T) / typeof(expr) → long (size/align soft path)
                         i = skip_balanced_parens(bytes, i);
                         out.push_str("long");
@@ -1947,6 +2287,23 @@ fn preprocess_into(
                         }
                     }
                     if found.is_none() {
+                        if let Some(stub) = linux_quoted_system_include_stub(path) {
+                            preprocess_into(
+                                stub,
+                                include_dir,
+                                extra_includes,
+                                macros,
+                                out,
+                                emit_body,
+                                source_name,
+                            )?;
+                            continue;
+                        }
+                        // Postgres (and others) quote system headers; soft-skip
+                        // like `<angle>` when no stub — avoid hard-failing install.
+                        if is_quoted_systemish_include(path) {
+                            continue;
+                        }
                         return Err(format!("#include \"{path}\" not found"));
                     }
                 } else if let Some(path) = rest.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
@@ -1975,6 +2332,18 @@ fn preprocess_into(
                     // Missing system headers: skip silently (legacy stub behavior)
                     // unless -I made it look like a project header under linux/.
                     if found.is_none() {
+                        if let Some(stub) = linux_angle_include_stub(path) {
+                            preprocess_into(
+                                stub,
+                                include_dir,
+                                extra_includes,
+                                macros,
+                                out,
+                                emit_body,
+                                source_name,
+                            )?;
+                            continue;
+                        }
                         continue;
                     }
                 } else {
@@ -2113,76 +2482,96 @@ fn preprocess_into(
         // Join physical lines until macro-arg parentheses balance (C allows
         // multi-line invocations without backslash). Kernel `struct_group(...)`
         // spans `#ifdef` blocks; process those directives instead of stopping.
+        // Also join `FOO\n (args)` when FOO is a function-like macro (postgres
+        // PredicateLockHashCodeFromTargetHashCode).
         let mut logical = trimmed.to_string();
-        while paren_balance_outside_strings(&logical) > 0 && i < lines.len() {
-            let next_raw = strip_line_comment_keep_string(lines[i]);
-            let next = next_raw.trim().to_string();
-            i += 1;
-            if next.starts_with('#') {
-                // Apply conditional directives so later members of the still-open
-                // invocation are correctly included/excluded.
-                let dir = next.trim_start_matches('#').trim_start();
-                if dir.starts_with("ifdef") {
-                    let name = dir["ifdef".len()..].trim();
-                    let parent = is_active(&cond_stack);
-                    let cur = parent && macro_is_defined(name, macros);
-                    cond_stack.push(CondFrame {
-                        parent_active: parent,
-                        branch_taken: cur,
-                        active: cur,
-                    });
-                } else if dir.starts_with("ifndef") {
-                    let name = dir["ifndef".len()..].trim();
-                    let parent = is_active(&cond_stack);
-                    let cur = parent && !macro_is_defined(name, macros);
-                    cond_stack.push(CondFrame {
-                        parent_active: parent,
-                        branch_taken: cur,
-                        active: cur,
-                    });
-                } else if dir.starts_with("if")
-                    && !dir.starts_with("ifdef")
-                    && !dir.starts_with("ifndef")
-                {
-                    let expr = dir["if".len()..].trim();
-                    let parent = is_active(&cond_stack);
-                    let v = eval_pp_expr(expr, macros, line_no, source_name).unwrap_or(0);
-                    let cur = parent && v != 0;
-                    cond_stack.push(CondFrame {
-                        parent_active: parent,
-                        branch_taken: cur,
-                        active: cur,
-                    });
-                } else if dir.starts_with("elif") {
-                    if let Some(frame) = cond_stack.last_mut() {
-                        if frame.branch_taken {
-                            frame.active = false;
-                        } else {
-                            let expr = dir["elif".len()..].trim();
-                            let v =
-                                eval_pp_expr(expr, macros, line_no, source_name).unwrap_or(0);
-                            let cur = frame.parent_active && v != 0;
-                            frame.branch_taken = cur;
+        loop {
+            while paren_balance_outside_strings(&logical) > 0 && i < lines.len() {
+                let next_raw = strip_line_comment_keep_string(lines[i]);
+                let next = next_raw.trim().to_string();
+                i += 1;
+                if next.starts_with('#') {
+                    // Apply conditional directives so later members of the still-open
+                    // invocation are correctly included/excluded.
+                    let dir = next.trim_start_matches('#').trim_start();
+                    if dir.starts_with("ifdef") {
+                        let name = dir["ifdef".len()..].trim();
+                        let parent = is_active(&cond_stack);
+                        let cur = parent && macro_is_defined(name, macros);
+                        cond_stack.push(CondFrame {
+                            parent_active: parent,
+                            branch_taken: cur,
+                            active: cur,
+                        });
+                    } else if dir.starts_with("ifndef") {
+                        let name = dir["ifndef".len()..].trim();
+                        let parent = is_active(&cond_stack);
+                        let cur = parent && !macro_is_defined(name, macros);
+                        cond_stack.push(CondFrame {
+                            parent_active: parent,
+                            branch_taken: cur,
+                            active: cur,
+                        });
+                    } else if dir.starts_with("if")
+                        && !dir.starts_with("ifdef")
+                        && !dir.starts_with("ifndef")
+                    {
+                        let expr = dir["if".len()..].trim();
+                        let parent = is_active(&cond_stack);
+                        let v = eval_pp_expr(expr, macros, line_no, source_name).unwrap_or(0);
+                        let cur = parent && v != 0;
+                        cond_stack.push(CondFrame {
+                            parent_active: parent,
+                            branch_taken: cur,
+                            active: cur,
+                        });
+                    } else if dir.starts_with("elif") {
+                        if let Some(frame) = cond_stack.last_mut() {
+                            if frame.branch_taken {
+                                frame.active = false;
+                            } else {
+                                let expr = dir["elif".len()..].trim();
+                                let v =
+                                    eval_pp_expr(expr, macros, line_no, source_name).unwrap_or(0);
+                                let cur = frame.parent_active && v != 0;
+                                frame.branch_taken = cur;
+                                frame.active = cur;
+                            }
+                        }
+                    } else if dir.starts_with("else") {
+                        if let Some(frame) = cond_stack.last_mut() {
+                            let cur = frame.parent_active && !frame.branch_taken;
+                            frame.branch_taken = frame.branch_taken || cur;
                             frame.active = cur;
                         }
+                    } else if dir.starts_with("endif") {
+                        cond_stack.pop();
                     }
-                } else if dir.starts_with("else") {
-                    if let Some(frame) = cond_stack.last_mut() {
-                        let cur = frame.parent_active && !frame.branch_taken;
-                        frame.branch_taken = frame.branch_taken || cur;
-                        frame.active = cur;
-                    }
-                } else if dir.starts_with("endif") {
-                    cond_stack.pop();
+                    // Other directives mid-arg: ignore
+                    continue;
                 }
-                // Other directives mid-arg: ignore
-                continue;
+                if !is_active(&cond_stack) {
+                    continue;
+                }
+                logical.push(' ');
+                logical.push_str(&next);
             }
-            if !is_active(&cond_stack) {
-                continue;
+            // `MACRO\n (args)` — name at EOL, opening paren on the next line.
+            if i < lines.len() {
+                if let Some(id) = trailing_identifier(logical.trim_end()) {
+                    if matches!(macros.get(id), Some(MacroBody::Function { .. })) {
+                        let next_raw = strip_line_comment_keep_string(lines[i]);
+                        let next = next_raw.trim();
+                        if next.starts_with('(') {
+                            i += 1;
+                            logical.push(' ');
+                            logical.push_str(next);
+                            continue;
+                        }
+                    }
+                }
             }
-            logical.push(' ');
-            logical.push_str(&next);
+            break;
         }
 
         let expanded = expand_line(&logical, macros, line_no, source_name)?;
@@ -2200,6 +2589,39 @@ fn preprocess_into(
 }
 
 /// Net open '(' count outside strings/chars (0 = balanced, >0 = need more lines).
+/// Trailing C identifier at end of `s` (no trailing whitespace expected).
+fn trailing_identifier(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    if b.is_empty() {
+        return None;
+    }
+    let mut end = b.len();
+    // skip trailing whitespace just in case
+    while end > 0 && b[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let mut start = end;
+    while start > 0 {
+        let c = b[start - 1];
+        if c.is_ascii_alphanumeric() || c == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start == end {
+        return None;
+    }
+    let first = b[start];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    Some(&s[start..end])
+}
+
 fn paren_balance_outside_strings(s: &str) -> i32 {
     let mut bal = 0i32;
     let mut in_str = false;
@@ -2251,28 +2673,183 @@ fn is_active(stack: &[CondFrame]) -> bool {
 }
 
 fn strip_line_comment_keep_string(s: &str) -> String {
-    // very simple: strip // outside quotes
+    // Strip // outside quotes. Must honor `\"` / `\'` / `\\` so URLs like
+    // `"xmlns=\"http://…\""` (postgres explain.c) are not truncated at `//`.
     let mut out = String::new();
-    let mut chars = s.chars().peekable();
+    let bytes = s.as_bytes();
+    let mut i = 0;
     let mut in_str = false;
     let mut in_char = false;
-    while let Some(c) = chars.next() {
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if (in_str || in_char) && c == '\\' && i + 1 < bytes.len() {
+            out.push('\\');
+            out.push(bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
         if c == '"' && !in_char {
             in_str = !in_str;
             out.push(c);
+            i += 1;
             continue;
         }
         if c == '\'' && !in_str {
             in_char = !in_char;
             out.push(c);
+            i += 1;
             continue;
         }
-        if !in_str && !in_char && c == '/' && chars.peek() == Some(&'/') {
+        if !in_str && !in_char && c == '/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             break;
         }
         out.push(c);
+        i += 1;
     }
     out
+}
+
+fn linux_quoted_system_include_stub(path: &str) -> Option<&'static str> {
+    match path {
+        "sys/prctl.h" => Some(
+            "#ifndef _SYS_PRCTL_H\n\
+             #define _SYS_PRCTL_H\n\
+             #define PR_SET_NAME 15\n\
+             #define PR_GET_NAME 16\n\
+             #define PR_SET_PTRACER 0x59616d61\n\
+             int prctl(int option, ...);\n\
+             #endif\n",
+        ),
+        "sys/procctl.h" => Some(
+            "#ifndef _SYS_PROCCTL_H\n\
+             #define _SYS_PROCCTL_H\n\
+             typedef int idtype_t;\n\
+             typedef int id_t;\n\
+             #define PROC_PDEATHSIG_CTL 11\n\
+             #define PROC_PDEATHSIG_SET 12\n\
+             int procctl(idtype_t idtype, id_t id, int cmd, void *data);\n\
+             #endif\n",
+        ),
+        // Postgres initdb uses quoted `#include "sys/mman.h"` (HAVE_SHM_OPEN).
+        "sys/mman.h" => Some(
+            "#ifndef _SYS_MMAN_H\n\
+             #define _SYS_MMAN_H 1\n\
+             #ifndef mode_t\n\
+             typedef unsigned int mode_t;\n\
+             #endif\n\
+             #ifndef off_t\n\
+             typedef long off_t;\n\
+             #endif\n\
+             #ifndef size_t\n\
+             typedef unsigned long size_t;\n\
+             #endif\n\
+             #define PROT_READ 1\n\
+             #define PROT_WRITE 2\n\
+             #define PROT_EXEC 4\n\
+             #define PROT_NONE 0\n\
+             #define MAP_SHARED 1\n\
+             #define MAP_PRIVATE 2\n\
+             #define MAP_FAILED ((void *)-1)\n\
+             void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);\n\
+             int munmap(void *addr, size_t length);\n\
+             int shm_open(const char *name, int oflag, mode_t mode);\n\
+             int shm_unlink(const char *name);\n\
+             #endif\n",
+        ),
+        _ => None,
+    }
+}
+
+/// Quoted includes of POSIX/system paths (e.g. Postgres `"sys/mman.h"`) that we
+/// have no stub for — soft-skip like angle includes rather than hard-fail.
+fn is_quoted_systemish_include(path: &str) -> bool {
+    path.starts_with("sys/")
+        || path.starts_with("netinet/")
+        || path.starts_with("arpa/")
+        || path.starts_with("linux/")
+        || path.starts_with("asm/")
+        || path.starts_with("bits/")
+}
+
+/// Stubs for `#include <setjmp.h>` etc. when angle paths are missing.
+fn linux_angle_include_stub(path: &str) -> Option<&'static str> {
+    match path {
+        "setjmp.h" => Some(
+            "#ifndef _SETJMP_H\n\
+             #define _SETJMP_H 1\n\
+             #ifndef jmp_buf\n\
+             typedef int jmp_buf[48];\n\
+             typedef int sigjmp_buf[48];\n\
+             #endif\n\
+             int __setjmp(jmp_buf __env);\n\
+             int __sigsetjmp(sigjmp_buf __env, int __savemask);\n\
+             void _longjmp(jmp_buf __env, int __val);\n\
+             void siglongjmp(sigjmp_buf __env, int __val);\n\
+             #ifndef setjmp\n\
+             #define setjmp(env) __setjmp(env)\n\
+             #define sigsetjmp(env, savemask) __sigsetjmp((env), (savemask))\n\
+             #define longjmp(env, val) _longjmp((env), (val))\n\
+             #define siglongjmp(env, val) (siglongjmp)(env, val)\n\
+             #endif\n\
+             #endif\n",
+        ),
+        // glibc Linux LP64: sigset_t is 128 bytes; struct sigaction is 152
+        // (handler@0, mask@8, flags@136, restorer@144). Soft-skip of <signal.h>
+        // used to invent sigset_t≈4 / sigaction≈8 → sigemptyset smashed the
+        // stack in pqsignal() (initdb SIGILL right after setup_signals).
+        "signal.h" => Some(
+            "#ifndef _SIGNAL_H\n\
+             #define _SIGNAL_H 1\n\
+             typedef struct { unsigned long __val[16]; } __sigset_t;\n\
+             typedef __sigset_t sigset_t;\n\
+             typedef void (*__sighandler_t)(int);\n\
+             typedef __sighandler_t sighandler_t;\n\
+             struct sigaction {\n\
+               __sighandler_t sa_handler;\n\
+               sigset_t sa_mask;\n\
+               int sa_flags;\n\
+               void (*sa_restorer)(void);\n\
+             };\n\
+             #ifndef SIG_ERR\n\
+             #define SIG_ERR ((__sighandler_t)-1)\n\
+             #endif\n\
+             #ifndef SIG_DFL\n\
+             #define SIG_DFL ((__sighandler_t)0)\n\
+             #endif\n\
+             #ifndef SIG_IGN\n\
+             #define SIG_IGN ((__sighandler_t)1)\n\
+             #endif\n\
+             int sigemptyset(sigset_t *);\n\
+             int sigfillset(sigset_t *);\n\
+             int sigaddset(sigset_t *, int);\n\
+             int sigdelset(sigset_t *, int);\n\
+             int sigismember(const sigset_t *, int);\n\
+             int sigaction(int, const struct sigaction *, struct sigaction *);\n\
+             int sigprocmask(int, const sigset_t *, sigset_t *);\n\
+             __sighandler_t signal(int, __sighandler_t);\n\
+             #endif\n",
+        ),
+        // Postgres HAVE_STRUCT_OPTION / HAVE_GETOPT_LONG expect system getopt.h.
+        "getopt.h" => Some(
+            "#ifndef _GETOPT_H\n\
+             #define _GETOPT_H 1\n\
+             struct option {\n\
+               const char *name;\n\
+               int has_arg;\n\
+               int *flag;\n\
+               int val;\n\
+             };\n\
+             #define no_argument 0\n\
+             #define required_argument 1\n\
+             #define optional_argument 2\n\
+             extern char *optarg;\n\
+             extern int optind, opterr, optopt;\n\
+             int getopt(int, char * const *, const char *);\n\
+             int getopt_long(int, char * const *, const char *, const struct option *, int *);\n\
+             #endif\n",
+        ),
+        _ => None,
+    }
 }
 
 /// C phase 2: delete backslash immediately followed by optional horizontal whitespace and newline.
@@ -2641,6 +3218,11 @@ fn expand_pp_tokens_disabled(
                         j += 1;
                         let (args, new_j) = parse_macro_args(s, j)?;
                         i = new_j;
+                        if !*variadic && args.len() != params.len() {
+                            // Wrong arity in #if — treat as 0 (unknown call).
+                            out.push('0');
+                            continue;
+                        }
                         let mut exp_args = Vec::with_capacity(args.len());
                         for a in &args {
                             exp_args.push(expand_pp_tokens_disabled(
@@ -2652,12 +3234,16 @@ fn expand_pp_tokens_disabled(
                                 disabled,
                             )?);
                         }
-                        while exp_args.len() < params.len() {
-                            exp_args.push(String::new());
+                        if *variadic {
+                            while exp_args.len() < params.len() {
+                                exp_args.push(String::new());
+                            }
                         }
                         let mut raw_args = args.clone();
-                        while raw_args.len() < params.len() {
-                            raw_args.push(String::new());
+                        if *variadic {
+                            while raw_args.len() < params.len() {
+                                raw_args.push(String::new());
+                            }
                         }
                         let replaced =
                             substitute_macro(params, *variadic, body, &raw_args, &exp_args)?;
@@ -2973,6 +3559,51 @@ fn expand_macros_in_text(
                 i += 1;
             }
             let id = &text[start..i];
+            // C11 `_Pragma("...")` — erase (bison YY_IGNORE_* / diagnostic push).
+            if id == "_Pragma" {
+                let mut j = i;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    // skip balanced parens
+                    let mut depth = 0i32;
+                    let mut in_s = false;
+                    let mut in_c = false;
+                    while j < bytes.len() {
+                        let ch = bytes[j];
+                        if (in_s || in_c) && ch == b'\\' && j + 1 < bytes.len() {
+                            j += 2;
+                            continue;
+                        }
+                        if ch == b'"' && !in_c {
+                            in_s = !in_s;
+                            j += 1;
+                            continue;
+                        }
+                        if ch == b'\'' && !in_s {
+                            in_c = !in_c;
+                            j += 1;
+                            continue;
+                        }
+                        if !in_s && !in_c {
+                            if ch == b'(' {
+                                depth += 1;
+                            } else if ch == b')' {
+                                depth -= 1;
+                                j += 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
             // Dynamic predefined macros (__LINE__/__FILE__) — expand at use site.
             if let Some(dyn_exp) = expand_dynamic_predef(id, line_no, source_name) {
                 out.push_str(&dyn_exp);
@@ -3070,11 +3701,29 @@ fn expand_macros_in_text(
                             // Preserve weak for COND_SYSCALL (must lose to real SYSCALL_DEFINE).
                             let is_weak = args.iter().any(|a| a.contains("weak"));
                             if is_weak {
-                                out.push_str("__ggcc_weak_attr ");
+                                out.push_str("__acc_weak_attr ");
                             }
                             if let Some(sec_arg) = args.iter().find(|a| a.contains("section")) {
                                 out.push_str(&format!("__attribute__(({}))", sec_arg));
                             }
+                            continue;
+                        }
+                        // ISO C: non-variadic function-like macros require exact arity.
+                        // Padding missing args made `#define fprintf(file,fmt,msg) GUC_flex_fatal(msg)`
+                        // swallow 2-arg `fprintf(stderr, "x")` → NULL jmp_buf SEGV in postgres.
+                        if !*variadic && args.len() != params.len() {
+                            out.push_str(id);
+                            out.push('(');
+                            out.push_str(&args.join(", "));
+                            out.push(')');
+                            continue;
+                        }
+                        if *variadic && args.len() + 1 < params.len() {
+                            // Need all named params before __VA_ARGS__.
+                            out.push_str(id);
+                            out.push('(');
+                            out.push_str(&args.join(", "));
+                            out.push(')');
                             continue;
                         }
                         // ISO C: expand each argument once, then substitute.
@@ -3092,13 +3741,17 @@ fn expand_macros_in_text(
                                 disabled,
                             )?);
                         }
-                        // pad missing args
-                        while exp_args.len() < params.len() {
-                            exp_args.push(String::new());
+                        // Variadic only: pad missing named args before __VA_ARGS__.
+                        if *variadic {
+                            while exp_args.len() < params.len() {
+                                exp_args.push(String::new());
+                            }
                         }
                         let mut raw_args = args.clone();
-                        while raw_args.len() < params.len() {
-                            raw_args.push(String::new());
+                        if *variadic {
+                            while raw_args.len() < params.len() {
+                                raw_args.push(String::new());
+                            }
                         }
                         let replaced =
                             substitute_macro(params, *variadic, body, &raw_args, &exp_args)?;
@@ -3209,7 +3862,12 @@ fn parse_macro_args(text: &str, mut i: usize) -> Result<(Vec<String>, usize), St
             }
             if c == ')' {
                 if depth == 0 {
-                    args.push(cur.trim().to_string());
+                    // `foo()` / `foo(  )` → zero args. Do not treat whitespace-only
+                    // as a single empty argument (broke `#define GUC_yywrap() 1`).
+                    let t = cur.trim().to_string();
+                    if !args.is_empty() || !t.is_empty() {
+                        args.push(t);
+                    }
                     return Ok((args, i + 1));
                 }
                 depth -= 1;
@@ -3273,9 +3931,37 @@ fn substitute_macro(
     // glue to the LHS when re-tokenized (e.g. A ## B+ with B empty → "+ +" not "++").
     let mut after_paste = false;
     let mut paste_rhs_empty = false;
+    let mut in_str = false;
+    let mut in_char = false;
     while i < bytes.len() {
-        // stringify #param — uses unexpanded argument
-        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] != b'#' {
+        let c = bytes[i] as char;
+        // Escapes inside string/char: don't toggle lit state on \" or \'.
+        if (in_str || in_char) && c == '\\' && i + 1 < bytes.len() {
+            out.push('\\');
+            out.push(bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        if c == '"' && !in_char {
+            in_str = !in_str;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if c == '\'' && !in_str {
+            in_char = !in_char;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        // stringify #param — uses unexpanded argument. Must NOT fire on '#'
+        // inside character/string literals (SQLite base85: `(dn) + '#'`).
+        if !in_str
+            && !in_char
+            && bytes[i] == b'#'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] != b'#'
+        {
             after_paste = false;
             paste_rhs_empty = false;
             i += 1;
@@ -3295,7 +3981,12 @@ fn substitute_macro(
             continue;
         }
         // token paste a ## b — operands use unexpanded args
-        if i + 1 < bytes.len() && bytes[i] == b'#' && bytes[i + 1] == b'#' {
+        if !in_str
+            && !in_char
+            && i + 1 < bytes.len()
+            && bytes[i] == b'#'
+            && bytes[i + 1] == b'#'
+        {
             i += 2;
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                 i += 1;
@@ -3308,7 +3999,7 @@ fn substitute_macro(
             paste_rhs_empty = false;
             continue; // next ident concatenates without space
         }
-        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+        if !in_str && !in_char && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
             let start = i;
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -3564,9 +4255,121 @@ void *krealloc_array(void *p, int n, int sz) __alloc_size__(2, 3);\n";
     }
 
     #[test]
+    fn hash_inside_char_literal_not_stringify() {
+        // SQLite base85.c: `# define base85Numeral(dn) (... (dn) + '#' ...)`
+        let s = "#define base85Numeral(dn) ((char)(((dn) < 4)? (char)((dn) + '#') : (char)((dn) - 4 + '*')))\nchar c = base85Numeral(0);\n";
+        let o = preprocess(s).unwrap();
+        assert!(
+            o.contains("+ '#'"),
+            "char '#' must survive macro expand: {o}"
+        );
+        assert!(
+            !o.contains("'\"\"'") && !o.contains("+ '\"\"'"),
+            "must not stringify inside char lit: {o}"
+        );
+    }
+
+    #[test]
     fn backslash_newline_with_trailing_whitespace() {
         let s = "int x \\\t \n= 42;\n";
         let o = splice_backslash_newlines(s);
         assert_eq!(o, "int x = 42;\n");
+    }
+
+    #[test]
+    fn function_like_macro_invocation_across_newline() {
+        let s = "\
+#define LOG2 4\n\
+#define PointerGetDatum(X) ((unsigned long)(X))\n\
+#define PredicateLockHashCodeFromTargetHashCode(tag, targethash) \\\n\
+\t((targethash) ^ ((unsigned) PointerGetDatum((tag)->x)) << LOG2)\n\
+struct T { void *x; };\n\
+unsigned f(struct T *p, unsigned h) {\n\
+  return PredicateLockHashCodeFromTargetHashCode\n\
+    (p, h);\n\
+}\n";
+        let o = preprocess(s).unwrap();
+        assert!(
+            !o.contains("PredicateLockHashCodeFromTargetHashCode"),
+            "newline-before-paren call must expand: {o}"
+        );
+        assert!(o.contains("<< 4") || o.contains("<<4"), "body must expand: {o}");
+    }
+
+    #[test]
+    fn pragma_operator_is_erased() {
+        let s = "void f(void) { _Pragma (\"GCC diagnostic push\"); int x = 1; _Pragma(\"GCC diagnostic pop\"); (void)x; }\n";
+        let o = preprocess(s).unwrap();
+        assert!(!o.contains("_Pragma"), "_Pragma must be erased: {o}");
+        assert!(o.contains("int x = 1"), "body kept: {o}");
+    }
+
+    #[test]
+    fn empty_paren_macro_is_zero_args_not_one_blank() {
+        // flex: `#define GUC_yywrap() 1` + `#define yywrap GUC_yywrap` then `yywrap(  )`.
+        let s = "\
+#define yywrap GUC_yywrap\n\
+#define GUC_yywrap() (/*CONSTCOND*/1)\n\
+int f(void) { return yywrap(  ); }\n\
+";
+        let o = preprocess(s).unwrap();
+        assert!(
+            o.contains("return (") && o.contains("1)"),
+            "yywrap(  ) must expand to 1: {o}"
+        );
+        assert!(
+            !o.contains("GUC_yywrap("),
+            "must not leave GUC_yywrap call: {o}"
+        );
+    }
+
+    #[test]
+    fn non_variadic_macro_wrong_arity_not_expanded() {
+        // postgres guc-file.c: `#define fprintf(file, fmt, msg) GUC_flex_fatal(msg)`
+        // must not rewrite 2-arg `fprintf(stderr, "hi")` into GUC_flex_fatal.
+        let s = r#"
+#define fprintf(file, fmt, msg) GUC_flex_fatal(msg)
+void f(void) { fprintf(stderr, "hi\n"); }
+void g(void) { fprintf(stderr, "%s\n", "x"); }
+"#;
+        let o = preprocess(s).unwrap();
+        assert!(
+            o.contains("fprintf(stderr, \"hi\\n\")") || o.contains("fprintf(stderr, \"hi\n\")"),
+            "2-arg fprintf must stay fprintf: {o}"
+        );
+        assert!(
+            !o.lines()
+                .any(|l| l.contains("GUC_flex_fatal") && l.contains("hi")),
+            "2-arg must not become GUC_flex_fatal: {o}"
+        );
+        assert!(
+            o.contains("GUC_flex_fatal(\"x\")") || o.contains("GUC_flex_fatal( \"x\" )"),
+            "3-arg fprintf must expand: {o}"
+        );
+    }
+
+    #[test]
+    fn siglongjmp_macro_preserves_prototype() {
+        // Function-like siglongjmp must not mangle `void siglongjmp(sigjmp_buf, int);`
+        // into `void (siglongjmp)((sigjmp_buf), (int));`.
+        let s = "typedef int sigjmp_buf[8];\nvoid siglongjmp(sigjmp_buf env, int val);\nvoid g(sigjmp_buf e) { siglongjmp(e, 1); }\n";
+        let mut macros = std::collections::HashMap::new();
+        macros.insert(
+            "siglongjmp".into(),
+            MacroBody::Function {
+                params: vec!["env".into(), "val".into()],
+                body: "(siglongjmp)(env, val)".into(),
+                variadic: false,
+            },
+        );
+        let o = expand_macros_in_text(s, &macros, 0, 1, "t.c", &Default::default()).unwrap();
+        assert!(
+            o.contains("void (siglongjmp)(sigjmp_buf env, int val)"),
+            "prototype must stay valid C: {o}"
+        );
+        assert!(
+            !o.contains("((sigjmp_buf env), (int val))"),
+            "must not double-paren typed params: {o}"
+        );
     }
 }

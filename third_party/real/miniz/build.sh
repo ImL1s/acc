@@ -1,12 +1,12 @@
 #!/usr/bin/env zsh
 # Stage B real project: miniz-3.0.2 amalgamation + compress/uncompress roundtrip.
-# CC=ggcc compiles .c → .s; system cc assembles/links only.
+# CC=acc compiles .c → .s; system cc assembles/links only.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CC="${CC:-$ROOT/target/release/ggcc}"
+CC="${ACC_CC:-${CC:-$ROOT/target/release/acc}}"
 if [[ ! -x "$CC" ]]; then
   (cd "$ROOT" && cargo build --release)
-  CC="$ROOT/target/release/ggcc"
+  CC="$ROOT/target/release/acc"
 fi
 cd "$(dirname "$0")"
 

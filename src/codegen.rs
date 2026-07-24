@@ -1,10 +1,17 @@
-//! Code generators: aarch64-apple-darwin (default) and x86_64 System V / Darwin.
+//! Code generators: aarch64-apple-darwin (default), x86_64, i686, riscv64.
 //! Emits real assembly from the AST — no fixture hardcoding.
 
 #[path = "codegen_x86_64.rs"]
 mod x86_64;
 
+#[path = "codegen_i686.rs"]
+pub mod i686;
+
+#[path = "codegen_riscv.rs"]
+pub mod riscv;
+
 use crate::ast::*;
+use crate::assigned_names::collect_assigned_names_in_program;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
@@ -15,16 +22,40 @@ use std::fmt::Write as _;
 /// `objcopy --prefix-symbols=__pi_`) that real gcc never links because it
 /// only emits referenced statics. Roots are non-static functions, `main`,
 /// and any function named from global initializers (ops tables / fops).
+/// One defining function per name: prefer the longest body so an empty soft-stub
+/// `{ }` cannot shadow the real definition (postgres `pq_writeint*`, `t_isspace`, …).
+pub fn best_functions_for_emit<'a>(prog: &'a Program) -> HashMap<String, &'a Function> {
+    let mut best: HashMap<String, &'a Function> = HashMap::new();
+    for item in &prog.items {
+        let Item::Func(f) = item else {
+            continue;
+        };
+        let Some(body) = f.body.as_ref() else {
+            continue;
+        };
+        let new_len = body.len();
+        let replace = match best.get(&f.name) {
+            None => true,
+            Some(prev) => new_len > prev.body.as_ref().map(|b| b.len()).unwrap_or(0),
+        };
+        if replace {
+            best.insert(f.name.clone(), f);
+        }
+    }
+    best
+}
+
 pub fn reachable_funcs(prog: &Program) -> HashSet<String> {
+    let best = best_functions_for_emit(prog);
     let mut bodies: HashMap<&str, &Function> = HashMap::new();
     let mut all_names: HashSet<String> = HashSet::new();
     for item in &prog.items {
         if let Item::Func(f) = item {
             all_names.insert(f.name.clone());
-            if f.body.is_some() {
-                bodies.insert(f.name.as_str(), f);
-            }
         }
+    }
+    for f in best.values() {
+        bodies.insert(f.name.as_str(), *f);
     }
 
     let mut roots: Vec<String> = Vec::new();
@@ -68,6 +99,30 @@ pub fn reachable_funcs(prog: &Program) -> HashSet<String> {
             }
         }
     }
+    // Fixpoint: static-inline chains (pq_sendint → pq_writeint → pg_hton32).
+    loop {
+        let mut grew = false;
+        for f in bodies.values() {
+            if !reachable.contains(&f.name) {
+                continue;
+            }
+            let Some(body) = f.body.as_ref() else {
+                continue;
+            };
+            let mut refs = Vec::new();
+            for st in body {
+                collect_stmt_fn_refs(st, &all_names, &mut refs);
+            }
+            for r in refs {
+                if reachable.insert(r.clone()) {
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     reachable
 }
 
@@ -92,6 +147,7 @@ fn collect_stmt_fn_refs(st: &Stmt, fns: &HashSet<String>, out: &mut Vec<String>)
         }
         Stmt::Expr(e) | Stmt::Return(Some(e)) => collect_expr_fn_refs(e, fns, out),
         Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Empty | Stmt::Goto(_) | Stmt::Asm { .. } => {}
+        Stmt::GotoIndirect(e) => collect_expr_fn_refs(e, fns, out),
         Stmt::If {
             cond,
             then_b,
@@ -133,129 +189,10 @@ fn collect_stmt_fn_refs(st: &Stmt, fns: &HashSet<String>, out: &mut Vec<String>)
 }
 
 /// Collect Var names that appear as assignment / inc / dec targets.
-fn collect_assigned_names_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
-    match e {
-        Expr::Assign { left, right } | Expr::CompoundAssign { left, right, .. } => {
-            if let Expr::Var(n) = left.as_ref() {
-                out.insert(n.clone());
-            }
-            collect_assigned_names_expr(left, out);
-            collect_assigned_names_expr(right, out);
-        }
-        Expr::PreInc(ex) | Expr::PreDec(ex) | Expr::PostInc(ex) | Expr::PostDec(ex) => {
-            if let Expr::Var(n) = ex.as_ref() {
-                out.insert(n.clone());
-            }
-            collect_assigned_names_expr(ex, out);
-        }
-        Expr::Call { args, .. } => {
-            for a in args {
-                collect_assigned_names_expr(a, out);
-            }
-        }
-        Expr::Unary { expr, .. }
-        | Expr::Cast { expr, .. }
-        | Expr::SizeofExpr(expr)
-        | Expr::Member { base: expr, .. } => collect_assigned_names_expr(expr, out),
-        Expr::Binary { left, right, .. } | Expr::Index { base: left, index: right } => {
-            collect_assigned_names_expr(left, out);
-            collect_assigned_names_expr(right, out);
-        }
-        Expr::Cond {
-            cond,
-            then_e,
-            else_e,
-        } => {
-            collect_assigned_names_expr(cond, out);
-            collect_assigned_names_expr(then_e, out);
-            collect_assigned_names_expr(else_e, out);
-        }
-        Expr::InitList { fields } => {
-            for (_, e) in fields {
-                collect_assigned_names_expr(e, out);
-            }
-        }
-        Expr::StmtExpr(stmts, final_e) => {
-            for s in stmts {
-                collect_assigned_names_stmt(s, out);
-            }
-            collect_assigned_names_expr(final_e, out);
-        }
-        _ => {}
-    }
-}
-
-fn collect_assigned_names_stmt(st: &Stmt, out: &mut std::collections::HashSet<String>) {
-    match st {
-        Stmt::Block(ss) => {
-            for s in ss {
-                collect_assigned_names_stmt(s, out);
-            }
-        }
-        Stmt::Decl(d) => {
-            if let Some(init) = &d.init {
-                collect_assigned_names_expr(init, out);
-            }
-        }
-        Stmt::Expr(e) | Stmt::Return(Some(e)) => collect_assigned_names_expr(e, out),
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Empty => {}
-        Stmt::If {
-            cond,
-            then_b,
-            else_b,
-        } => {
-            collect_assigned_names_expr(cond, out);
-            collect_assigned_names_stmt(then_b, out);
-            if let Some(e) = else_b {
-                collect_assigned_names_stmt(e, out);
-            }
-        }
-        Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
-            collect_assigned_names_expr(cond, out);
-            collect_assigned_names_stmt(body, out);
-        }
-        Stmt::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(i) = init {
-                collect_assigned_names_stmt(i, out);
-            }
-            if let Some(c) = cond {
-                collect_assigned_names_expr(c, out);
-            }
-            if let Some(s) = step {
-                collect_assigned_names_expr(s, out);
-            }
-            collect_assigned_names_stmt(body, out);
-        }
-        Stmt::Label(_, s) | Stmt::Default(s) => collect_assigned_names_stmt(s, out),
-        Stmt::Switch { cond, body } | Stmt::Case { value: cond, body } => {
-            collect_assigned_names_expr(cond, out);
-            collect_assigned_names_stmt(body, out);
-        }
-        Stmt::DeclGroup(ds) => {
-            for d in ds {
-                if let Some(init) = &d.init {
-                    collect_assigned_names_expr(init, out);
-                }
-            }
-        }
-        Stmt::Asm { .. } => {}
-    }
-}
-
-impl Codegen {
-    fn collect_assigned_names(body: &Stmt, out: &mut std::collections::HashSet<String>) {
-        collect_assigned_names_stmt(body, out);
-    }
-}
-
 fn collect_expr_fn_refs(e: &Expr, fns: &HashSet<String>, out: &mut Vec<String>) {
     match e {
-        Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::String(_) | Expr::SizeofType(_) => {}
+        Expr::Int(_) | Expr::Float(_) | Expr::Char(_) | Expr::String(_) | Expr::SizeofType(_)
+        | Expr::AddrOfLabel(_) => {}
         Expr::Var(name) => {
             if fns.contains(name) {
                 out.push(name.clone());
@@ -310,12 +247,14 @@ fn collect_expr_fn_refs(e: &Expr, fns: &HashSet<String>, out: &mut Vec<String>) 
     }
 }
 
-/// ISA backend selection (`-m aarch64` / `-m x86_64`).
+/// ISA backend selection (`-m aarch64|x86_64|i686|riscv64`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Target {
     #[default]
     Aarch64,
     X86_64,
+    I686,
+    Riscv64,
 }
 
 impl Target {
@@ -323,6 +262,8 @@ impl Target {
         match s {
             "aarch64" | "arm64" => Some(Self::Aarch64),
             "x86_64" | "x86-64" | "amd64" => Some(Self::X86_64),
+            "i686" | "i386" => Some(Self::I686),
+            "riscv64" | "riscv" | "rv64" => Some(Self::Riscv64),
             _ => None,
         }
     }
@@ -331,6 +272,8 @@ impl Target {
         match self {
             Self::Aarch64 => "aarch64",
             Self::X86_64 => "x86_64",
+            Self::I686 => "i686",
+            Self::Riscv64 => "riscv64",
         }
     }
 }
@@ -429,7 +372,7 @@ pub struct Codegen {
     va_regsave_off: i64,
     /// FP-relative offset of d0..d7 save area (0 = none). AAPCS64 variadic floats.
     va_fpsave_off: i64,
-    /// FP-relative offset of the next-VR index word for __ggcc_va_arg_fp (0 = none).
+    /// FP-relative offset of the next-VR index word for __acc_va_arg_fp (0 = none).
     va_vr_idx_off: i64,
     /// Number of fixed (named) integer/pointer params before `...`.
     va_fixed_n: usize,
@@ -551,9 +494,9 @@ impl Codegen {
         // Darwin freestanding: keep a private errno slot. Linux userspace must
         // use `__errno_location()` (see emit_errno_*) so libc sees real errno —
         // SQLite `if (errno!=ENOENT)` after failed lstat was reading a never-
-        // written `__ggcc_errno` (always 0) and treating ENOENT as CANTOPEN.
+        // written `__acc_errno` (always 0) and treating ENOENT as CANTOPEN.
         let name = if name == "errno" && self.os == TargetOs::Darwin {
-            "__ggcc_errno"
+            "__acc_errno"
         } else {
             name
         };
@@ -564,7 +507,7 @@ impl Codegen {
     }
 
     /// Linux: `errno` is `*__errno_location()`. Emit call; address of errno in x0.
-    /// Weak freestanding stub returns `&__ggcc_errno` when not linked with libc.
+    /// Weak freestanding stub returns `&__acc_errno` when not linked with libc.
     fn emit_errno_location_to_x0(&mut self) {
         writeln!(self.out, "\tbl\t__errno_location").unwrap();
     }
@@ -576,6 +519,42 @@ impl Codegen {
             writeln!(self.out, "\tldrsw\tx0, [x0]").unwrap();
         } else {
             writeln!(self.out, "\tldrsw\tx{dest}, [x0]").unwrap();
+        }
+    }
+
+    /// AAPCS64: unused bits above a small integer return in `x0` are undefined.
+    /// Sign/zero-extend so 64-bit `cmp` against `-1` works (SQLite
+    /// `osUnlink(z)==(-1)` / `unlink(path)==-1` after EISDIR).
+    fn emit_extend_call_return(&mut self, dest: u8, ret_ty: &Type) {
+        match ret_ty {
+            Type::Int => {
+                writeln!(self.out, "\tsxtw\tx{dest}, w0").unwrap();
+            }
+            Type::Short => {
+                writeln!(self.out, "\tsxth\tx{dest}, w0").unwrap();
+            }
+            Type::SChar => {
+                writeln!(self.out, "\tsxtb\tx{dest}, w0").unwrap();
+            }
+            Type::UInt => {
+                // `mov w,w` zero-extends into the full X register.
+                writeln!(self.out, "\tmov\tw{dest}, w0").unwrap();
+            }
+            Type::UShort => {
+                writeln!(self.out, "\tand\tx{dest}, x0, #0xffff").unwrap();
+            }
+            Type::Char => {
+                writeln!(self.out, "\tand\tx{dest}, x0, #0xff").unwrap();
+            }
+            Type::Float | Type::Double => {
+                // Caller already moved from d0 when applicable.
+            }
+            _ => {
+                // long / pointer / void / aggregates: full x0 is the value.
+                if dest != 0 {
+                    writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
+                }
+            }
         }
     }
 
@@ -1470,17 +1449,8 @@ impl Codegen {
         // Names written anywhere in the TU must not be const-folded (static
         // counters like nRefSqlite3 / sqlite3_current_time are is_static with
         // const init but mutated at runtime — folding them to #0 broke
-        // test3 btree_open and CURRENT_TIME).
-        let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for item in &prog.items {
-            if let Item::Func(f) = item {
-                if let Some(body) = &f.body {
-                    for s in body {
-                        Self::collect_assigned_names(s, &mut assigned);
-                    }
-                }
-            }
-        }
+        // test3 btree_open and CURRENT_TIME). Also flex yy_init/yy_start.
+        let assigned = collect_assigned_names_in_program(prog);
         for item in &prog.items {
             if let Item::Typedef { name, ty } = item {
                 typedefs.insert(name.clone(), ty.clone());
@@ -1541,18 +1511,13 @@ impl Codegen {
 
         // Drop unreferenced static / static-inline bodies (kernel header noise).
         let reachable = reachable_funcs(prog);
+        let best_funcs = best_functions_for_emit(prog);
 
         // Unified symbol set so Func and Global never double-emit a label.
         let mut emitted_syms = std::collections::HashSet::new();
-        for item in &prog.items {
-            if let Item::Func(f) = item {
-                // Emit: main; non-static (stubs or full); static if reachable
-                // (including empty `{}` bodies used as no-op function pointers
-                // like rbtree dummy_rotate — must not require has_real_body).
-                // Do NOT reserve emitted_syms on pure prototypes (body=None).
-                if f.body.is_none() {
-                    continue;
-                }
+        for f in best_funcs.values() {
+            let f = *f;
+                // Emit: main; non-static (stubs or full); static if reachable.
                 let is_root = !f.is_static || f.name == "main";
                 if !is_root && !reachable.contains(&f.name) {
                     continue;
@@ -1587,7 +1552,6 @@ impl Codegen {
                         }
                     }
                 }
-            }
         }
 
         // Globals (dedupe by assembler symbol; skip if already emitted as Func)
@@ -1676,6 +1640,10 @@ impl Codegen {
                 "__atomic_fetch_add",
                 "__sync_add_and_fetch",
                 "__sync_bool_compare_and_swap",
+                "__sync_fetch_and_add",
+                "__sync_fetch_and_sub",
+                "__sync_fetch_and_and",
+                "__sync_fetch_and_or",
             ] {
                 if emitted_syms.contains(name) {
                     continue;
@@ -1685,11 +1653,11 @@ impl Codegen {
                 writeln!(self.out, "\tmov\tx0, xzr").unwrap();
                 writeln!(self.out, "\tret").unwrap();
             }
-            // Real bswap helpers (PP rewrites __builtin_bswapN → __ggcc_bswapN).
-            for (name, bits) in [
-                ("__ggcc_bswap16", 16u32),
-                ("__ggcc_bswap32", 32u32),
-                ("__ggcc_bswap64", 64u32),
+            // Real bswap helpers (PP rewrites __builtin_bswapN → __acc_bswapN).
+            for &(name, bits) in &[
+                ("__acc_bswap16", 16u32),
+                ("__acc_bswap32", 32u32),
+                ("__acc_bswap64", 64u32),
             ] {
                 if emitted_syms.contains(name) {
                     continue;
@@ -1714,17 +1682,17 @@ impl Codegen {
             // would bind to it at static link and never reach glibc. Leave the
             // symbol undefined so it goes through the PLT to libc (userspace).
             // Freestanding/kernel TUs that need a fallback can link a tiny stub
-            // that returns &__ggcc_errno.
+            // that returns &__acc_errno.
             // Weak zero data for optional globals / macro local-name leaks
             // (rculist `struct list_head *__head` when local decl soft-fails).
             writeln!(self.out, "\t.bss").unwrap();
             let mut weak_data: std::collections::HashSet<String> = std::collections::HashSet::new();
             for name in [
-                "__ggcc_errno",
+                "__acc_errno",
                 // Process-wide AAPCS64 VR cursor for va_arg(double) after
                 // va_list is passed by value (char*) into non-variadic helpers
                 // like sqlite3_str_vappendf. THREADSAFE=0 only.
-                "ggcc_va_vr_cursor",
+                "acc_va_vr_cursor",
                 "elfcorehdr_addr",
                 "elfcorehdr_size",
                 "kvm_protected_mode_initialized",
@@ -1837,12 +1805,12 @@ impl Codegen {
         }
 
         // Darwin host userspace (SQLite amalgamation smoke etc.): soft errno
-        // rewrites `errno` → `__ggcc_errno` via c_sym, and va_arg FP uses
-        // `ggcc_va_vr_cursor`. These were Linux-only above; without them
+        // rewrites `errno` → `__acc_errno` via c_sym, and va_arg FP uses
+        // `acc_va_vr_cursor`. These were Linux-only above; without them
         // Darwin link fails after bare-(unsigned) cast recovery restored bodies.
         // Use `.comm` (Mach-O) — Darwin assembler rejects ELF `.weak`.
         if matches!(self.os, TargetOs::Darwin) {
-            for name in ["__ggcc_errno", "ggcc_va_vr_cursor"] {
+            for name in ["__acc_errno", "acc_va_vr_cursor"] {
                 let sym = self.c_sym(name);
                 if self.out.contains(&format!("\n{sym}:"))
                     || self.out.contains(&format!(".comm\t{sym},"))
@@ -2127,6 +2095,15 @@ impl Codegen {
                     writeln!(self.out, "{sym}:").unwrap();
                     self.emit_quad_sym_addr(&self.c_sym(v));
                 }
+                // static char *p = buf; — array/object designator decays to
+                // address. Without this, init falls through to BSS zero and
+                // Tcl_LinkVar STRING reads NULL (enc2 sqlite_last_needed_collation).
+                Expr::Var(v) if matches!(g.ty, Type::Ptr(_)) => {
+                    self.emit_ptr_data_section_kind(false);
+                    writeln!(self.out, "\t.p2align\t3").unwrap();
+                    writeln!(self.out, "{sym}:").unwrap();
+                    self.emit_quad_sym_addr(&self.c_sym(v));
+                }
                 Expr::InitList { fields } => {
                     // Writable structs (memblock, etc.) must live in .data, not
                     // .rodata — early boot writes regions/cnt and a RO page would
@@ -2197,7 +2174,10 @@ impl Codegen {
                     }
                 }
                 other => {
-                    if let Some(n) = Self::const_i64(other) {
+                    // Prefer const_i64_env so sizeof(T)*N (SQLite bitmask_size)
+                    // folds; Self::const_i64 alone leaves BSS zeros and breaks
+                    // join3 / Tcl_LinkVar bitmask_size.
+                    if let Some(n) = self.const_i64_env(other) {
                         let sec = if n == 0 { "bss" } else { "data" };
                         self.emit_var_section(g, sec);
                         let al = self.type_align(&g.ty).max(1).min(8);
@@ -2561,7 +2541,8 @@ impl Codegen {
 
     fn emit_scalar_data(&mut self, ty: &Type, e: &Expr) -> Result<(), String> {
         // Fold simple constant expressions for static storage duration.
-        if let Some(n) = Self::const_i64(e) {
+        // const_i64_env folds sizeof(T) and sizeof(T)*N (needs type_size).
+        if let Some(n) = self.const_i64_env(e) {
             match ty {
                 // Integer into float field must use IEEE bits, not raw int directive.
                 Type::Float => {
@@ -2577,7 +2558,6 @@ impl Codegen {
             }
             return Ok(());
         }
-        // sizeof(...) is static-const but not handled by const_i64 (needs type_size).
         match e {
             Expr::SizeofType(t) => {
                 let n = self.type_size(t);
@@ -2705,8 +2685,27 @@ impl Codegen {
                 // Peel casts of string/function for static init
                 return self.emit_scalar_data(ty, expr);
             }
-            _ => {
-                writeln!(self.out, "\t.zero\t{}", self.type_size(ty)).unwrap();
+            other => {
+                if let Some(n) = self.const_i64_env(other) {
+                    match ty {
+                        Type::Float => writeln!(self.out, "\t.float\t{}", n as f32).unwrap(),
+                        Type::Double => writeln!(self.out, "\t.double\t{}", n as f64).unwrap(),
+                        _ => {
+                            let sz = self.type_size(ty);
+                            if sz <= 1 {
+                                writeln!(self.out, "\t.byte\t{n}").unwrap();
+                            } else if sz == 2 {
+                                writeln!(self.out, "\t.short\t{n}").unwrap();
+                            } else if sz <= 4 {
+                                writeln!(self.out, "\t.long\t{n}").unwrap();
+                            } else {
+                                writeln!(self.out, "\t.quad\t{n}").unwrap();
+                            }
+                        }
+                    }
+                } else {
+                    writeln!(self.out, "\t.zero\t{}", self.type_size(ty)).unwrap();
+                }
             }
         }
         Ok(())
@@ -2758,8 +2757,138 @@ impl Codegen {
     }
 
     /// Constant-fold with optional enum/static-const environment.
+    /// Also folds `sizeof(T)` / `sizeof(expr)` via type_size (SQLite
+    /// `static int bitmask_size = sizeof(Bitmask)*8`).
     fn const_i64_env(&self, e: &Expr) -> Option<i64> {
-        Self::const_i64_with(e, Some(&self.const_globals))
+        self.const_i64_with_sizeof(e, Some(&self.const_globals))
+    }
+
+    fn sizeof_const_i64(&self, e: &Expr) -> Option<i64> {
+        match e {
+            Expr::SizeofType(t) => Some(self.type_size(t)),
+            Expr::SizeofExpr(ex) => {
+                if let Expr::String(s) = ex.as_ref() {
+                    return Some((s.len() + 1) as i64);
+                }
+                let et = self.typeof_expr(ex, &HashMap::new());
+                Some(match &et {
+                    Type::Array(elem, n) => self.type_size(elem) * (*n).max(0),
+                    other => self.type_size(other),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn const_i64_with_sizeof(
+        &self,
+        e: &Expr,
+        env: Option<&HashMap<String, i64>>,
+    ) -> Option<i64> {
+        if let Some(n) = self.sizeof_const_i64(e) {
+            return Some(n);
+        }
+        match e {
+            Expr::Int(n) | Expr::Char(n) => Some(*n),
+            Expr::Var(name) => env.and_then(|m| m.get(name).copied()),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => Some(-self.const_i64_with_sizeof(expr, env)?),
+            Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr,
+            } => Some(!self.const_i64_with_sizeof(expr, env)?),
+            Expr::Cast { expr, .. } => self.const_i64_with_sizeof(expr, env),
+            Expr::Binary { op, left, right } => {
+                let l = self.const_i64_with_sizeof(left, env)?;
+                let r = self.const_i64_with_sizeof(right, env)?;
+                Self::const_i64_apply_binop(*op, l, r)
+            }
+            Expr::Cond {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                let c = self.const_i64_with_sizeof(cond, env)?;
+                if c != 0 {
+                    self.const_i64_with_sizeof(then_e, env)
+                } else {
+                    self.const_i64_with_sizeof(else_e, env)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn const_i64_apply_binop(op: BinOp, l: i64, r: i64) -> Option<i64> {
+        // Shared by const_i64_with / const_i64_with_sizeof.
+        let u = (l as u64, r as u64);
+        let unsignedish = l < 0 || r < 0;
+        Some(match op {
+            BinOp::Add => l.wrapping_add(r),
+            BinOp::Sub => l.wrapping_sub(r),
+            BinOp::Mul => l.wrapping_mul(r),
+            BinOp::Div if r != 0 => {
+                if unsignedish {
+                    (u.0 / u.1) as i64
+                } else {
+                    l / r
+                }
+            }
+            BinOp::Mod if r != 0 => {
+                if unsignedish {
+                    (u.0 % u.1) as i64
+                } else {
+                    l % r
+                }
+            }
+            BinOp::Shl => l.wrapping_shl(r as u32),
+            BinOp::Shr => {
+                if unsignedish {
+                    (u.0 >> (r as u32)) as i64
+                } else {
+                    l.wrapping_shr(r as u32)
+                }
+            }
+            BinOp::BitAnd => l & r,
+            BinOp::BitOr => l | r,
+            BinOp::BitXor => l ^ r,
+            BinOp::Comma => r,
+            BinOp::Eq => (l == r) as i64,
+            BinOp::Ne => (l != r) as i64,
+            BinOp::Lt => {
+                if unsignedish {
+                    (u.0 < u.1) as i64
+                } else {
+                    (l < r) as i64
+                }
+            }
+            BinOp::Le => {
+                if unsignedish {
+                    (u.0 <= u.1) as i64
+                } else {
+                    (l <= r) as i64
+                }
+            }
+            BinOp::Gt => {
+                if unsignedish {
+                    (u.0 > u.1) as i64
+                } else {
+                    (l > r) as i64
+                }
+            }
+            BinOp::Ge => {
+                if unsignedish {
+                    (u.0 >= u.1) as i64
+                } else {
+                    (l >= r) as i64
+                }
+            }
+            BinOp::And => ((l != 0) && (r != 0)) as i64,
+            BinOp::Or => ((l != 0) || (r != 0)) as i64,
+            _ => return None,
+        })
     }
 
     fn const_i64_with(e: &Expr, env: Option<&HashMap<String, i64>>) -> Option<i64> {
@@ -2778,74 +2907,21 @@ impl Codegen {
             Expr::Binary { op, left, right } => {
                 let l = Self::const_i64_with(left, env)?;
                 let r = Self::const_i64_with(right, env)?;
-                // When either operand has the high bit set it is almost always a
-                // u64 value folded as i64 (-1 == UINT64_MAX). Signed / % >> and
-                // relational ops then miscompute e.g. (UINT64_MAX-9)/10 → -1
-                // instead of 1844674407370955160 — breaks sqlite3AtoF LARGEST_UINT64.
-                let u = (l as u64, r as u64);
-                let unsignedish = l < 0 || r < 0;
-                Some(match op {
-                    BinOp::Add => l.wrapping_add(r),
-                    BinOp::Sub => l.wrapping_sub(r),
-                    BinOp::Mul => l.wrapping_mul(r),
-                    BinOp::Div if r != 0 => {
-                        if unsignedish {
-                            (u.0 / u.1) as i64
-                        } else {
-                            l / r
-                        }
-                    }
-                    BinOp::Mod if r != 0 => {
-                        if unsignedish {
-                            (u.0 % u.1) as i64
-                        } else {
-                            l % r
-                        }
-                    }
-                    BinOp::Shl => l.wrapping_shl(r as u32),
-                    BinOp::Shr => {
-                        if unsignedish {
-                            (u.0 >> (r as u32)) as i64
-                        } else {
-                            l.wrapping_shr(r as u32)
-                        }
-                    }
-                    BinOp::BitAnd => l & r,
-                    BinOp::BitOr => l | r,
-                    BinOp::BitXor => l ^ r,
-                    BinOp::Comma => r,
-                    BinOp::Eq => (l == r) as i64,
-                    BinOp::Ne => (l != r) as i64,
-                    BinOp::Lt => {
-                        if unsignedish {
-                            (u.0 < u.1) as i64
-                        } else {
-                            (l < r) as i64
-                        }
-                    }
-                    BinOp::Le => {
-                        if unsignedish {
-                            (u.0 <= u.1) as i64
-                        } else {
-                            (l <= r) as i64
-                        }
-                    }
-                    BinOp::Gt => {
-                        if unsignedish {
-                            (u.0 > u.1) as i64
-                        } else {
-                            (l > r) as i64
-                        }
-                    }
-                    BinOp::Ge => {
-                        if unsignedish {
-                            (u.0 >= u.1) as i64
-                        } else {
-                            (l >= r) as i64
-                        }
-                    }
-                    _ => return None,
-                })
+                Self::const_i64_apply_binop(*op, l, r)
+            }
+            // Remaining arms kept for callers that still use const_i64_with
+            // without sizeof; Binary is handled above via apply_binop.
+            Expr::Cond {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                let c = Self::const_i64_with(cond, env)?;
+                if c != 0 {
+                    Self::const_i64_with(then_e, env)
+                } else {
+                    Self::const_i64_with(else_e, env)
+                }
             }
             _ => None,
         }
@@ -2930,10 +3006,10 @@ impl Codegen {
 
     /// Soft freestanding (mid-boot no-ops / body replacements) is **opt-in**.
     /// Stage C1 PASS forbids discarding real C bodies for named kernel helpers
-    /// unless the operator sets `GGCC_SOFT_FREESTANDING=1` (ladder debugging only).
+    /// unless the operator sets `ACC_SOFT_FREESTANDING=1` (ladder debugging only).
     fn soft_freestanding_enabled() -> bool {
         matches!(
-            std::env::var("GGCC_SOFT_FREESTANDING").ok().as_deref(),
+            std::env::var("ACC_SOFT_FREESTANDING").ok().as_deref(),
             Some("1") | Some("true") | Some("yes")
         )
     }
@@ -2942,7 +3018,7 @@ impl Codegen {
     /// building the Linux kernel. Userspace (Redis/SQLite) must keep real bodies.
     fn kernel_freestanding_enabled() -> bool {
         matches!(
-            std::env::var("GGCC_KERNEL_FREESTANDING").ok().as_deref(),
+            std::env::var("ACC_KERNEL_FREESTANDING").ok().as_deref(),
             Some("1") | Some("true") | Some("yes")
         )
     }
@@ -2951,10 +3027,11 @@ impl Codegen {
     /// Hard asm replacements (idmap, tpidr, unaligned load) are NOT listed here.
     fn is_soft_freestanding_name(name: &str) -> bool {
         // Gradual real-body ladder: names listed here emit real C when
-        // GGCC_SOFT_FREESTANDING=0. Empty for now — early paging real bodies
-        // still hang past Linux version; mid-boot + run_init stay hard keepers
-        // so soft=0 PASS path can still prove init/pid1 with freestanding
-        // language-gap helpers (not soft SYSCC).
+        // ACC_SOFT_FREESTANDING=0. Empty for now — soft-listing rest_init /
+        // do_basic_setup / VFS into main.c (#113–#114) hung after
+        // random_init_early (before vfs_caches_init_early). A07 instead
+        // keeps init handoff as hard freestanding but routes through
+        // kernel_init + kernel_execve (no acc_real_init_payload).
         let _ = name;
         false
     }
@@ -2964,7 +3041,7 @@ impl Codegen {
     /// plain load than an unassemblable / empty `1:ldr %0` hole.
     ///
     /// Soft mid-boot body *replacements* (no-ops / partial stubs that discard
-    /// real C) only run when `GGCC_SOFT_FREESTANDING=1`. Default PASS path
+    /// real C) only run when `ACC_SOFT_FREESTANDING=1`. Default PASS path
     /// emits real AST bodies for those names.
     fn emit_freestanding_kernel_helper(&mut self, f: &Function) -> Result<bool, String> {
         if !Self::kernel_freestanding_enabled() {
@@ -2988,7 +3065,7 @@ impl Codegen {
                 writeln!(self.out, "\tret").unwrap();
                 Ok(true)
             }
-            // Early idmap: ggcc's general map_range/create_init_idmap mis-packs
+            // Early idmap: acc's general map_range/create_init_idmap mis-packs
             // 9-arg calls and historically embedded compound-literal data in
             // .init.text. A minimal correct identity map is enough for MMU on.
             "create_init_idmap" => {
@@ -3000,7 +3077,7 @@ impl Codegen {
                 Ok(true)
             }
             // percpu: real bodies use asm(ALTERNATIVE("msr/mrs tpidr_el1", …))
-            // which ggcc PP does not expand and large TUs still drop. Without a
+            // which acc PP does not expand and large TUs still drop. Without a
             // real msr, __my_cpu_offset stays 0 → this_cpu_ptr → FAR=0 in
             // __percpu_read_64. Plain tpidr_el1 is correct for non-VHE (QEMU virt).
             "set_my_cpu_offset" => {
@@ -3040,7 +3117,7 @@ impl Codegen {
             // 0x9000000) around the MMIO write, then restore reserved TTBR0.
             "_printk" | "printk" => {
                 let sym = self.c_sym(&f.name);
-                let idmap_phys = self.c_sym("ggcc_idmap_phys");
+                let idmap_phys = self.c_sym("acc_idmap_phys");
                 // Strong .data slot in printk.o. PI objects rename externs with
                 // __pi_ prefix, so also export the alias PI looks up.
                 writeln!(self.out, "\n\t.globl\t{idmap_phys}").unwrap();
@@ -3082,11 +3159,11 @@ impl Codegen {
                 // Detect high-VA (post early_map_kernel): PC has top bits set.
                 // Pre-MMU / idmap-active: use UART phys directly.
                 // Post cpu_uninstall_idmap: reinstall idmap via phys saved at
-                // create_init_idmap into ggcc_idmap_phys.
+                // create_init_idmap into acc_idmap_phys.
                 writeln!(self.out, "\tadr\tx9, 2b").unwrap();
                 writeln!(self.out, "\tlsr\tx10, x9, #48").unwrap();
                 writeln!(self.out, "\tcbz\tx10, 6f").unwrap(); // low PC → direct UART
-                // High VA: save TTBR0, switch to phys idmap from ggcc_idmap_phys.
+                // High VA: save TTBR0, switch to phys idmap from acc_idmap_phys.
                 writeln!(self.out, "\tmrs\tx23, ttbr0_el1").unwrap();
                 writeln!(self.out, "\tadrp\tx9, {idmap_phys}").unwrap();
                 writeln!(self.out, "\tldr\tx9, [x9, :lo12:{idmap_phys}]").unwrap();
@@ -3169,8 +3246,8 @@ impl Codegen {
                     self.emit_named_section(sec);
                 }
                 // Early page-table page pool (phys-identity via kernel map).
-                let pool = self.c_sym("ggcc_early_pt_pool");
-                let pool_next = self.c_sym("ggcc_early_pt_next");
+                let pool = self.c_sym("acc_early_pt_pool");
+                let pool_next = self.c_sym("acc_early_pt_next");
                 writeln!(self.out, "\t.globl\t{pool}").unwrap();
                 writeln!(self.out, "\t.globl\t{pool_next}").unwrap();
                 writeln!(self.out, "\t.bss").unwrap();
@@ -3414,6 +3491,8 @@ impl Codegen {
                 writeln!(self.out, "3:").unwrap();
                 writeln!(self.out, "\tadr\tx0, 2b").unwrap();
                 writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
+                // A08: initrd FDT scan deferred to populate_rootfs (needs linear
+                // map from map_mem; early idmap only covers the kernel image).
                 writeln!(self.out, "\tmov\tx0, xzr").unwrap();
                 writeln!(self.out, "\tldp\tx29, x30, [sp], #16").unwrap();
                 writeln!(self.out, "\tret").unwrap();
@@ -3452,7 +3531,7 @@ impl Codegen {
                 Ok(true)
             }
             // smp_setup_processor_id's real body ends in _printk before any
-            // console is registered; ggcc's vprintk path currently takes a
+            // console is registered; acc's vprintk path currently takes a
             // Prefetch Abort (ELR=0) there and never reaches setup_arch /
             // setup_earlycon. Minimal body: record CPU0 mpidr map only.
             "smp_setup_processor_id" => {
@@ -3483,11 +3562,11 @@ impl Codegen {
                 Ok(true)
             }
             // kasan_init_sw_tags: hard-exit setup_arch via saved LR.
-            // BSS slot ggcc_setup_arch_lr is defined by setup_arch prologue.
+            // BSS slot acc_setup_arch_lr is defined by setup_arch prologue.
             "kasan_init_sw_tags" => {
                 let sym = self.c_sym(&f.name);
                 let ba = self.c_sym("boot_args");
-                let saved_lr = self.c_sym("ggcc_setup_arch_lr");
+                let saved_lr = self.c_sym("acc_setup_arch_lr");
                 if let Some(sec) = f.section.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     self.emit_named_section(sec);
                 } else {
@@ -3540,15 +3619,15 @@ impl Codegen {
             }
             // memblock_free_all: real path needs sparse vmemmap + buddy
             // (__free_pages_core). Freestanding: count free DRAM PFNs, seed a
-            // linear-map bump freelist (ggcc_bump_*), and set _totalram_pages.
+            // linear-map bump freelist (acc_bump_*), and set _totalram_pages.
             // Not a real buddy — no coalescing / struct page freelist — but
             // __get_free_pages can hand out real mapped pages.
             "memblock_free_all" => {
                 let sym = self.c_sym(&f.name);
-                let bump_cur = self.c_sym("ggcc_bump_va_cur");
-                let bump_end = self.c_sym("ggcc_bump_va_end");
-                let bump_pages = self.c_sym("ggcc_bump_pages");
-                let bump_once = self.c_sym("ggcc_bump_alloc_once");
+                let bump_cur = self.c_sym("acc_bump_va_cur");
+                let bump_end = self.c_sym("acc_bump_va_end");
+                let bump_pages = self.c_sym("acc_bump_pages");
+                let bump_once = self.c_sym("acc_bump_alloc_once");
                 // Emit bump globals once (strong) from this freestanding body.
                 writeln!(self.out, "\n\t.globl\t{bump_cur}").unwrap();
                 writeln!(self.out, "\t.globl\t{bump_end}").unwrap();
@@ -3638,8 +3717,8 @@ impl Codegen {
             "__get_free_pages" | "__get_free_pages_noprof" | "get_zeroed_page"
             | "__get_free_page" => {
                 let sym = self.c_sym(&f.name);
-                let bump_cur = self.c_sym("ggcc_bump_va_cur");
-                let bump_end = self.c_sym("ggcc_bump_va_end");
+                let bump_cur = self.c_sym("acc_bump_va_cur");
+                let bump_end = self.c_sym("acc_bump_va_end");
                 if !f.is_static {
                     writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
                 } else {
@@ -3680,7 +3759,7 @@ impl Codegen {
                 }
                 // one-shot breadcrumb on first successful alloc (flag in
                 // memblock_free_all's .data — do not redefine here).
-                let once = self.c_sym("ggcc_bump_alloc_once");
+                let once = self.c_sym("acc_bump_alloc_once");
                 writeln!(self.out, "\tadrp\tx0, {once}").unwrap();
                 writeln!(self.out, "\tldr\tx1, [x0, :lo12:{once}]").unwrap();
                 writeln!(self.out, "\tcbnz\tx1, 6f").unwrap();
@@ -3889,13 +3968,15 @@ impl Codegen {
                 writeln!(self.out, "\tret").unwrap();
                 Ok(true)
             }
-            // rest_init: real body hangs on smp_processor_id/percpu (tpidr) and
-            // later real complete/cpu_startup_entry. Freestanding sync-calls
-            // REAL kernel_init (main.c) then parks — advances C1 past #83 hang
-            // without claiming CFS/kthread.
+            // rest_init: populate_rootfs (initrd unpack) then run_init_process.
+            // Calling real kernel_init hangs after kernel_init_freeable: soft
+            // (async_synchronize_full / free_initmem path) before run_init —
+            // keep direct handoff until freeable/initcalls are de-softed safely.
             "rest_init" => {
                 let sym = self.c_sym(&f.name);
                 let run_init = self.c_sym("run_init_process");
+                let populate = self.c_sym("populate_rootfs");
+                let wait_initramfs = self.c_sym("wait_for_initramfs");
                 if !f.is_static {
                     writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
                 } else {
@@ -3910,7 +3991,7 @@ impl Codegen {
                 writeln!(self.out, "0:").unwrap();
                 writeln!(
                     self.out,
-                    "\t.asciz\t\"rest_init: freestanding (direct run_init_process)\\n\""
+                    "\t.asciz\t\"rest_init: freestanding (populate → run_init → kernel_execve)\\n\""
                 )
                 .unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
@@ -3920,8 +4001,9 @@ impl Codegen {
                 writeln!(self.out, "1:").unwrap();
                 writeln!(self.out, "\tadr\tx0, 0b").unwrap();
                 writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
-                // Skip real kernel_init (NULL-deref without VFS/binfmt); hand
-                // off straight to freestanding run_init_process → pid1 payload.
+                // A08: unpack initrd before execve (do_basic_setup still soft).
+                writeln!(self.out, "\tbl\t{populate}").unwrap();
+                writeln!(self.out, "\tbl\t{wait_initramfs}").unwrap();
                 writeln!(self.out, "\tadr\tx0, 6b").unwrap();
                 writeln!(self.out, "\tbl\t{run_init}").unwrap();
                 writeln!(self.out, "\tb\t3f").unwrap();
@@ -3946,8 +4028,8 @@ impl Codegen {
             // complete(kthreadd_done) runs first (matches real ordering).
             "user_mode_thread" => {
                 let sym = self.c_sym(&f.name);
-                let dfn = self.c_sym("ggcc_deferred_fn");
-                let darg = self.c_sym("ggcc_deferred_arg");
+                let dfn = self.c_sym("acc_deferred_fn");
+                let darg = self.c_sym("acc_deferred_arg");
                 writeln!(self.out, "\n\t.globl\t{dfn}").unwrap();
                 writeln!(self.out, "\t.globl\t{darg}").unwrap();
                 writeln!(self.out, "\t.data").unwrap();
@@ -4042,8 +4124,8 @@ impl Codegen {
             "schedule_preempt_disabled" | "schedule" | "schedule_timeout" => {
                 // Run deferred user_mode_thread fn once (kernel_init).
                 let sym = self.c_sym(&f.name);
-                let dfn = self.c_sym("ggcc_deferred_fn");
-                let darg = self.c_sym("ggcc_deferred_arg");
+                let dfn = self.c_sym("acc_deferred_fn");
+                let darg = self.c_sym("acc_deferred_arg");
                 if !f.is_static {
                     writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
                 }
@@ -4094,14 +4176,12 @@ impl Codegen {
             "find_task_by_pid_ns" | "find_task_by_vpid" => {
                 // Return a dedicated dummy task blob so rest_init's
                 // tsk->flags |= … cannot corrupt real init_task if offsetof
-                // is wrong under ggcc type layout.
+                // is wrong under acc type layout.
+                // Use .comm — both find_task_* live in kernel/pid.c and would
+                // otherwise double-define a .bss label in one TU.
                 let sym = self.c_sym(&f.name);
-                let dummy = self.c_sym("ggcc_dummy_task");
-                writeln!(self.out, "\n\t.globl\t{dummy}").unwrap();
-                writeln!(self.out, "\t.bss").unwrap();
-                writeln!(self.out, "\t.p2align\t4").unwrap();
-                writeln!(self.out, "{dummy}:").unwrap();
-                writeln!(self.out, "\t.zero\t4096").unwrap();
+                let dummy = self.c_sym("acc_dummy_task");
+                writeln!(self.out, "\n\t.comm\t{dummy},4096,16").unwrap();
                 writeln!(self.out, "\t.text").unwrap();
                 if !f.is_static {
                     writeln!(self.out, "\t.globl\t{sym}").unwrap();
@@ -4143,13 +4223,12 @@ impl Codegen {
                 Ok(true)
             }
             "run_init_process" | "try_to_run_init_process" => {
-                // C1 handoff: print markers, then call ggcc-compiled
-                // ggcc_real_init_payload (kernel-linked .text from
-                // init/ggcc_init_payload.c). Not full VFS/binfmt EL0 exec
-                // yet — payload runs at EL1 via freestanding run_init.
+                // Attempt real kernel_execve (fails without VFS), then freestanding
+                // EL0 busybox load from acc_busybox_blob (A09).
                 // MUST live in .text — __init may be discarded by free_initmem.
                 let sym = self.c_sym(&f.name);
-                let payload = self.c_sym("ggcc_real_init_payload");
+                let kexec = self.c_sym("kernel_execve");
+                let el0 = self.c_sym("acc_el0_run_busybox");
                 if !f.is_static {
                     writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
                 } else {
@@ -4158,9 +4237,10 @@ impl Codegen {
                 writeln!(self.out, "\t.text").unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
                 writeln!(self.out, "{sym}:").unwrap();
-                writeln!(self.out, "\tstp\tx29, x30, [sp, #-16]!").unwrap();
+                // Frame + path + argv[2] + envp[1] = 16+8+16+8 → 48, align 16 → 64
+                writeln!(self.out, "\tstp\tx29, x30, [sp, #-64]!").unwrap();
                 writeln!(self.out, "\tmov\tx29, sp").unwrap();
-                writeln!(self.out, "\tstp\tx19, x20, [sp, #-16]!").unwrap();
+                writeln!(self.out, "\tstr\tx19, [sp, #16]").unwrap();
                 writeln!(self.out, "\tmov\tx19, x0").unwrap(); // path
                 writeln!(self.out, "\tb\t1f").unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
@@ -4174,23 +4254,58 @@ impl Codegen {
                 writeln!(self.out, "1:").unwrap();
                 writeln!(self.out, "\tadr\tx0, 0b").unwrap();
                 writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
-                // Call ggcc-compiled payload (prints its own serial line).
-                writeln!(self.out, "\tbl\t{payload}").unwrap();
+                // argv = { path, NULL }; envp = { NULL }
+                writeln!(self.out, "\tstr\tx19, [sp, #32]").unwrap();
+                writeln!(self.out, "\tstr\txzr, [sp, #40]").unwrap();
+                writeln!(self.out, "\tstr\txzr, [sp, #48]").unwrap();
+                writeln!(self.out, "\tmov\tx0, x19").unwrap();
+                writeln!(self.out, "\tadd\tx1, sp, #32").unwrap();
+                writeln!(self.out, "\tadd\tx2, sp, #48").unwrap();
+                writeln!(self.out, "\tbl\t{kexec}").unwrap();
                 writeln!(self.out, "\tb\t5f").unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
                 writeln!(self.out, "4:").unwrap();
                 writeln!(
                     self.out,
-                    "\t.asciz\t\"working init: ggcc payload returned (pid1 handoff; no EL0 binfmt yet)\\n\""
+                    "\t.asciz\t\"kernel_execve returned — try freestanding EL0 busybox\\n\""
                 )
                 .unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
                 writeln!(self.out, "5:").unwrap();
                 writeln!(self.out, "\tadr\tx0, 4b").unwrap();
                 writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
-                // Return 0 = success so real kernel_init does `if (!ret) return 0`.
+                // A09: map cpio busybox ELF and eret to EL0 (does not return on success).
+                writeln!(self.out, "\tbl\t{el0}").unwrap();
                 writeln!(self.out, "\tmov\tx0, xzr").unwrap();
-                writeln!(self.out, "\tldp\tx19, x20, [sp], #16").unwrap();
+                writeln!(self.out, "\tldr\tx19, [sp, #16]").unwrap();
+                writeln!(self.out, "\tldp\tx29, x30, [sp], #64").unwrap();
+                writeln!(self.out, "\tret").unwrap();
+                Ok(true)
+            }
+            // A08: wait_for_initramfs — sync already done by stubs populate_rootfs.
+            // (populate_rootfs / unpack_to_rootfs are global in acc_vmlinux_stubs.c
+            // because the real static rootfs_initcall is unreachable to acc.)
+            "wait_for_initramfs" => {
+                let sym = self.c_sym(&f.name);
+                writeln!(self.out, "\n\t.globl\t{sym}").unwrap();
+                writeln!(self.out, "\t.text").unwrap();
+                writeln!(self.out, "\t.p2align\t2").unwrap();
+                writeln!(self.out, "{sym}:").unwrap();
+                writeln!(self.out, "\tstp\tx29, x30, [sp, #-16]!").unwrap();
+                writeln!(self.out, "\tmov\tx29, sp").unwrap();
+                writeln!(self.out, "\tb\t1f").unwrap();
+                writeln!(self.out, "\t.p2align\t2").unwrap();
+                writeln!(self.out, "0:").unwrap();
+                writeln!(
+                    self.out,
+                    "\t.asciz\t\"wait_for_initramfs: freestanding (sync already done)\\n\""
+                )
+                .unwrap();
+                writeln!(self.out, "\t.p2align\t2").unwrap();
+                writeln!(self.out, "1:").unwrap();
+                writeln!(self.out, "\tadr\tx0, 0b").unwrap();
+                writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
+                writeln!(self.out, "\tmov\tx0, xzr").unwrap();
                 writeln!(self.out, "\tldp\tx29, x30, [sp], #16").unwrap();
                 writeln!(self.out, "\tret").unwrap();
                 Ok(true)
@@ -4230,7 +4345,7 @@ impl Codegen {
                 writeln!(self.out, "2:").unwrap();
                 writeln!(
                     self.out,
-                    "\t.asciz\t\"No working init found (ggcc freestanding park; need buddy+CFS+VFS)\\n\""
+                    "\t.asciz\t\"No working init found (acc freestanding park; need buddy+CFS+VFS)\\n\""
                 )
                 .unwrap();
                 writeln!(self.out, "\t.p2align\t2").unwrap();
@@ -4312,6 +4427,9 @@ impl Codegen {
             | "setup_boot_config" | "setup_command_line" | "setup_nr_cpu_ids"
             | "setup_per_cpu_areas" | "smp_prepare_boot_cpu" | "boot_cpu_hotplug_init"
             | "sort_main_extable" | "trap_init" | "poking_init"
+            // A07: real vfs_caches_init_early hangs after setup_log_buf when mm
+            // bump freelist is live (#117); soft stub restores Dentry breadcrumb.
+            | "vfs_caches_init_early"
             | "ftrace_init" | "early_trace_init" | "radix_tree_init"
             | "maple_tree_init" | "housekeeping_init" | "workqueue_init_early"
             | "rcu_init" | "trace_init" | "context_tracking_init" | "early_irq_init"
@@ -4521,6 +4639,24 @@ impl Codegen {
                     writeln!(self.out, "\tadr\tx0, 0b").unwrap();
                     writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
                     writeln!(self.out, "\tldp\tx29, x30, [sp], #16").unwrap();
+                } else if f.name == "vfs_caches_init_early" {
+                    // Match historical serial crumbs from real early VFS init.
+                    writeln!(self.out, "\tstp\tx29, x30, [sp, #-16]!").unwrap();
+                    writeln!(self.out, "\tmov\tx29, sp").unwrap();
+                    writeln!(self.out, "\tb\t1f").unwrap();
+                    writeln!(self.out, "\t.p2align\t2").unwrap();
+                    writeln!(self.out, "0:").unwrap();
+                    writeln!(self.out, "\t.asciz\t\"Dentry cache\\n\"").unwrap();
+                    writeln!(self.out, "\t.p2align\t2").unwrap();
+                    writeln!(self.out, "2:").unwrap();
+                    writeln!(self.out, "\t.asciz\t\"Inode-cache\\n\"").unwrap();
+                    writeln!(self.out, "\t.p2align\t2").unwrap();
+                    writeln!(self.out, "1:").unwrap();
+                    writeln!(self.out, "\tadr\tx0, 0b").unwrap();
+                    writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
+                    writeln!(self.out, "\tadr\tx0, 2b").unwrap();
+                    writeln!(self.out, "\tbl\t{}", self.c_sym("_printk")).unwrap();
+                    writeln!(self.out, "\tldp\tx29, x30, [sp], #16").unwrap();
                 } else {
                     // Default soft freestanding: breadcrumb with function name so
                     // serial shows the last soft step before hang.
@@ -4563,9 +4699,9 @@ impl Codegen {
             self.emit_named_section(sec);
         }
         writeln!(self.out, "\t.p2align\t2").unwrap();
-        // ggcc_idmap_phys is defined by freestanding _printk (hard early console).
+        // acc_idmap_phys is defined by freestanding _printk (hard early console).
         // Only store into it here — do not re-define (PI multi-def with printk.o).
-        let idmap_phys = self.c_sym("ggcc_idmap_phys");
+        let idmap_phys = self.c_sym("acc_idmap_phys");
         writeln!(self.out, "{sym}:").unwrap();
         // Save frame
         writeln!(self.out, "\tstp\tx29, x30, [sp, #-16]!").unwrap();
@@ -4575,7 +4711,7 @@ impl Codegen {
         writeln!(self.out, "\tstp\tx21, x22, [sp, #-16]!").unwrap();
         writeln!(self.out, "\tstp\tx23, x24, [sp, #-16]!").unwrap();
         writeln!(self.out, "\tmov\tx19, x0").unwrap();
-        // Stash phys idmap (x0 is phys with MMU off) into ggcc_idmap_phys.
+        // Stash phys idmap (x0 is phys with MMU off) into acc_idmap_phys.
         // Pre-MMU adrp of that .data symbol yields phys.
         writeln!(self.out, "\tadrp\tx9, {idmap_phys}").unwrap();
         writeln!(self.out, "\tstr\tx0, [x9, :lo12:{idmap_phys}]").unwrap();
@@ -4659,7 +4795,7 @@ impl Codegen {
         writeln!(self.out, "\tb\t4f").unwrap();
         writeln!(self.out, "\t.p2align\t2").unwrap();
         writeln!(self.out, "3:").unwrap();
-        writeln!(self.out, "\t.ascii\t\"ggcc-boot\\r\\n\\0\"").unwrap();
+        writeln!(self.out, "\t.ascii\t\"acc-boot\\r\\n\\0\"").unwrap();
         writeln!(self.out, "\t.p2align\t2").unwrap();
         writeln!(self.out, "4:").unwrap();
         writeln!(self.out, "\tadr\tx2, 3b").unwrap();
@@ -4945,7 +5081,7 @@ impl Codegen {
         // setup_arch: define BSS LR slot before the function label so soft=0
         // builds still link when kasan freestanding is not emitted.
         if f.name == "setup_arch" {
-            let saved_lr = self.c_sym("ggcc_setup_arch_lr");
+            let saved_lr = self.c_sym("acc_setup_arch_lr");
             writeln!(self.out, "\n\t.globl\t{saved_lr}").unwrap();
             writeln!(self.out, "\t.bss").unwrap();
             writeln!(self.out, "\t.p2align\t3").unwrap();
@@ -4965,7 +5101,7 @@ impl Codegen {
         // corrupt the frame. kasan_init_sw_tags freestanding hard-exits via
         // this slot when the on-stack LR is garbage.
         if f.name == "setup_arch" {
-            let saved_lr = self.c_sym("ggcc_setup_arch_lr");
+            let saved_lr = self.c_sym("acc_setup_arch_lr");
             writeln!(self.out, "\tadrp\tx16, {saved_lr}").unwrap();
             writeln!(self.out, "\tstr\tx30, [x16, :lo12:{saved_lr}]").unwrap();
         }
@@ -5360,6 +5496,7 @@ impl Codegen {
                 lines,
                 in_loads,
                 out_stores,
+                out_store_exprs: _,
             } => {
                 // Evaluate input operands into assigned xN ("r"(off), matching
                 // "0"(ptr) for RELOC_HIDE, etc.).
@@ -5598,8 +5735,14 @@ impl Codegen {
                 }
                 if d.is_static {
                     // Emit once as a unique global; re-entry keeps the value.
-                    let gname = format!("__static_{}_{}", self.func_name, d.name);
-                    // Only emit data the first time we see this static in the function.
+                    // MUST uniquify by occurrence: C allows multiple
+                    // `static const char *TTYPE_strs[]` in sibling blocks of
+                    // the same function (tclsqlite.c DB_TRACE vs DB_TRANSACTION).
+                    // Reusing `__static_<func>_<name>` made transaction see the
+                    // trace table → "must be statement, profile, row, or close".
+                    let id = self.label_id;
+                    self.label_id += 1;
+                    let gname = format!("__static_{}_{}_{}", self.func_name, d.name, id);
                     if !self.globals.contains_key(&gname) {
                         let mut g = d.clone();
                         g.name = gname.clone();
@@ -5885,6 +6028,12 @@ impl Codegen {
             Stmt::Goto(name) => {
                 let lab = self.goto_lab(name);
                 writeln!(self.out, "\tb\t{lab}").unwrap();
+                Ok(())
+            }
+            Stmt::GotoIndirect(e) => {
+                // GCC `goto *expr` — address in x0, then branch.
+                self.emit_expr_rval(e, 0, typedefs)?;
+                writeln!(self.out, "\tbr\tx0").unwrap();
                 Ok(())
             }
             Stmt::Label(name, inner) => {
@@ -6651,7 +6800,10 @@ impl Codegen {
                     | Type::ULong
                     | Type::Char
                     | Type::Short
-                    | Type::UShort => {
+                    | Type::UShort
+                    | Type::Array(_, _) => {
+                        // Soft: postgres/kernel often member-access through
+                        // char[N] / opaque array overlays (sockaddr-style).
                         let mut fields = HashMap::new();
                         fields.insert(
                             field.clone(),
@@ -6771,6 +6923,38 @@ impl Codegen {
             }
             _ => {}
         }
+    }
+
+    /// C integer promotions + usual arithmetic conversions (no floats).
+    /// Narrow types promote to Int; UInt wins over Int at the same width so
+    /// `u32 + int` stays 32-bit unsigned (wraps), matching SQLite nOvfl math.
+    fn usual_arith_conv(l: &Type, r: &Type) -> Type {
+        let promote = |t: &Type| -> Type {
+            match t {
+                Type::Char | Type::SChar | Type::Short | Type::UShort => Type::Int,
+                other => other.clone(),
+            }
+        };
+        let l = promote(l);
+        let r = promote(r);
+        if matches!(l, Type::ULong) || matches!(r, Type::ULong) {
+            return Type::ULong;
+        }
+        if matches!(l, Type::Long) || matches!(r, Type::Long) {
+            return Type::Long;
+        }
+        if matches!(l, Type::UInt) || matches!(r, Type::UInt) {
+            return Type::UInt;
+        }
+        Type::Int
+    }
+
+    /// True when arithmetic must use 32-bit ops (wrap at 2^32).
+    fn is_narrow_int(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Int | Type::UInt | Type::Short | Type::UShort | Type::Char | Type::SChar
+        )
     }
 
     /// `__builtin_{add,sub,mul}_overflow(a, b, r)` — store wrapping result to `*r`,
@@ -6931,6 +7115,60 @@ impl Codegen {
         Ok(())
     }
 
+    /// Software / `cnt` popcount for GCC builtins (PostgreSQL pg_bitutils).
+    fn emit_builtin_popcount(
+        &mut self,
+        name: &str,
+        arg: &Expr,
+        dest: u8,
+        typedefs: &HashMap<String, Type>,
+    ) -> Result<(), String> {
+        self.emit_expr_rval(arg, 0, typedefs)?;
+        match name {
+            "__builtin_popcount" => {
+                writeln!(self.out, "\tcnt\tw0, w0").unwrap();
+            }
+            "__builtin_popcountl" | "__builtin_popcountll" => {
+                writeln!(self.out, "\tcnt\tx0, x0").unwrap();
+            }
+            _ => return Err(format!("unknown popcount builtin: {name}")),
+        }
+        if dest != 0 {
+            writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
+        }
+        Ok(())
+    }
+
+    /// GCC legacy `__sync_fetch_and_{add,sub,and,or}(ptr, val)` → old value.
+    fn emit_sync_fetch_and(
+        &mut self,
+        op: &str,
+        ptr: &Expr,
+        val: &Expr,
+        dest: u8,
+        typedefs: &HashMap<String, Type>,
+    ) -> Result<(), String> {
+        self.emit_expr_rval(ptr, 0, typedefs)?; // x0 = ptr
+        self.emit_expr_rval(val, 1, typedefs)?; // x1 = val
+        let lab = self.lab("sync_fetch");
+        writeln!(self.out, "{lab}:").unwrap();
+        writeln!(self.out, "\tldaxr\tx2, [x0]").unwrap();
+        match op {
+            "add" => writeln!(self.out, "\tadd\tx3, x2, x1").unwrap(),
+            "sub" => writeln!(self.out, "\tsub\tx3, x2, x1").unwrap(),
+            "and" => writeln!(self.out, "\tand\tx3, x2, x1").unwrap(),
+            "or" => writeln!(self.out, "\torr\tx3, x2, x1").unwrap(),
+            _ => return Err(format!("unknown sync op: {op}")),
+        }
+        writeln!(self.out, "\tstlxr\tw4, x3, [x0]").unwrap();
+        writeln!(self.out, "\tcbnz\tw4, {lab}").unwrap();
+        writeln!(self.out, "\tmov\tx0, x2").unwrap();
+        if dest != 0 {
+            writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
+        }
+        Ok(())
+    }
+
     fn store_ty(&mut self, ty: &Type, addr_reg: u8, val_reg: u8) {
         match ty {
             Type::Float => {
@@ -6993,6 +7231,11 @@ impl Codegen {
                 let slab = format!("l_str_{id}");
                 self.emit_adrp_add(dest, &slab);
                 Ok(Type::Ptr(Box::new(Type::Char)))
+            }
+            Expr::AddrOfLabel(label) => {
+                let lab = format!("L_{}_goto_{}", self.func_name, label);
+                self.emit_adrp_add(dest, &lab);
+                Ok(Type::Ptr(Box::new(Type::Void)))
             }
             Expr::Var(name) => {
                 // GCC/C99 predefined function name identifiers.
@@ -7138,7 +7381,7 @@ impl Codegen {
                     Ok(Type::Ptr(Box::new(ty)))
                 }
                 UnaryOp::Deref => {
-                    // va_arg(ap, double) → *(double*)__ggcc_va_arg(&ap). Walk the
+                    // va_arg(ap, double) → *(double*)__acc_va_arg(&ap). Walk the
                     // process VR cursor (set by va_start) so system-gcc callers work.
                     if let Expr::Cast {
                         ty: Type::Ptr(inner),
@@ -7147,8 +7390,8 @@ impl Codegen {
                     {
                         if matches!(inner.as_ref(), Type::Float | Type::Double) {
                             if let Expr::Call { name, args: _ } = call.as_ref() {
-                                if name == "__ggcc_va_arg" || name == "__ggcc_va_arg_fp" {
-                                    let cur = self.c_sym("ggcc_va_vr_cursor");
+                                if name == "__acc_va_arg" || name == "__acc_va_arg_fp" {
+                                    let cur = self.c_sym("acc_va_vr_cursor");
                                     self.referenced_data_syms.insert(cur.clone());
                                     // OS-correct page relocs (Darwin rejects Linux #:lo12:).
                                     match self.os {
@@ -7322,8 +7565,21 @@ impl Codegen {
                             writeln!(self.out, "\tadd\tx{dest}, x10, x9").unwrap();
                             return Ok(Type::Ptr(inner));
                         }
-                        writeln!(self.out, "\tadd\tx{dest}, x9, x10").unwrap();
-                        Ok(Type::Int)
+                        // 32-bit wrap for int/u32: SQLite clearCellOverflow relies on
+                        // `(u32)nPayload - nLocal + ovflPageSize` wrapping so nOvfl==0
+                        // for corrupt near-4GiB payloads (corruptI-6.1).
+                        let result_ty = Self::usual_arith_conv(&lty, &rty);
+                        if Self::is_narrow_int(&result_ty) {
+                            writeln!(self.out, "\tadd\tw{dest}, w9, w10").unwrap();
+                            // W-writes zero-extend; signed int results need sxtw so
+                            // negative offsets (ptr+(-1)) stay negative in X.
+                            if matches!(result_ty, Type::Int | Type::Short | Type::SChar) {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else {
+                            writeln!(self.out, "\tadd\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::Sub => {
                         if let Type::Ptr(inner) = &lty {
@@ -7341,27 +7597,28 @@ impl Codegen {
                             writeln!(self.out, "\tsub\tx{dest}, x9, x10").unwrap();
                             return Ok(lty);
                         }
-                        writeln!(self.out, "\tsub\tx{dest}, x9, x10").unwrap();
-                        // Preserve u64 through (LARGEST_UINT64-9)/10 chains.
-                        Ok(self.typeof_expr(
-                            &Expr::Binary {
-                                op: BinOp::Sub,
-                                left: left.clone(),
-                                right: right.clone(),
-                            },
-                            typedefs,
-                        ))
+                        let result_ty = Self::usual_arith_conv(&lty, &rty);
+                        if Self::is_narrow_int(&result_ty) {
+                            writeln!(self.out, "\tsub\tw{dest}, w9, w10").unwrap();
+                            if matches!(result_ty, Type::Int | Type::Short | Type::SChar) {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else {
+                            writeln!(self.out, "\tsub\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::Mul => {
-                        writeln!(self.out, "\tmul\tx{dest}, x9, x10").unwrap();
-                        Ok(self.typeof_expr(
-                            &Expr::Binary {
-                                op: BinOp::Mul,
-                                left: left.clone(),
-                                right: right.clone(),
-                            },
-                            typedefs,
-                        ))
+                        let result_ty = Self::usual_arith_conv(&lty, &rty);
+                        if Self::is_narrow_int(&result_ty) {
+                            writeln!(self.out, "\tmul\tw{dest}, w9, w10").unwrap();
+                            if matches!(result_ty, Type::Int | Type::Short | Type::SChar) {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else {
+                            writeln!(self.out, "\tmul\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::Div => {
                         // size_t / unsigned → udiv (MAX_SIZET/sizeof and
@@ -7374,7 +7631,12 @@ impl Codegen {
                         let rt = self.typeof_expr(right, typedefs);
                         let hi_bit = matches!(Self::const_i64_with(left, None), Some(n) if n < 0)
                             || matches!(Self::const_i64_with(right, None), Some(n) if n < 0);
+                        let result_ty = Self::usual_arith_conv(&lt, &rt);
                         let unsigned = hi_bit
+                            || matches!(
+                                result_ty,
+                                Type::UInt | Type::ULong | Type::UShort | Type::Char
+                            )
                             || matches!(
                                 lt,
                                 Type::UInt | Type::ULong | Type::UShort | Type::Char
@@ -7382,13 +7644,17 @@ impl Codegen {
                             || matches!(
                                 rt,
                                 Type::UInt | Type::ULong | Type::UShort | Type::Char
-                            )
-                            || matches!(
-                                lty,
-                                Type::UInt | Type::ULong | Type::UShort | Type::Char
                             );
+                        let narrow = Self::is_narrow_int(&result_ty);
                         if unsigned {
-                            writeln!(self.out, "\tudiv\tx{dest}, x9, x10").unwrap();
+                            if narrow {
+                                writeln!(self.out, "\tudiv\tw{dest}, w9, w10").unwrap();
+                            } else {
+                                writeln!(self.out, "\tudiv\tx{dest}, x9, x10").unwrap();
+                            }
+                        } else if narrow {
+                            writeln!(self.out, "\tsdiv\tw{dest}, w9, w10").unwrap();
+                            writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
                         } else {
                             writeln!(self.out, "\tsdiv\tx{dest}, x9, x10").unwrap();
                         }
@@ -7399,7 +7665,7 @@ impl Codegen {
                                 Type::UInt
                             }
                         } else {
-                            Type::Int
+                            result_ty
                         })
                     }
                     BinOp::Mod => {
@@ -7407,7 +7673,12 @@ impl Codegen {
                         let rt = self.typeof_expr(right, typedefs);
                         let hi_bit = matches!(Self::const_i64_with(left, None), Some(n) if n < 0)
                             || matches!(Self::const_i64_with(right, None), Some(n) if n < 0);
+                        let result_ty = Self::usual_arith_conv(&lt, &rt);
                         let unsigned = hi_bit
+                            || matches!(
+                                result_ty,
+                                Type::UInt | Type::ULong | Type::UShort | Type::Char
+                            )
                             || matches!(
                                 lt,
                                 Type::UInt | Type::ULong | Type::UShort | Type::Char
@@ -7415,17 +7686,24 @@ impl Codegen {
                             || matches!(
                                 rt,
                                 Type::UInt | Type::ULong | Type::UShort | Type::Char
-                            )
-                            || matches!(
-                                lty,
-                                Type::UInt | Type::ULong | Type::UShort | Type::Char
                             );
+                        let narrow = Self::is_narrow_int(&result_ty);
                         if unsigned {
-                            writeln!(self.out, "\tudiv\tx11, x9, x10").unwrap();
+                            if narrow {
+                                writeln!(self.out, "\tudiv\tw11, w9, w10").unwrap();
+                                writeln!(self.out, "\tmsub\tw{dest}, w11, w10, w9").unwrap();
+                            } else {
+                                writeln!(self.out, "\tudiv\tx11, x9, x10").unwrap();
+                                writeln!(self.out, "\tmsub\tx{dest}, x11, x10, x9").unwrap();
+                            }
+                        } else if narrow {
+                            writeln!(self.out, "\tsdiv\tw11, w9, w10").unwrap();
+                            writeln!(self.out, "\tmsub\tw{dest}, w11, w10, w9").unwrap();
+                            writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
                         } else {
                             writeln!(self.out, "\tsdiv\tx11, x9, x10").unwrap();
+                            writeln!(self.out, "\tmsub\tx{dest}, x11, x10, x9").unwrap();
                         }
-                        writeln!(self.out, "\tmsub\tx{dest}, x11, x10, x9").unwrap();
                         Ok(if unsigned {
                             if matches!(lt, Type::ULong) || matches!(rt, Type::ULong) {
                                 Type::ULong
@@ -7433,16 +7711,18 @@ impl Codegen {
                                 Type::UInt
                             }
                         } else {
-                            Type::Int
+                            result_ty
                         })
                     }
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                        // Always 64-bit cmp. Values live in full X registers; `cmp w`
-                        // only compares the low 32 bits and breaks u64 masks such as
-                        // sqlite3IsNaN's `(y & 0x7ff0000000000000) == 0x7ff0…` (low
-                        // half is always 0 → every finite double looked like NaN →
-                        // AtoF rewrote 1.1 to Inf). Signed 32-bit values are
-                        // sign-extended on load (ldrsw), so cmp x is correct for them too.
+                        // 64-bit cmp for wide types: u64 masks such as
+                        // sqlite3IsNaN's `(y & 0x7ff0000000000000) == 0x7ff0…`
+                        // break under `cmp w` (low half always 0 → every finite
+                        // double looked like NaN → AtoF rewrote 1.1 to Inf).
+                        // 32-bit cmp for narrow ints: AAPCS64 leaves high bits of
+                        // int returns undefined, so `unlink()==-1` fails with
+                        // `cmp x` (0xffffffff vs 0xffffffffffffffff). `cmp w`
+                        // compares the defined low half.
                         // Pointers must use unsigned relationals: SQLite's
                         // `z < (u8*)(-1)` in Utf8CharLen is always false under
                         // signed `lt` (high-bit zTerm = -1), so ESCAPE 'X' looked
@@ -7464,7 +7744,28 @@ impl Codegen {
                                 | Type::Ptr(_)
                                 | Type::Array(_, _)
                         );
-                        writeln!(self.out, "\tcmp\tx9, x10").unwrap();
+                        let wide = matches!(
+                            lty,
+                            Type::Long
+                                | Type::ULong
+                                | Type::Ptr(_)
+                                | Type::Array(_, _)
+                                | Type::Float
+                                | Type::Double
+                        ) || matches!(
+                            rty,
+                            Type::Long
+                                | Type::ULong
+                                | Type::Ptr(_)
+                                | Type::Array(_, _)
+                                | Type::Float
+                                | Type::Double
+                        );
+                        if wide {
+                            writeln!(self.out, "\tcmp\tx9, x10").unwrap();
+                        } else {
+                            writeln!(self.out, "\tcmp\tw9, w10").unwrap();
+                        }
                         // Unsigned relational conditions for unsigned operands.
                         let cond = match (op, unsignedish) {
                             (BinOp::Eq, _) => "eq",
@@ -7483,24 +7784,76 @@ impl Codegen {
                         Ok(Type::Int)
                     }
                     BinOp::BitAnd => {
-                        writeln!(self.out, "\tand\tx{dest}, x9, x10").unwrap();
-                        Ok(Type::Int)
+                        let result_ty = Self::usual_arith_conv(&lty, &rty);
+                        if Self::is_narrow_int(&result_ty) {
+                            writeln!(self.out, "\tand\tw{dest}, w9, w10").unwrap();
+                            if matches!(result_ty, Type::Int | Type::Short | Type::SChar) {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else {
+                            writeln!(self.out, "\tand\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::BitOr => {
-                        writeln!(self.out, "\torr\tx{dest}, x9, x10").unwrap();
-                        Ok(Type::Int)
+                        let result_ty = Self::usual_arith_conv(&lty, &rty);
+                        if Self::is_narrow_int(&result_ty) {
+                            writeln!(self.out, "\torr\tw{dest}, w9, w10").unwrap();
+                            if matches!(result_ty, Type::Int | Type::Short | Type::SChar) {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else {
+                            writeln!(self.out, "\torr\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::BitXor => {
-                        writeln!(self.out, "\teor\tx{dest}, x9, x10").unwrap();
-                        Ok(Type::Int)
+                        let result_ty = Self::usual_arith_conv(&lty, &rty);
+                        if Self::is_narrow_int(&result_ty) {
+                            writeln!(self.out, "\teor\tw{dest}, w9, w10").unwrap();
+                            if matches!(result_ty, Type::Int | Type::Short | Type::SChar) {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else {
+                            writeln!(self.out, "\teor\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::Shl => {
-                        writeln!(self.out, "\tlsl\tx{dest}, x9, x10").unwrap();
-                        Ok(Type::Int)
+                        // Shift result type follows promoted left operand.
+                        let result_ty = Self::usual_arith_conv(&lty, &Type::Int);
+                        if Self::is_narrow_int(&result_ty) {
+                            writeln!(self.out, "\tlsl\tw{dest}, w9, w10").unwrap();
+                            if matches!(result_ty, Type::Int | Type::Short | Type::SChar) {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else {
+                            writeln!(self.out, "\tlsl\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::Shr => {
-                        writeln!(self.out, "\tasr\tx{dest}, x9, x10").unwrap();
-                        Ok(Type::Int)
+                        let result_ty = Self::usual_arith_conv(&lty, &Type::Int);
+                        let unsigned = matches!(
+                            result_ty,
+                            Type::UInt | Type::ULong | Type::UShort | Type::Char
+                        ) || matches!(
+                            lty,
+                            Type::UInt | Type::ULong | Type::UShort | Type::Char
+                        );
+                        if Self::is_narrow_int(&result_ty) {
+                            if unsigned {
+                                writeln!(self.out, "\tlsr\tw{dest}, w9, w10").unwrap();
+                            } else {
+                                writeln!(self.out, "\tasr\tw{dest}, w9, w10").unwrap();
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        } else if unsigned {
+                            writeln!(self.out, "\tlsr\tx{dest}, x9, x10").unwrap();
+                        } else {
+                            writeln!(self.out, "\tasr\tx{dest}, x9, x10").unwrap();
+                        }
+                        Ok(result_ty)
                     }
                     BinOp::Comma => {
                         // left already evaluated for side effects; result is right in x10
@@ -7652,14 +8005,25 @@ impl Codegen {
                         writeln!(self.out, "\tfcvtzs\tx0, d0").unwrap();
                     }
                 }
-                // Always use store_ty so float/double get correct width/format.
-                if matches!(left.as_ref(), Expr::Var(_))
-                    && matches!(
-                        lty,
-                        Type::Char | Type::Short | Type::Int | Type::Long | Type::Ptr(_)
-                    )
-                {
-                    // stack locals use full 8-byte slots for integer scalars
+                // Stack locals use full 8-byte slots for integer scalars.
+                // Globals/memory must use store_ty width — otherwise
+                // `sqlite3_io_error_pending = -1` (pager disable_simulated_io_errors)
+                // does `str x0` and clobbers adjacent BSS `sqlite3_io_error_persist`.
+                let full_slot_local = match left.as_ref() {
+                    Expr::Var(name)
+                        if matches!(
+                            lty,
+                            Type::Char | Type::Short | Type::Int | Type::Long | Type::Ptr(_)
+                        ) =>
+                    {
+                        matches!(
+                            self.lookup(name).map(|s| s.storage),
+                            Ok(Storage::Local { .. })
+                        )
+                    }
+                    _ => false,
+                };
+                if full_slot_local {
                     writeln!(self.out, "\tstr\tx0, [x9]").unwrap();
                 } else {
                     self.store_ty(&lty, 9, 0);
@@ -7780,7 +8144,7 @@ impl Codegen {
                     return Ok(Type::Int);
                 }
                 // D-redis / Phase B.2: glibc math.h expands fpclassify →
-                // __builtin_fpclassify(...); ggcc PP may leave either spelling.
+                // __builtin_fpclassify(...); acc PP may leave either spelling.
                 // Map to libm __fpclassify / __fpclassifyf / __fpclassifyl.
                 if name == "fpclassify" || name == "__builtin_fpclassify" {
                     let val = if name == "__builtin_fpclassify" && args.len() >= 6 {
@@ -7901,6 +8265,32 @@ impl Codegen {
                         return Ok(Type::Int);
                     }
                 }
+                if name == "__builtin_popcount"
+                    || name == "__builtin_popcountl"
+                    || name == "__builtin_popcountll"
+                {
+                    if let Some(a) = args.first() {
+                        self.emit_builtin_popcount(name, a, dest, typedefs)?;
+                        return Ok(Type::Int);
+                    }
+                }
+                if name == "__sync_fetch_and_add"
+                    || name == "__sync_fetch_and_sub"
+                    || name == "__sync_fetch_and_and"
+                    || name == "__sync_fetch_and_or"
+                {
+                    if args.len() >= 2 {
+                        let op = name.strip_prefix("__sync_fetch_and_").unwrap_or("add");
+                        self.emit_sync_fetch_and(op, &args[0], &args[1], dest, typedefs)?;
+                        return Ok(Type::Long);
+                    }
+                }
+                if name == "__get_cpuid" {
+                    // x86-only cpuid helper; soft stub on AArch64.
+                    let _ = args;
+                    writeln!(self.out, "\tmov\tx{dest}, xzr").unwrap();
+                    return Ok(Type::Int);
+                }
                 if name == "__builtin_object_size" {
                     // Soft: unknown size → (size_t)-1 for type 0/1, 0 for type 2/3.
                     writeln!(self.out, "\tmov\tx{dest}, #0").unwrap();
@@ -7913,7 +8303,7 @@ impl Codegen {
                     }
                     return Ok(Type::Void);
                 }
-                if name == "__builtin_choose_expr" || name == "__ggcc_choose" {
+                if name == "__builtin_choose_expr" || name == "__acc_choose" {
                     // Soft: pick first value arg if present (preprocessor usually already folded).
                     if args.len() >= 2 {
                         let _ = self.emit_expr_rval(&args[1], dest, typedefs)?;
@@ -7936,7 +8326,7 @@ impl Codegen {
                     return Ok(Type::Ptr(Box::new(Type::Void)));
                 }
                 if name == "__builtin_va_start" {
-                    // Soft: ignore ap/last; real va uses __ggcc_va_start after macro expand.
+                    // Soft: ignore ap/last; real va uses __acc_va_start after macro expand.
                     return Ok(Type::Void);
                 }
                 if name == "__builtin_va_end" {
@@ -7982,17 +8372,17 @@ impl Codegen {
                 // Variadic intrinsics: char* GP cursor + process-wide VR side state
                 // (THREADSAFE=0). VR state lets sqlite3_str_vappendf (non-variadic,
                 // receives va_list) still read doubles that system-gcc put in d0.
-                if name == "__ggcc_va_start" {
+                if name == "__acc_va_start" {
                     if self.va_regsave_off == 0 {
                         return Err("va_start outside variadic function".into());
                     }
-                    // Publish VR base for later *(double*)__ggcc_va_arg (even after
+                    // Publish VR base for later *(double*)__acc_va_arg (even after
                     // ap is passed by value as a char* into another function).
                     if self.va_fpsave_off != 0 {
                         let vr_off =
                             self.va_fpsave_off + (self.va_fixed_fp as i64) * 8;
                         self.emit_fp_addr(vr_off, 10);
-                        let cur = self.c_sym("ggcc_va_vr_cursor");
+                        let cur = self.c_sym("acc_va_vr_cursor");
                         self.referenced_data_syms.insert(cur.clone());
                         match self.os {
                             TargetOs::Darwin => {
@@ -8018,11 +8408,11 @@ impl Codegen {
                     self.emit_fp_addr(off, dest);
                     return Ok(Type::Ptr(Box::new(Type::Char)));
                 }
-                if name == "__ggcc_va_arg" {
+                if name == "__acc_va_arg" {
                     // args: &ap  (pointer to va_list / char*)
                     // Returns the current cursor (for *(type*)cursor); advances ap by 8.
                     if args.is_empty() {
-                        return Err("__ggcc_va_arg needs &ap".into());
+                        return Err("__acc_va_arg needs &ap".into());
                     }
                     let ap_lvalue = match &args[0] {
                         Expr::Unary {
@@ -8066,17 +8456,47 @@ impl Codegen {
                         writeln!(self.out, "\tldr\tx{i}, [sp], #16").unwrap();
                     }
                     writeln!(self.out, "\tblr\tx16").unwrap();
-                    if dest != 0 {
-                        writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
-                    }
-                    // function pointer type is Ptr(T); calling yields T (often another Ptr)
-                    let ret = match cty {
+                    // AAPCS64: double returns live in d0. If pointee/args say
+                    // float, capture d0 (SQLite ceilingFunc / math1Func).
+                    let mut ret = match cty {
                         Type::Ptr(inner) => *inner,
                         other => other,
                     };
+                    let arg_float = real_args.iter().any(|a| {
+                        matches!(
+                            self.typeof_expr(a, typedefs),
+                            Type::Float | Type::Double
+                        )
+                    });
+                    if matches!(ret, Type::Float | Type::Double) || arg_float {
+                        writeln!(self.out, "\tfmov\tx{dest}, d0").unwrap();
+                        ret = Type::Double;
+                    } else {
+                        // (T(*)(args)) abstract casts parse as Ptr(Ptr(T));
+                        // peel so int(*)() → Int and we can extend the return.
+                        // Do NOT peel Char/Void: Ptr(Char)=char*, Ptr(Void)=void*
+                        // (sqlite3_vfs.xNextSystemCall returns const char*).
+                        if let Type::Ptr(inner) = &ret {
+                            if matches!(
+                                inner.as_ref(),
+                                Type::Int
+                                    | Type::UInt
+                                    | Type::Short
+                                    | Type::UShort
+                                    | Type::SChar
+                                    | Type::Long
+                                    | Type::ULong
+                                    | Type::Float
+                                    | Type::Double
+                            ) {
+                                ret = *inner.clone();
+                            }
+                        }
+                        self.emit_extend_call_return(dest, &ret);
+                    }
                     return Ok(ret);
                 }
-                // Linux aarch64: convert ggcc char* va_list cursor into a temporary
+                // Linux aarch64: convert acc char* va_list cursor into a temporary
                 // AAPCS64 va_list struct for glibc v*printf.
                 if self.os == TargetOs::Linux
                     && matches!(
@@ -8138,7 +8558,7 @@ impl Codegen {
 
                 // Darwin arm64 system libc (printf family): named/fixed args in
                 // x0.., *all* variadic args on the stack only (clang -O0 matches).
-                // ggcc-defined variadics (sqlite3_mprintf in the amalgamation)
+                // acc-defined variadics (sqlite3_mprintf in the amalgamation)
                 // use AAPCS64 instead: args in x0..x7 then stack, because our
                 // va_start/va_arg walk the GP regsave. Applying the libc rule to
                 // sqlite3_mprintf left zName only on the stack → strlen garbage.
@@ -8250,7 +8670,7 @@ impl Codegen {
                     .unwrap_or_default();
 
                 // Our va_list is a char* walking the GP regsave only (x0..x7).
-                // Variadic callees compiled by ggcc therefore cannot see doubles in d0..d7.
+                // Variadic callees compiled by acc therefore cannot see doubles in d0..d7.
                 // Pass float/double args in GPRs (IEEE bits) for those calls so
                 // va_arg(ap, double) reads the right payload (sqlite3_mprintf %g).
                 // Libc printf still uses dN (standard aarch64 va_list has a VR area).
@@ -8288,7 +8708,7 @@ impl Codegen {
                         && self.small_agg_nregs(&pty).is_none()
                         && sz > 16;
                     arg_by_ref.push(by_ref);
-                    // ggcc-variadic floats travel as one GPR each (not FPR).
+                    // acc-variadic floats travel as one GPR each (not FPR).
                     let nr = if is_f || by_ref {
                         1
                     } else {
@@ -8377,7 +8797,7 @@ impl Codegen {
                             // Do not also consume a GPR — dual-placement shifted
                             // the GP cursor so int-after-double (and system-gcc
                             // callees) read the wrong register. VR walk via
-                            // *(double*)__ggcc_va_arg uses ggcc_va_vr_cursor.
+                            // *(double*)__acc_va_arg uses acc_va_vr_cursor.
                             if fpr < 8 {
                                 writeln!(self.out, "\tfmov\td{fpr}, x16").unwrap();
                                 fpr += 1;
@@ -8480,7 +8900,11 @@ impl Codegen {
                 // Undeclared libm (pow/log/ceil/…) must still be Double: without
                 // this, ` (int)pow(2, n) ` kept d0's bits in x0 and sxtw'd them
                 // to 0 → hdr sub_bucket_count=0 → infinite buckets_needed loop.
-                let ret_ty = self
+                // Function-pointer vars (SQLite math1Func: `x = user_data; x(v)`)
+                // are not in `funcs` and not named sin/cos — without the float-arg
+                // heuristic, typeof/ret is Int and the next call does scvtf on
+                // IEEE bits → ceil(99.9) ≈ 4.6e18.
+                let mut ret_ty = self
                     .funcs
                     .get(name)
                     .map(|f| f.ret.clone())
@@ -8497,13 +8921,34 @@ impl Codegen {
                             Type::Int
                         }
                     });
+                if !matches!(ret_ty, Type::Float | Type::Double) {
+                    let fp_double = self.is_function_pointer_var(name)
+                        && (matches!(
+                            self.lookup(name).map(|s| s.ty).ok(),
+                            Some(Type::Ptr(inner))
+                                if matches!(*inner, Type::Float | Type::Double)
+                        ) || args.iter().any(|a| {
+                            matches!(
+                                self.typeof_expr(a, typedefs),
+                                Type::Float | Type::Double
+                            )
+                        }));
+                    if fp_double {
+                        ret_ty = Type::Double;
+                    }
+                }
                 if matches!(ret_ty, Type::Float | Type::Double) {
                     writeln!(self.out, "\tfmov\tx{dest}, d0").unwrap();
                     return Ok(Type::Double);
                 }
                 // Small aggregate return: x0[,x1] already hold the value.
                 // Leave them in place; scalar callers only consume x0.
-                if dest != 0 {
+                // Narrow ints from *known* prototypes get extended so 64-bit
+                // cmp against -1 works; undeclared libc defaults to Int but
+                // often return pointers (malloc) — do not sxtw those.
+                if self.funcs.contains_key(name) {
+                    self.emit_extend_call_return(dest, &ret_ty);
+                } else if dest != 0 {
                     writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
                 }
                 Ok(ret_ty)
@@ -9031,10 +9476,24 @@ impl Codegen {
                     // callee is args[0]; try to get its pointed-to / return type
                     if let Some(callee) = args.first() {
                         let ct = self.typeof_expr(callee, typedefs);
-                        return match ct {
-                            Type::Ptr(inner) => *inner,
-                            other => other,
+                        let from_ptr = match ct {
+                            Type::Ptr(inner) => Some(*inner),
+                            other => Some(other),
                         };
+                        if let Some(Type::Float | Type::Double) = from_ptr {
+                            return Type::Double;
+                        }
+                        // SQLite math wrappers: double (*f)(double); f(v) — pointee
+                        // typing is often soft Void/Int; float args imply Double.
+                        if args.iter().skip(1).any(|a| {
+                            matches!(
+                                self.typeof_expr(a, typedefs),
+                                Type::Float | Type::Double
+                            )
+                        }) {
+                            return Type::Double;
+                        }
+                        return from_ptr.unwrap_or(Type::Int);
                     }
                     return Type::Int;
                 }
@@ -9050,10 +9509,34 @@ impl Codegen {
                 ) {
                     return Type::Double;
                 }
-                self.funcs
-                    .get(name)
-                    .map(|f| f.ret.clone())
-                    .unwrap_or(Type::Int)
+                if let Some(f) = self.funcs.get(name) {
+                    return f.ret.clone();
+                }
+                // Call through local/global function-pointer variable.
+                if self.is_function_pointer_var(name) {
+                    if let Some(sym) = self.get_local(name) {
+                        if let Type::Ptr(inner) = &sym.ty {
+                            if matches!(inner.as_ref(), Type::Float | Type::Double) {
+                                return Type::Double;
+                            }
+                        }
+                    } else if let Some(ty) = self.globals.get(name) {
+                        if let Type::Ptr(inner) = ty {
+                            if matches!(inner.as_ref(), Type::Float | Type::Double) {
+                                return Type::Double;
+                            }
+                        }
+                    }
+                    if args.iter().any(|a| {
+                        matches!(
+                            self.typeof_expr(a, typedefs),
+                            Type::Float | Type::Double
+                        )
+                    }) {
+                        return Type::Double;
+                    }
+                }
+                Type::Int
             }
             Expr::Binary { op, left, right } => {
                 let l = self.typeof_expr(left, typedefs);
@@ -9111,12 +9594,16 @@ impl Codegen {
                         return r;
                     }
                 }
-                // Arithmetic: prefer long/ulong when either side is wide.
+                // Arithmetic: prefer long/ulong when either side is wide;
+                // unsigned int beats signed int (corruptI nOvfl wrap).
                 if matches!(l, Type::ULong | Type::Long) {
                     return l;
                 }
                 if matches!(r, Type::ULong | Type::Long) {
                     return r;
+                }
+                if matches!(l, Type::UInt) || matches!(r, Type::UInt) {
+                    return Type::UInt;
                 }
                 Type::Int
             }
@@ -9205,6 +9692,18 @@ pub fn emit_assembly_for_os(
             cg.compile(prog)
         }
         Target::X86_64 => x86_64::emit_assembly(prog),
+        Target::I686 => {
+            if os != TargetOs::Linux {
+                return Err("i686 backend currently supports --target-os linux only".into());
+            }
+            i686::emit_assembly(prog)
+        }
+        Target::Riscv64 => {
+            if os != TargetOs::Linux {
+                return Err("riscv64 backend currently supports --target-os linux only".into());
+            }
+            riscv::emit_assembly(prog)
+        }
     }
 }
 
@@ -9239,6 +9738,43 @@ mod tests {
         let p = parser::parse(src).unwrap();
         let asm = emit_assembly_for_os(&p, Target::X86_64, TargetOs::Linux);
         assert!(asm.is_ok());
+    }
+
+    /// PruneState-sized locals must get a ≥2968-byte frame (not 8*N scalar slots).
+    #[test]
+    fn test_x86_prune_state_stack_frame() {
+        use crate::preprocess;
+        use std::path::Path;
+
+        let src = include_str!("../tests/prune_state_stack.c");
+        let pp = preprocess::preprocess_with_options_arch(
+            src,
+            Some(Path::new("tests")),
+            &[],
+            true,
+            "prune_state_stack.c",
+            "x86_64",
+        )
+        .expect("preprocess");
+        let p = parser::parse(&pp).expect("parse");
+        let asm = emit_assembly_for_os(&p, Target::X86_64, TargetOs::Linux).expect("cg");
+        let use_prune: String = asm
+            .lines()
+            .skip_while(|l| !l.contains("use_prune:"))
+            .take(12)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            use_prune.contains("subq\t$") && !use_prune.contains("subq\t$16,"),
+            "use_prune needs a large stack frame, got:\n{use_prune}"
+        );
+        // marked offset 2380 = 0x94c, sizeof marked 292 = 0x124 (decimal or hex in asm)
+        assert!(
+            (asm.contains("0x94c") || asm.contains("2380"))
+                && (asm.contains("0x124") || asm.contains("$292") || asm.contains(", 292")),
+            "marked memset must use gcc layout offsets"
+        );
+        assert!(asm.contains("2968"), "sizeof(PruneState) must fold to 2968");
     }
 
                             /// Parameter named same as typedef must be Expr::Var in call args, not Int(0).
@@ -9429,6 +9965,68 @@ mod tests {
         assert!(
             !boot.contains("blr\t"),
             "must not blr for function designator call:\n{boot}"
+        );
+    }
+
+    /// AAPCS64 int returns must be sxtw'd before 64-bit cmp to -1.
+    #[test]
+    fn test_int_call_return_sign_extended_for_cmp() {
+        let src = r#"
+            int unlink_like(const char *p);
+            int check(const char *p) {
+              if (unlink_like(p) == (-1)) return 1;
+              return 0;
+            }
+        "#;
+        let p = parser::parse(src).expect("parse");
+        let asm = emit_assembly_for_os(&p, Target::Aarch64, TargetOs::Linux).expect("cg");
+        let check: String = asm
+            .lines()
+            .skip_while(|l| *l != "check:")
+            .take(60)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            check.contains("bl\tunlink_like"),
+            "expected call:\n{check}"
+        );
+        assert!(
+            check.contains("cmp\tw9, w10") || check.contains("cmp\tw"),
+            "narrow int Eq must cmp w so -1 matches int returns:\n{check}"
+        );
+        assert!(
+            check.contains("sxtw\t"),
+            "known int return should sxtw:\n{check}"
+        );
+    }
+
+    /// u32 add/sub must use W regs so arithmetic wraps at 2^32 (SQLite nOvfl).
+    #[test]
+    fn test_uint32_arith_uses_w_regs() {
+        let src = r#"
+            typedef unsigned int u32;
+            typedef unsigned short u16;
+            int novfl(u32 nPayload, u16 nLocal, u32 ovflPageSize) {
+              int nOvfl = (nPayload - nLocal + ovflPageSize - 1)/ovflPageSize;
+              return nOvfl;
+            }
+        "#;
+        let p = parser::parse(src).expect("parse");
+        let asm = emit_assembly_for_os(&p, Target::Aarch64, TargetOs::Linux).expect("cg");
+        let body: String = asm
+            .lines()
+            .skip_while(|l| *l != "novfl:")
+            .take_while(|l| !l.starts_with("L_novfl_epilogue") && *l != ".size")
+            .take(120)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("add\tw") || body.contains("sub\tw"),
+            "u32 arithmetic must use W-width add/sub for wrap:\n{body}"
+        );
+        assert!(
+            body.contains("udiv\tw") || body.contains("udiv\tx"),
+            "expected udiv in nOvfl:\n{body}"
         );
     }
 
@@ -9781,8 +10379,8 @@ mod freestanding_gate {
 
     #[test]
     fn soft_freestanding_off_keeps_hard_keepers_and_map_mem_stub() {
-        std::env::remove_var("GGCC_SOFT_FREESTANDING");
-        std::env::set_var("GGCC_KERNEL_FREESTANDING", "1");
+        std::env::remove_var("ACC_SOFT_FREESTANDING");
+        std::env::set_var("ACC_KERNEL_FREESTANDING", "1");
         assert!(
             !Codegen::soft_freestanding_enabled(),
             "default must not enable soft freestanding"
@@ -9794,6 +10392,8 @@ mod freestanding_gate {
         assert!(!Codegen::is_soft_freestanding_name("sched_init"));
         assert!(!Codegen::is_soft_freestanding_name("create_init_idmap"));
         assert!(!Codegen::is_soft_freestanding_name("_printk"));
+        // A07: init handoff stays hard freestanding (soft-list hung #113/#114);
+        // bodies now call kernel_init / kernel_execve instead of payload.
         assert!(!Codegen::is_soft_freestanding_name("run_init_process"));
         assert!(!Codegen::is_soft_freestanding_name("rest_init"));
         assert!(!Codegen::is_soft_freestanding_name("setup_boot_config"));
@@ -9811,6 +10411,6 @@ void map_mem(void *pgdp) {
             asm.contains("map_mem: linear RAM") || asm.contains("map_mem:"),
             "map_mem hard keeper must emit freestanding stub:\n{asm}"
         );
-        std::env::remove_var("GGCC_KERNEL_FREESTANDING");
+        std::env::remove_var("ACC_KERNEL_FREESTANDING");
     }
 }

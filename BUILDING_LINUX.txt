@@ -1,10 +1,10 @@
-Building Linux Kernel 6.9 with ggcc (Stage C1)
+Building Linux Kernel 6.9 with acc (Stage C1)
 ================================================
 
 This document details the step-by-step procedure for compiling Linux Kernel 6.9
-for ARM64 using ggcc inside a Linux Docker environment and booting it under QEMU.
+for ARM64 using acc inside a Linux Docker environment and booting it under QEMU.
 
-Clean-room guarantee: ggcc emits textual assembly (.s) for all C source files.
+Clean-room guarantee: acc emits textual assembly (.s) for all C source files.
 Kernel .c files are NEVER compiled by system gcc or clang.
 
 ------------------------------------------------
@@ -16,15 +16,15 @@ Kernel .c files are NEVER compiled by system gcc or clang.
   - qemu-system-aarch64 installed on host or inside container
 
 ------------------------------------------------
-1. Build ggcc (Linux Target Binary)
+1. Build acc (Linux Target Binary)
 ------------------------------------------------
 
   cargo build --release
 
   For containerized builds, the build harness sets CARGO_TARGET_DIR=target-linux
-  producing the Linux ELF ggcc binary at:
+  producing the Linux ELF acc binary at:
 
-    target-linux/release/ggcc
+    target-linux/release/acc
 
 ------------------------------------------------
 2. Fetch Linux 6.9 Source Tree
@@ -41,8 +41,8 @@ Kernel .c files are NEVER compiled by system gcc or clang.
 3. Policy Environment Configuration (PASS Path)
 ------------------------------------------------
 
-  export GGCC_ALLOW_SOFT_SYSCC=0          # Hard error if external C compiler invoked on .c
-  export GGCC_SOFT_FREESTANDING=0         # Mid-boot soft body-skip disabled
+  export ACC_ALLOW_SOFT_SYSCC=0          # Hard error if external C compiler invoked on .c
+  export ACC_SOFT_FREESTANDING=0         # Mid-boot soft body-skip disabled
 
 ------------------------------------------------
 4. Automated Docker Kernel Build
@@ -53,24 +53,24 @@ Kernel .c files are NEVER compiled by system gcc or clang.
     ./harness/docker/build_kernel.sh
 
   Build steps executed internally:
-    - Builds Docker image `ggcc-linux` from `harness/docker/Dockerfile.linux`
-    - Compiles `ggcc` for Linux ARM64 target inside container
-    - Sets `CC=harness/docker/ggcc_cc_wrapper.sh`
+    - Builds Docker image `acc-linux` from `harness/docker/Dockerfile.linux`
+    - Compiles `acc` for Linux ARM64 target inside container
+    - Sets `CC=harness/docker/acc_cc_wrapper.sh`
     - Runs `make ARCH=arm64 CC=$WRAP HOSTCC=gcc defconfig Image`
 
   Wrapper rules:
-    - User `.c` files → `ggcc -S` → system `as`/`cc` on emitted `.s` ONLY
+    - User `.c` files → `acc -S` → system `as`/`cc` on emitted `.s` ONLY
     - Assembly (`.S`/`.s`) and objects (`.o`) → system toolchain
-    - If `GGCC_ALLOW_SOFT_SYSCC=1` is passed → hard error
+    - If `ACC_ALLOW_SOFT_SYSCC=1` is passed → hard error
 
 ------------------------------------------------
 5. Manual Compilation Command (Inside Linux aarch64 container)
 ------------------------------------------------
 
-  export GGCC=$PWD/target-linux/release/ggcc
-  export GGCC_TARGET_OS=linux GGCC_ARCH=aarch64
-  export GGCC_SOFT_FREESTANDING=0 GGCC_ALLOW_SOFT_SYSCC=0
-  WRAP=$PWD/harness/docker/ggcc_cc_wrapper.sh
+  export ACC=$PWD/target-linux/release/acc
+  export ACC_TARGET_OS=linux ACC_ARCH=aarch64
+  export ACC_SOFT_FREESTANDING=0 ACC_ALLOW_SOFT_SYSCC=0
+  WRAP=$PWD/harness/docker/acc_cc_wrapper.sh
   chmod +x "$WRAP"
 
   cd third_party/linux-6.9
@@ -89,10 +89,13 @@ Kernel .c files are NEVER compiled by system gcc or clang.
     -nographic \
     -append "console=ttyAMA0 earlycon=pl011,0x9000000"
 
-  Expected output markers:
+  Expected output markers (C1 CCC PASS):
     - `Linux version 6.9.0 ...`
-    - System initialization (MMU, page tables, memory zones, SMP CPUs)
-    - Execution of userspace PID 1 binary (`ggcc-init`)
+    - Busybox/shell evidence on serial: `/#` and/or `BusyBox` and/or `/bin/sh`
+
+  Soft (NOT C1 CCC PASS):
+    - `acc-init:` / `working init` alone is a soft pid1 stamp only.
+    - Soft acc-init does NOT stamp `PASS_BOOT` / `c1_boot_marker`.
 
 ------------------------------------------------
 7. Anti-Bypass & Clean-Room Verification
@@ -109,7 +112,8 @@ Kernel .c files are NEVER compiled by system gcc or clang.
 8. Definition of Stage C1 PASS
 ------------------------------------------------
 
-  Stage C1 PASS requires:
+  Stage C1 CCC PASS requires:
     1. Clean-room kernel build (`make_ec = 0` with zero soft SYSCC fallback).
-    2. Verified QEMU boot execution demonstrating MMU init and PID 1 start.
+    2. QEMU serial shows `Linux version` AND busybox/shell (`/#` or `BusyBox` or `/bin/sh`).
     3. Audit logs saved to `scratch/stage_c_kernel.log` and `scratch/qemu_boot.log`.
+    Soft `acc-init:` / `working init` alone is NOT C1 CCC PASS.

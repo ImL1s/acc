@@ -1,15 +1,15 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CC="${CC:-$ROOT/target/release/ggcc}"
+CC="${ACC_CC:-${CC:-$ROOT/target/release/acc}}"
 if [[ ! -x "$CC" ]]; then
   (cd "$ROOT" && cargo build --release)
-  CC="$ROOT/target/release/ggcc"
+  CC="$ROOT/target/release/acc"
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SQL="$ROOT/third_party/stage_c/sqlite"
 cd "$HERE"
-WORKDIR="${TMPDIR:-/tmp}/ggcc_sqlite_$$"
+WORKDIR="${TMPDIR:-/tmp}/acc_sqlite_$$"
 mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
 "$CC" -S -o "$WORKDIR/sqlite3.s" "$SQL/sqlite3.c" -I"$SQL"

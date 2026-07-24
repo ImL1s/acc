@@ -34,7 +34,7 @@ pub fn compile(opts: &CompileOptions) -> Result<(), String> {
     const STACK_SIZE: usize = 64 * 1024 * 1024; // 64 MB
     let opts_clone = opts.clone();
     let handle = std::thread::Builder::new()
-        .name("ggcc-compiler".into())
+        .name("acc-compiler".into())
         .stack_size(STACK_SIZE)
         .spawn(move || compile_internal(&opts_clone))
         .map_err(|e| format!("failed to spawn compiler thread: {e}"))?;
@@ -88,6 +88,8 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
     let arch = match opts.target {
         Target::X86_64 => "x86_64",
         Target::Aarch64 => "aarch64",
+        Target::I686 => "i386",
+        Target::Riscv64 => "riscv64",
     };
     let src = crate::preprocess::preprocess_with_options_arch(
         &prefixed,
@@ -97,7 +99,7 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
         source_name,
         arch,
     )?;
-    if let Some(path) = std::env::var_os("GGCC_DUMP_PP") {
+    if let Some(path) = std::env::var_os("ACC_DUMP_PP") {
         let _ = fs::write(&path, &src);
     }
     let prog = parser::parse(&src)?;
@@ -122,9 +124,90 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
         return Ok(());
     }
 
-    let linker = opts.linker.as_deref().unwrap_or("cc");
+    // Optional builtin assembler (feature `builtin_assembler` + ACC_BUILTIN_AS=1).
+    // On success, produce `.o` for system or builtin link. On any error, fall back
+    // to the default system assemble/link of `.s`.
+    #[cfg(feature = "builtin_assembler")]
+    let link_input: PathBuf = {
+        if crate::assembler::env_opt_in() {
+            let obj_path = opts.output.with_extension("o");
+            match crate::assembler::assemble_file(&asm, &obj_path, opts.target, opts.target_os) {
+                Ok(()) => obj_path,
+                Err(e) => {
+                    #[cfg(feature = "builtin_linker")]
+                    if crate::linker::env_strict() {
+                        return Err(format!("builtin assembler failed: {e}"));
+                    }
+                    // Keep default system-as path until M1 encode is green.
+                    asm_path.clone()
+                }
+            }
+        } else {
+            asm_path.clone()
+        }
+    };
+    #[cfg(not(feature = "builtin_assembler"))]
+    let link_input: PathBuf = asm_path.clone();
+
+    // Optional builtin linker (feature `builtin_linker` + ACC_BUILTIN_LD=1`).
+    // Freestanding aarch64 (M4) or static musl hosted (M5). With
+    // ACC_BUILTIN_LD_STRICT=1, linker errors are fatal (no system `cc` fallback).
+    #[cfg(feature = "builtin_linker")]
+    {
+        if crate::linker::env_opt_in() {
+            if link_input.extension().and_then(|e| e.to_str()) != Some("o") {
+                if crate::linker::env_strict() {
+                    return Err(
+                        "builtin link requires a `.o` input (enable builtin assembler or fix asm)"
+                            .into(),
+                    );
+                }
+            } else {
+                match crate::linker::link_files(
+                    &[&link_input],
+                    &opts.output,
+                    opts.target,
+                    opts.target_os,
+                ) {
+                    Ok(()) => {
+                        if !opts.keep_asm {
+                            let _ = fs::remove_file(&asm_path);
+                        }
+                        if link_input != opts.output {
+                            let _ = fs::remove_file(&link_input);
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        if crate::linker::env_strict() {
+                            return Err(e);
+                        }
+                        // Fall through to system linker (non-marker paths only).
+                    }
+                }
+            }
+        }
+    }
+
+    // Pick linker: optional override, else cross tool for riscv64, else `cc`.
+    let default_linker = match opts.target {
+        Target::Riscv64 if opts.linker.is_none() => {
+            if Command::new("riscv64-linux-gnu-gcc")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                "riscv64-linux-gnu-gcc"
+            } else {
+                "cc"
+            }
+        }
+        _ => "cc",
+    };
+    let linker = opts.linker.as_deref().unwrap_or(default_linker);
     let mut cmd = Command::new(linker);
-    // Select assemble/link ISA. Never pass the user's .c — only our .s.
+    // Select assemble/link ISA. Never pass the user's .c — only our .s/.o.
     // On macOS host with Darwin dialect: clang -arch.
     if opts.target_os == TargetOs::Darwin && cfg!(target_os = "macos") {
         match opts.target {
@@ -134,10 +217,24 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
             Target::X86_64 => {
                 cmd.arg("-arch").arg("x86_64");
             }
+            Target::I686 | Target::Riscv64 => {
+                return Err(format!(
+                    "target {} does not support Darwin assemble/link on this host",
+                    opts.target.as_str()
+                ));
+            }
         }
     }
+    // i686 Linux ELF: ILP32 absolute addressing requires -m32 -no-pie.
+    if opts.target == Target::I686 && opts.target_os == TargetOs::Linux {
+        cmd.arg("-m32").arg("-no-pie");
+    }
+    // riscv64: prefer static when using the cross gcc (qemu-user friendly).
+    if opts.target == Target::Riscv64 && opts.target_os == TargetOs::Linux {
+        cmd.arg("-static");
+    }
     // Linux ELF: native cc inside Docker / Linux host.
-    cmd.arg("-o").arg(&opts.output).arg(&asm_path);
+    cmd.arg("-o").arg(&opts.output).arg(&link_input);
     // libm for sin/cos/etc when referenced by codegen
     cmd.arg("-lm");
 
@@ -157,6 +254,13 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
     if !opts.keep_asm {
         let _ = fs::remove_file(&asm_path);
     }
+    #[cfg(feature = "builtin_assembler")]
+    {
+        // Drop intermediate .o when we produced one and it is not the final output.
+        if link_input != asm_path && link_input != opts.output {
+            let _ = fs::remove_file(&link_input);
+        }
+    }
     Ok(())
 }
 
@@ -175,7 +279,7 @@ mod tests {
         let dir = {
             let mut d = std::env::temp_dir();
             d.push(format!(
-                "ggcc-test-{}-{}",
+                "acc-test-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -216,7 +320,7 @@ mod tests {
         let dir = {
             let mut d = std::env::temp_dir();
             d.push(format!(
-                "ggcc-shadow-test-{}-{}",
+                "acc-shadow-test-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

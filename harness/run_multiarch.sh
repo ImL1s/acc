@@ -1,10 +1,24 @@
-#!/usr/bin/env zsh
-# Run fixed multiarch oracle subset with -m aarch64 and -m x86_64.
+#!/usr/bin/env bash
+# Stage C3 raise: Stage A oracle 00001–00100 on -m aarch64 and -m x86_64.
+# Contract: ≥95% PASS per ISA (real compile+run). See STAGE_CONTRACTS.md.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-BIN="${GGCC_BIN:-$ROOT/target/release/ggcc}"
-IDS=(00001 00002 00003 00004 00005 00006 00007 00008 00009 00010 00012 00015 00021 00025 00030 00031 00034 00035 00036 00038)
+BIN="${ACC_BIN:-${GGCC_BIN:-$ROOT/target/release/acc}}"
+
+# Stage A continuous IDs (override with IDS_OVERRIDE="00001 00002 …" for a subset).
+# shellcheck disable=SC2207
+IDS_STAGE_A=($(seq -f '%05g' 1 100))
+if [[ -n "${IDS_OVERRIDE:-}" ]]; then
+  # shellcheck disable=SC2206
+  IDS=($IDS_OVERRIDE)
+else
+  IDS=("${IDS_STAGE_A[@]}")
+fi
+ID_COUNT=${#IDS[@]}
+# ≥95% of ID_COUNT per arch (ceil via integer math: (n*95+99)/100)
+MIN_PASS_PER_ARCH=$(( (ID_COUNT * 95 + 99) / 100 ))
+
 SUITE=third_party/c-testsuite/tests/single-exec
 WORKDIR=target/multiarch_work
 mkdir -p "$WORKDIR"
@@ -13,6 +27,10 @@ run_one() {
   local arch="$1" id="$2"
   local src="$SUITE/${id}.c"
   local out="$WORKDIR/${id}_${arch}"
+  if [[ ! -f "$src" ]]; then
+    echo "MISS $arch $id (no source)"
+    return 1
+  fi
   if [[ "$arch" == "x86_64" ]]; then
     "$BIN" -m x86_64 -o "$out" "$src" || return 1
     if [[ "$(uname -m)" == "arm64" ]]; then
@@ -35,20 +53,50 @@ run_one() {
 
 fail=0
 pass=0
-# bash-compatible iteration (zsh arrays also work with "$@"-style via explicit list)
+aarch64_pass=0
+aarch64_fail=0
+x86_64_pass=0
+x86_64_fail=0
+
+echo "== multiarch Stage A: ${ID_COUNT} IDs × 2 ISA; need ≥${MIN_PASS_PER_ARCH}/arch (≥95%) =="
+echo "NOTE: full 00001–00100 dual-ISA run can take several minutes; use IDS_OVERRIDE for a quick subset."
+
 for arch in aarch64 x86_64; do
   echo "== arch $arch =="
   for id in "${IDS[@]}"; do
     if run_one "$arch" "$id"; then
       echo "PASS $arch $id"
       pass=$((pass+1))
+      if [[ "$arch" == "aarch64" ]]; then
+        aarch64_pass=$((aarch64_pass+1))
+      else
+        x86_64_pass=$((x86_64_pass+1))
+      fi
     else
       echo "FAIL $arch $id"
       fail=$((fail+1))
+      if [[ "$arch" == "aarch64" ]]; then
+        aarch64_fail=$((aarch64_fail+1))
+      else
+        x86_64_fail=$((x86_64_fail+1))
+      fi
     fi
   done
 done
+
 echo "== multiarch summary pass=$pass fail=$fail =="
-# Contract: 20 IDs × 2 arch = 40; require fail=0
-echo "expected_slots=40 got_pass=$pass got_fail=$fail"
-[[ "$fail" -eq 0 ]] && [[ "$pass" -ge 40 ]]
+echo "aarch64: pass=$aarch64_pass fail=$aarch64_fail (need ≥$MIN_PASS_PER_ARCH / $ID_COUNT)"
+echo "x86_64:  pass=$x86_64_pass fail=$x86_64_fail (need ≥$MIN_PASS_PER_ARCH / $ID_COUNT)"
+echo "expected_ids=$ID_COUNT min_pass_per_arch=$MIN_PASS_PER_ARCH got_pass=$pass got_fail=$fail"
+
+# Contract: ≥95% both ISAs (not soft 20-ID / fail=0 bar)
+ok=1
+if [[ "$aarch64_pass" -lt "$MIN_PASS_PER_ARCH" ]]; then
+  echo "CONTRACT FAIL: aarch64 below ≥95%"
+  ok=0
+fi
+if [[ "$x86_64_pass" -lt "$MIN_PASS_PER_ARCH" ]]; then
+  echo "CONTRACT FAIL: x86_64 below ≥95%"
+  ok=0
+fi
+[[ "$ok" -eq 1 ]]

@@ -351,7 +351,7 @@ Until then: `Goal: NOT complete` + `blocked_reason`.
 ## Verification commands (recurring)
 
 ```bash
-export SCRATCH=/Users/iml1s/Documents/mine/ggcc/scratch
+export SCRATCH="$PWD/scratch"
 cargo build --release
 bash scripts/anti_bypass_audit.sh
 bash harness/mutation_check.sh

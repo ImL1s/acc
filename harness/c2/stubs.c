@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stddef.h>
-int __ggcc_errno;
+int __acc_errno;
 int ll2string(char *d,size_t n,long long v){return snprintf(d,n,"%lld",v);}
 int ull2string(char *d,size_t n,unsigned long long v){return snprintf(d,n,"%llu",v);}
 unsigned int current_task(void){return 0;}

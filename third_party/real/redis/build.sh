@@ -1,14 +1,14 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CC="${CC:-$ROOT/target/release/ggcc}"
+CC="${ACC_CC:-${CC:-$ROOT/target/release/acc}}"
 if [[ ! -x "$CC" ]]; then
   (cd "$ROOT" && cargo build --release)
-  CC="$ROOT/target/release/ggcc"
+  CC="$ROOT/target/release/acc"
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REDIS="$ROOT/third_party/stage_c/redis/redis-7.2.5/src"
-WORKDIR="${TMPDIR:-/tmp}/ggcc_redis_$$"
+WORKDIR="${TMPDIR:-/tmp}/acc_redis_$$"
 mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
 "$CC" -S -o "$WORKDIR/sds.s" "$REDIS/sds.c" -I"$REDIS"

@@ -1,13 +1,22 @@
 [package]
-name = "ggcc"
+name = "acc"
 version = "0.1.0"
 edition = "2021"
 description = "From-scratch minimal C compiler (clean-room; no CCC sources)"
 license = "MIT"
 
 [[bin]]
-name = "ggcc"
+name = "acc"
 path = "src/main.rs"
+
+[features]
+default = []
+# Optional in-tree assembler scaffold (M1). Default build still uses system `cc`
+# to assemble/link emitted `.s`. See docs/notes/builtin_assembler_m1.md.
+builtin_assembler = []
+# Builtin linker core (M4). Freestanding aarch64 ET_EXEC; no libc yet (M5).
+# See docs/notes/builtin_linker_m4.md.
+builtin_linker = ["builtin_assembler"]
 
 [profile.release]
 lto = false

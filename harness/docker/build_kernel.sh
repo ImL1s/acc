@@ -14,8 +14,8 @@ SCRATCH="${SCRATCH:?SCRATCH required (evidence dir for stage_c_kernel.log)}"
 VER="${KERNEL_VER:-6.9}"
 SRC_DIR="${KERNEL_SRC:-$ROOT/third_party/linux-$VER}"
 LOG="$SCRATCH/stage_c_kernel.log"
-WRAPPER="$ROOT/harness/docker/ggcc_cc_wrapper.sh"
-IMAGE="${GGCC_DOCKER_IMAGE:-ggcc-linux}"
+WRAPPER="$ROOT/harness/docker/acc_cc_wrapper.sh"
+IMAGE="${ACC_DOCKER_IMAGE:-acc-linux}"
 # Default kernel arch = host/container native. On Apple Silicon Docker (aarch64)
 # building x86_64 produces unassemblable .s (host as is aarch64). Prefer arm64
 # unless user forces KERNEL_ARCH=x86_64 with --platform linux/amd64.
@@ -31,6 +31,24 @@ case "$(uname -m)" in
     ;;
 esac
 JOBS="${JOBS:-4}"
+# Optional busybox initrd (A06). Build via harness/initrd/build_busybox_initrd.sh.
+# When present, QEMU gets -initrd inside the container; PASS stamp remains A17's concern.
+INITRD_ARCH="${INITRD_ARCH:-$KERNEL_ARCH}"
+case "$INITRD_ARCH" in
+  arm64|aarch64) INITRD_ARCH=arm64 ;;
+  x86_64|x86|amd64) INITRD_ARCH=x86_64 ;;
+esac
+# Prefer uncompressed cpio when present (A08 freestanding unpack scans newc;
+# gzip still needs decompressor before cpio walk).
+INITRD_CPIO="$ROOT/harness/initrd/out/$INITRD_ARCH/initramfs.cpio"
+INITRD_DEFAULT="$ROOT/harness/initrd/out/$INITRD_ARCH/initramfs.cpio.gz"
+if [[ -z "${INITRD_PATH:-}" ]]; then
+  if [[ -f "$INITRD_CPIO" ]]; then
+    INITRD_PATH="$INITRD_CPIO"
+  else
+    INITRD_PATH="$INITRD_DEFAULT"
+  fi
+fi
 mkdir -p "$SCRATCH"
 
 log() { echo "$@" | tee -a "$LOG"; }
@@ -45,6 +63,13 @@ log() { echo "$@" | tee -a "$LOG"; }
   echo "KERNEL_ARCH=$KERNEL_ARCH"
   echo "WRAPPER=$WRAPPER"
   echo "IMAGE=$IMAGE"
+  echo "INITRD_ARCH=$INITRD_ARCH"
+  echo "INITRD_PATH=$INITRD_PATH"
+  if [[ -f "$INITRD_PATH" ]]; then
+    echo "INITRD: present ($(wc -c <"$INITRD_PATH") bytes) — QEMU will use -initrd"
+  else
+    echo "INITRD: missing (optional; build with harness/initrd/build_busybox_initrd.sh)"
+  fi
 } >>"$LOG"
 
 verdict() {
@@ -63,32 +88,37 @@ if [[ ! -f "$WRAPPER" ]]; then
 fi
 chmod +x "$WRAPPER" 2>/dev/null || true
 
-# Host ggcc (may be Darwin binary — only used for freestanding -S smoke on host)
-HOST_GGCC="${GGCC:-$ROOT/target/release/ggcc}"
-if [[ -x "$HOST_GGCC" ]]; then
-  log "host_ggcc: $HOST_GGCC"
-  "$HOST_GGCC" --help 2>&1 | head -12 | tee -a "$LOG" || true
+# Host acc (may be Darwin binary — only used for freestanding -S smoke on host)
+HOST_ACC="${ACC_BIN:-$ROOT/target/release/acc}"
+if [[ -x "$HOST_ACC" ]]; then
+  log "host_acc: $HOST_ACC"
+  "$HOST_ACC" --help 2>&1 | head -12 | tee -a "$LOG" || true
 else
-  log "host_ggcc: missing ($HOST_GGCC) — will rely on in-Docker cargo build"
+  log "host_acc: missing ($HOST_ACC) — will rely on in-Docker cargo build"
 fi
 
 # --- 1. Docker availability + image ---
 DOCKER_OK=0
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+if command -v docker >/dev/null 2>&1 && timeout 300 docker info >/dev/null 2>&1; then
   DOCKER_OK=1
   log "docker: available"
-  log "=== docker build $IMAGE ==="
-  set +e
-  docker build ${DOCKER_BUILD_FLAGS:-} ${DOCKER_PLATFORM_ARGS[@]+"${DOCKER_PLATFORM_ARGS[@]}"} -t "$IMAGE" -f "$ROOT/harness/docker/Dockerfile.linux" "$ROOT/harness/docker" 2>&1 | tee -a "$LOG"
-  db_ec=${PIPESTATUS[0]}
-  set -e
-  if [[ $db_ec -ne 0 ]]; then
-    verdict "BLOCKED" "docker image build failed (ec=$db_ec); see log above"
-    exit 2
+  if [[ "${ACC_SKIP_DOCKER_BUILD:-}" == "1" ]] \
+    || timeout 15 docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    log "docker_image: $IMAGE present (skip build; set ACC_FORCE_DOCKER_BUILD=1 to rebuild)"
+  else
+    log "=== docker build $IMAGE ==="
+    set +e
+    docker build ${DOCKER_BUILD_FLAGS:-} ${DOCKER_PLATFORM_ARGS[@]+"${DOCKER_PLATFORM_ARGS[@]}"} -t "$IMAGE" -f "$ROOT/harness/docker/Dockerfile.linux" "$ROOT/harness/docker" 2>&1 | tee -a "$LOG"
+    db_ec=${PIPESTATUS[0]}
+    set -e
+    if [[ $db_ec -ne 0 ]]; then
+      verdict "BLOCKED" "docker image build failed (ec=$db_ec); see log above"
+      exit 2
+    fi
+    log "docker_image: $IMAGE built ok"
   fi
-  log "docker_image: $IMAGE built_or_cached ok"
 else
-  log "docker: UNAVAILABLE (daemon missing or not running)"
+  log "docker: UNAVAILABLE (daemon missing, slow, or not running)"
 fi
 
 # --- 2. Fetch Linux $VER ---
@@ -125,15 +155,15 @@ void _start(void) {
   for (;;) { }
 }
 C
-if [[ -x "$HOST_GGCC" ]]; then
+if [[ -x "$HOST_ACC" ]]; then
   set +e
-  "$HOST_GGCC" --target-os linux -m x86_64 -S -o "$SCRATCH/kstub.s" "$SCRATCH/kstub.c" 2>>"$LOG"
+  "$HOST_ACC" --target-os linux -m x86_64 -S -o "$SCRATCH/kstub.s" "$SCRATCH/kstub.c" 2>>"$LOG"
   kstub_ec=$?
   set -e
   log "kstub_compile_ec=$kstub_ec"
   head -20 "$SCRATCH/kstub.s" >>"$LOG" 2>/dev/null || true
 else
-  log "kstub_compile_ec=skipped (no host ggcc)"
+  log "kstub_compile_ec=skipped (no host acc)"
 fi
 
 # Without Docker we cannot run Linux make / QEMU honestly on macOS.
@@ -142,7 +172,7 @@ if [[ "$DOCKER_OK" -ne 1 ]]; then
   exit 3
 fi
 
-# --- 4. Inside Docker: build Linux ggcc, tinyconfig, make with CC=wrapper ---
+# --- 4. Inside Docker: build Linux acc, tinyconfig, make with CC=wrapper ---
 # Map arch for kernel Makefile
 case "$KERNEL_ARCH" in
   x86_64|x86) KARCH=x86 ;;
@@ -150,11 +180,11 @@ case "$KERNEL_ARCH" in
   *) KARCH=x86 ;;
 esac
 
-log "=== docker: cargo build ggcc (Linux binary) + tinyconfig + make CC=wrapper ==="
-# Map ggcc -m flag
+log "=== docker: cargo build acc (Linux binary) + tinyconfig + make CC=wrapper ==="
+# Map acc -m flag
 case "$KERNEL_ARCH" in
-  arm64|aarch64) GGCC_M=aarch64 ;;
-  *) GGCC_M=x86_64 ;;
+  arm64|aarch64) ACC_M=aarch64 ;;
+  *) ACC_M=x86_64 ;;
 esac
 if [[ ${#DOCKER_PLATFORM_ARGS[@]} -gt 0 ]]; then
   log "docker platform: linux/amd64 (forced for x86_64 kernel on aarch64 host)"
@@ -169,179 +199,30 @@ docker run --rm \
   -w /work \
   -e KERNEL_ARCH="$KERNEL_ARCH" \
   -e KARCH="$KARCH" \
-  -e GGCC_M="$GGCC_M" \
+  -e ACC_M="$ACC_M" \
   -e VER="$VER" \
   -e KSRC_REL="$KSRC_REL" \
   -e JOBS="$JOBS" \
-  -e GGCC_ALLOW_SOFT_SYSCC=0 \
-  -e GGCC_SOFT_FREESTANDING=0 \
-  -e GGCC_KERNEL_FREESTANDING=1 \
-  "$IMAGE" bash -lc '
-    set -euo pipefail
-    LOG=/scratch/stage_c_kernel.log
-    log() { echo "$@" | tee -a "$LOG"; }
-
-    log "container: $(uname -a)"
-    log "KERNEL_ARCH=$KERNEL_ARCH KARCH=$KARCH GGCC_M=$GGCC_M"
-    log "GGCC_ALLOW_SOFT_SYSCC=${GGCC_ALLOW_SOFT_SYSCC:-0} (must stay 0 for C1)"
-    log "=== cargo build --release (Linux ggcc; separate target dir) ==="
-    # Do NOT overwrite host macOS target/release/ggcc with Linux ELF.
-    export CARGO_TARGET_DIR=/work/target-linux
-    cargo build --release 2>&1 | tee -a "$LOG"
-    GGCC=/work/target-linux/release/ggcc
-    test -x "$GGCC"
-    export GGCC
-    export GGCC_ARCH="$GGCC_M"
-    export GGCC_TARGET_OS=linux
-    export SYSCC=gcc
-    # Explicit: no soft body skip / no soft system-CC on .c
-    unset GGCC_SOFT_SKIP_BODIES || true
-    # Soft freestanding body replacements OFF on C1 PASS path (emit real C).
-    unset GGCC_SOFT_FREESTANDING || true
-    export GGCC_SOFT_FREESTANDING=0
-    export GGCC_KERNEL_FREESTANDING=1
-    export GGCC_ALLOW_SOFT_SYSCC=0
-    WRAP=/work/harness/docker/ggcc_cc_wrapper.sh
-    chmod +x "$WRAP"
-    "$GGCC" --help 2>&1 | head -8 | tee -a "$LOG" || true
-
-    # Trivial probe inside container (native arch asm)
-    echo "int x;" > /scratch/kprobe.c
-    set +e
-    "$GGCC" --target-os linux -m "$GGCC_M" -S -o /scratch/kprobe.s /scratch/kprobe.c 2>>"$LOG"
-    log "kprobe_ec=$?"
-    set -e
-    head -10 /scratch/kprobe.s >>"$LOG" 2>/dev/null || true
-
-    rm -rf /tmp/linux-src
-    mkdir -p /tmp/linux-src
-    # Prefer in-place work-tree build when a known-good .config exists (avoids
-    # tinyconfig VDSO link failures and preserves C1 defconfig choices).
-    if [[ -f "/work/$KSRC_REL/.config" ]]; then
-      KBUILD="/work/$KSRC_REL"
-      log "using in-place kernel tree $KBUILD (existing .config)"
-      cd "$KBUILD"
-      # Ensure VDSO is off — ggcc .data/.bss in vgettimeofday breaks vdso link.
-      if [[ -x scripts/config ]]; then
-        scripts/config --file .config --disable VDSO 2>/dev/null || true
-        scripts/config --file .config --disable COMPAT_VDSO 2>/dev/null || true
-        make ARCH="$KARCH" olddefconfig 2>&1 | tee -a "$LOG" | tail -10 || true
-      fi
-      log "config: existing ($(wc -l < .config) lines); CONFIG_VDSO=$(grep -E '^CONFIG_VDSO' .config || echo unset)"
-    else
-      if [[ -f "/scratch/linux-$VER.tar.xz" ]]; then
-        log "extracting /scratch/linux-$VER.tar.xz to container-local /tmp/linux-src..."
-        tar -xJf "/scratch/linux-$VER.tar.xz" -C /tmp/linux-src --strip-components=1
-      elif [[ -d "/work/$KSRC_REL" ]]; then
-        log "copying /work/$KSRC_REL to container-local /tmp/linux-src..."
-        cp -r "/work/$KSRC_REL"/* /tmp/linux-src/ 2>/dev/null || true
-      fi
-      cd /tmp/linux-src
-      KBUILD=/tmp/linux-src
-      log "=== make ARCH=$KARCH tinyconfig ==="
-      make ARCH="$KARCH" defconfig 2>&1 | tee -a "$LOG" | tail -20 || true
-      make ARCH="$KARCH" tinyconfig 2>&1 | tee -a "$LOG" | tail -20
-      if [[ -x scripts/config ]]; then
-        scripts/config --file .config --disable VDSO 2>/dev/null || true
-        scripts/config --file .config --disable COMPAT_VDSO 2>/dev/null || true
-      fi
-      if [[ "$KERNEL_ARCH" == "x86_64" || "$KERNEL_ARCH" == "x86" ]]; then
-        echo "CONFIG_64BIT=y" >> .config
-      fi
-      make ARCH="$KARCH" olddefconfig 2>&1 | tee -a "$LOG" | tail -20
-      log "config: tinyconfig generated ($(wc -l < .config) lines)"
-    fi
-
-    # Force remake of objects that may still carry soft-freestanding early stubs
-    # or lack mid-boot hard-keeper stubs after codegen policy changes.
-    log "=== force remake of boot-critical objects (soft=0 PASS path) ==="
-    rm -f arch/arm64/mm/*.o arch/arm64/kernel/setup.o \
-      mm/bootmem_info.o mm/mm_init.o mm/memblock.o \
-      init/main.o init/ggcc_init_payload.o \
-      kernel/sched/core.o kernel/softirq.o 2>/dev/null || true
-
-    log "=== make ARCH=$KARCH CC=ggcc_cc_wrapper HOSTCC=gcc Image ==="
-    # HOSTCC=gcc: kconfig/fixdep host tools only — not kernel .c
-    # CC=wrapper: kernel .c → ggcc only
-    set +e
-    make ARCH="$KARCH" \
-      CC="$WRAP" \
-      HOSTCC=gcc \
-      HOSTCXX=g++ \
-      -j"$JOBS" \
-      Image \
-      2>&1 | tee /scratch/kernel_make_full.log | tee -a "$LOG" | tail -80
-    make_ec=${PIPESTATUS[0]}
-    set -e
-    log "make_ec=$make_ec"
-
-    # Capture last failure snippet
-    if [[ $make_ec -ne 0 ]]; then
-      log "=== last_failure (tail kernel_make_full.log) ==="
-      tail -60 /scratch/kernel_make_full.log | tee -a "$LOG"
-      # Prefer first ggcc_cc_wrapper / ERROR line
-      log "=== first_ggcc_error ==="
-      grep -n -E "ggcc_cc_wrapper:|ERROR:|error:" /scratch/kernel_make_full.log | head -30 | tee -a "$LOG" || true
-    fi
-
-    # Artifacts? Prefer arch-matching Image paths (stale other-arch images ignored by path).
-    bz=""
-    if [[ "$KERNEL_ARCH" = arm64 || "$KERNEL_ARCH" = aarch64 ]]; then
-      for cand in arch/arm64/boot/Image arch/arm64/boot/Image.gz; do
-        if [[ -f "$cand" ]]; then bz="$cand"; break; fi
-      done
-    else
-      if [[ -f arch/x86/boot/bzImage ]]; then bz=arch/x86/boot/bzImage; fi
-    fi
-    if [[ -z "$bz" && -f vmlinux ]]; then bz=vmlinux; fi
-    if [[ -n "$bz" ]]; then
-      log "kernel_image: $bz"
-      log "=== QEMU boot attempt (60s) ==="
-      set +e
-      if [[ "$KERNEL_ARCH" = arm64 || "$KERNEL_ARCH" = aarch64 ]]; then
-        timeout 60 qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel "$bz" \
-          -nographic -append "console=ttyAMA0 earlycon=pl011,0x9000000" \
-          2>&1 | tee /scratch/qemu_boot.log | tee -a "$LOG" | tail -80
-      else
-        timeout 60 qemu-system-x86_64 -kernel "$bz" \
-          -nographic -append "console=ttyS0 earlyprintk=serial" \
-          -serial mon:stdio -no-reboot \
-          2>&1 | tee /scratch/qemu_boot.log | tee -a "$LOG" | tail -80
-      fi
-      qec=${PIPESTATUS[0]}
-      set -e
-      log "qemu_ec=$qec"
-      # C1 PASS bar: Linux version AND init/pid1 (not Linux-version-alone).
-      has_linux=0
-      has_pid1=0
-      grep -q "Linux version" /scratch/qemu_boot.log 2>/dev/null && has_linux=1
-      if grep -qE "Run /init|ggcc-init:|working init" /scratch/qemu_boot.log 2>/dev/null; then
-        has_pid1=1
-      fi
-      if [[ "$has_linux" -eq 1 && "$has_pid1" -eq 1 ]]; then
-        log "BOOT_EVIDENCE: Linux version + init/pid1 present"
-        echo PASS_BOOT > /scratch/c1_boot_marker
-      elif [[ "$has_linux" -eq 1 ]]; then
-        log "BOOT_EVIDENCE: PARTIAL — Linux version without init/pid1 (no PASS_BOOT)"
-      else
-        log "BOOT_EVIDENCE: missing (no boot strings in serial log)"
-      fi
-    else
-      log "kernel_image: none — skip QEMU (build did not produce bzImage/Image/vmlinux)"
-    fi
-
-    # Exit code for outer script
-    if [[ -f /scratch/c1_boot_marker ]]; then
-      exit 0
-    fi
-    exit 3
-  '
+  -e ACC_PARSE_ALL_BODIES=1 \
+  -e ACC_SOFT_SKIP_BODIES=0 \
+  -e ACC_ALLOW_SOFT_SYSCC=0 \
+  -e ACC_SOFT_FREESTANDING=0 \
+  -e ACC_KERNEL_FREESTANDING=1 \
+  -e INITRD_PATH="$INITRD_PATH" \
+  -e INITRD_REL="${INITRD_REL:-${INITRD_PATH#$ROOT/}}" \
+  "$IMAGE" bash /work/harness/docker/c1_build_inner.sh
 docker_ec=$?
 set -e
 log "docker_run_ec=$docker_ec"
 
 # --- 5. Verdict ---
-if [[ -f "$SCRATCH/c1_boot_marker" ]]; then
+if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
+  if [[ -f "$SCRATCH/c1_boot_marker_x86_64" ]] && [[ -f "$SCRATCH/qemu_boot_x86_64.log" ]]; then
+    verdict "PASS"
+    log "C1 x86_64 boot marker present — review qemu_boot_x86_64.log for evidence"
+    exit 0
+  fi
+elif [[ -f "$SCRATCH/c1_boot_marker" ]] && [[ -f "$SCRATCH/qemu_boot.log" || -f "$SCRATCH/qemu_boot_a09.log" ]]; then
   verdict "PASS" # should not happen until language ready
   log "C1 boot marker present — review qemu_boot.log for evidence"
   exit 0
@@ -350,10 +231,10 @@ fi
 # Default honest blocked path
 last_fail="see kernel_make_full.log / stage_c_kernel.log tail"
 if [[ -f "$SCRATCH/kernel_make_full.log" ]]; then
-  last_fail="$(grep -E "ggcc_cc_wrapper:|ERROR:" "$SCRATCH/kernel_make_full.log" | head -3 | tr '\n' ' ' || true)"
+  last_fail="$(grep -E "acc_cc_wrapper:|ERROR:" "$SCRATCH/kernel_make_full.log" | head -3 | tr '\n' ' ' || true)"
 fi
 if [[ -z "${last_fail// }" ]]; then
-  last_fail="make failed before producing bootable image; ggcc language coverage insufficient for kernel C"
+  last_fail="make failed before producing bootable image; acc language coverage insufficient for kernel C"
 fi
 
 verdict "BLOCKED" "full Linux $VER QEMU boot not achieved. last_failure: $last_fail. Expected gaps: preprocessor (-E/-I/-D), GNU C extensions, attributes, inline asm, bitfields/complex types, kernel headers, freestanding builtins. Wrapper correctly refuses gcc fallback on .c. Docker image path exercised when docker available."

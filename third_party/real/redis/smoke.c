@@ -1,4 +1,4 @@
-/* Stage C2: real Redis 7.2.5 sds.c + zmalloc.c under ggcc. */
+/* Stage C2: real Redis 7.2.5 sds.c + zmalloc.c under acc. */
 #include "sds.h"
 #include "zmalloc.h"
 #include <stdio.h>

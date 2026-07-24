@@ -3,13 +3,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-BIN="${GGCC_BIN:-$ROOT/target/release/ggcc}"
-WORKDIR="${GGCC_ORACLE_WORK:-$ROOT/target/oracle_work}/mutation"
+BIN="${ACC_BIN:-$ROOT/target/release/acc}"
+WORKDIR="${ACC_ORACLE_WORK:-$ROOT/target/oracle_work}/mutation"
 mkdir -p "$WORKDIR"
 
 if [[ ! -x "$BIN" ]]; then
   cargo build --release
-  BIN="$ROOT/target/release/ggcc"
+  BIN="$ROOT/target/release/acc"
 fi
 
 SRC="$WORKDIR/mut.c"

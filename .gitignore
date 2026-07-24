@@ -49,7 +49,19 @@ third_party/stage_c/**/*.zip
 third_party/stage_c/linux-*/
 third_party/stage_c/redis/
 third_party/stage_c/sqlite_full/
+# Postgres: fetch via harness/docker/fetch_postgres.sh (see README in this dir)
+third_party/stage_c/postgres/postgresql-*/
+third_party/stage_c/postgres/*.tar.bz2
+third_party/stage_c/postgres/*.tar.gz
+*.bak
 third_party/real/lua-5.4.6/
+third_party/busybox-*/
+third_party/busybox-*.tar.bz2
+third_party/ccc-harness-ref/
+third_party/gcc-sparse/
+
+# Busybox initrd build outputs
+harness/initrd/out/
 
 # Local agent / tool state
 harness/current_tasks/*.lock
@@ -63,7 +75,16 @@ harness/current_tasks/*.lock
 Cargo.lock.bak
 
 # Junk / local dumps
+/+
 /-
+/1:
+/Test
+/compare
+/double
+/return
+/soft
+/testdir/
+/cargo
 /fred.txt
 /chunk.c
 /tmp_core.*
@@ -71,3 +92,4 @@ Cargo.lock.bak
 /link_full.log
 /qemu*.log
 /examples_pp_dump.rs
+

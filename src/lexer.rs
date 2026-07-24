@@ -140,9 +140,12 @@ impl<'a> Lexer<'a> {
             "case" => TokenKind::Case,
             "default" => TokenKind::Default,
             "sizeof" => TokenKind::Sizeof,
-            // `_Bool` is the C99 type keyword. Do NOT map `bool` — kernel headers
-            // (and C code) use `typedef _Bool bool;` so `bool` must stay an identifier.
-            "_Bool" => TokenKind::Int,
+            // `_Bool` is the C99 type keyword; size is 1 (like unsigned char).
+            // Do NOT map to Int — postgres/Linux rely on sizeof(bool)==1 for
+            // struct layout (e.g. SlruSharedData page_dirty[] stride).
+            // Do NOT map `bool` — headers use `typedef _Bool bool;` so `bool`
+            // must stay an identifier that resolves via typedef.
+            "_Bool" => TokenKind::Char,
             // Mark GNU attributes as a special ident for next_token to erase.
             "__attribute__" | "__attribute" | "__extension__" | "__extension" => {
                 TokenKind::Ident(s.to_string())
@@ -522,7 +525,7 @@ impl<'a> Lexer<'a> {
                 let t = self.ident_or_kw();
                 if let TokenKind::Ident(ref s) = t.kind {
                     // PP maps kernel `__weak` → this marker (attributes erased for_linux).
-                    if s == "__ggcc_weak_attr" || s == "__weak" {
+                    if s == "__acc_weak_attr" || s == "__weak" {
                         return Ok(self.make(TokenKind::Weak, t.line, t.col));
                     }
                     // D-redis / Phase B.2: bare Ident `attribute` is a valid C
@@ -764,15 +767,17 @@ impl<'a> Lexer<'a> {
             b'\'' => self.char_lit(),
             b if b.is_ascii_digit() => Ok(self.number()),
             b'\\' => {
+                // Phase-2 line splice normally removes `\`+newline earlier. A bare
+                // `\` left in the token stream (postgres/kernel after odd macros)
+                // is treated as whitespace so we do not hard-fail the TU.
                 self.bump();
                 while matches!(self.peek(), Some(b' ' | b'\t' | b'\r')) {
                     self.bump();
                 }
                 if self.peek() == Some(b'\n') {
                     self.bump();
-                    return self.next_token();
                 }
-                Err(format!("unexpected character '\\' at {line}:{col}"))
+                return self.next_token();
             }
             // alphabetic / wide literals handled in next_token
             other => Err(format!(

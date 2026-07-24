@@ -113,6 +113,8 @@ pub enum Stmt {
     Break,
     Continue,
     Goto(String),
+    /// GCC computed goto: `goto *expr;` (postgres ExecInterpExpr).
+    GotoIndirect(Expr),
     Label(String, Box<Stmt>),
     Switch {
         cond: Expr,
@@ -131,10 +133,12 @@ pub enum Stmt {
     ///
     /// `in_loads`: before lines, evaluate `expr` into `x{reg}` (may be Addr/Cast).
     /// `out_stores`: after lines, store `x{reg}` into local/global `var`.
+    /// `out_store_exprs`: store `x{reg}` through a general lvalue (`*expected`).
     Asm {
         lines: Vec<String>,
         in_loads: Vec<(u8, Expr)>,
         out_stores: Vec<(u8, String)>,
+        out_store_exprs: Vec<(u8, Expr)>,
     },
 }
 
@@ -196,6 +200,8 @@ pub enum Expr {
     PostInc(Box<Expr>),
     PostDec(Box<Expr>),
     StmtExpr(Vec<Stmt>, Box<Expr>),
+    /// GCC labels-as-values: `&&label` (postgres ExecInterpExpr dispatch table).
+    AddrOfLabel(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

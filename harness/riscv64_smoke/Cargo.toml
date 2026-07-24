@@ -1,0 +1,14 @@
+[package]
+name = "riscv64_smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Standalone smoke for acc riscv64 codegen (worktree; not wired into acc driver)"
+
+[[bin]]
+name = "riscv64_smoke"
+path = "src/main.rs"
+
+[lib]
+name = "riscv64_smoke"
+path = "src/lib.rs"

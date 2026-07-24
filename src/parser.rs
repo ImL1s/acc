@@ -345,8 +345,15 @@ impl Parser {
             || s.starts_with("__no_stack")
             || s.starts_with("__read_mostly")
             || s.starts_with("__ro_after_init")
-            || s.contains("ATTRIBUTE")
-            || s.contains("ATTRIBUTES")
+            // Kernel attr spellings only — do NOT match bare `*ATTRIBUTE*`
+            // (postgres `RELOPT_KIND_ATTRIBUTE` / `attribute_reloptions`).
+            || s.starts_with("__ATTRIBUTE")
+            || s.starts_with("___ATTRIBUTE")
+            || s == "ATTRIBUTE_UNUSED"
+            || s == "ATTRIBUTE_USED"
+            || s == "ATTRIBUTE_CONST"
+            || s == "ATTRIBUTE_PURE"
+            || s == "ATTRIBUTES"
             || s.starts_with("PER_CPU_")
     }
 
@@ -455,7 +462,6 @@ impl Parser {
             // storage class at file scope (may repeat / interleave)
             let mut file_static = false;
             let mut file_extern = false;
-            let mut file_register = false;
             loop {
                 if self.eat(TokenKind::Static) {
                     file_static = true;
@@ -465,11 +471,8 @@ impl Parser {
                     file_extern = true;
                     continue;
                 }
-                if self.eat(TokenKind::Register) {
-                    file_register = true;
-                    continue;
-                }
-                if self.eat(TokenKind::Inline)
+                if self.eat(TokenKind::Register)
+                    || self.eat(TokenKind::Inline)
                     || self.eat(TokenKind::Restrict)
                     || self.eat(TokenKind::Auto)
                     || self.eat(TokenKind::Const)
@@ -596,14 +599,14 @@ impl Parser {
             // kernel TU (cleanup.h CLASS expansions + huge headers). Skip to a
             // plausible next top-level boundary and keep going.
             let save_i = self.i;
-            match self.parse_decl_or_func(file_static || file_register, file_extern) {
+            match self.parse_decl_or_func(file_static, file_extern) {
                 Ok(more) => items.extend(more),
                 Err(e) => {
-                    // Surface soft-skip reasons for large-TU debugging (GGCC_PARSE_TRACE=1).
-                    if std::env::var_os("GGCC_PARSE_TRACE").is_some() {
+                    // Surface soft-skip reasons for large-TU debugging (ACC_PARSE_TRACE=1).
+                    if std::env::var_os("ACC_PARSE_TRACE").is_some() {
                         let t = self.peek();
                         eprintln!(
-                            "GGCC_PARSE_TRACE: soft-skip at {}:{} tok={:?}: {e}",
+                            "ACC_PARSE_TRACE: soft-skip at {}:{} tok={:?}: {e}",
                             t.line, t.col, t.kind
                         );
                     }
@@ -977,8 +980,8 @@ impl Parser {
         self.expect(TokenKind::Typedef)?;
         let base = self.parse_type_specifier()?;
         // Linux headers: `typedef _Bool _Bool;` is a no-op. Lexer maps `_Bool`
-        // → TokenKind::Int, so this looks like `typedef int int;` and the second
-        // Int is not a valid declarator name. Accept a type-keyword "name" as a
+        // → TokenKind::Char, so this looks like `typedef char char;` and the second
+        // Char is not a valid declarator name. Accept a type-keyword "name" as a
         // no-op typedef of `_Bool` (keeps subsequent parse alive for kernel TUs).
         let (name, ty, _) = if matches!(
             self.peek_kind(),
@@ -2203,6 +2206,7 @@ impl Parser {
             }
             Expr::StmtExpr(_, final_e) => self.const_expr_type(final_e),
             Expr::InitList { .. } => None,
+            Expr::AddrOfLabel(_) => Some(Type::Ptr(Box::new(Type::Void))),
         }
     }
 
@@ -2283,6 +2287,14 @@ impl Parser {
                         return None;
                     }
                     Some(n.trailing_zeros() as i64)
+                }
+                "__builtin_popcount" => {
+                    let n = self.const_array_len(args.first()?)? as u32;
+                    Some(n.count_ones() as i64)
+                }
+                "__builtin_popcountl" | "__builtin_popcountll" => {
+                    let n = self.const_array_len(args.first()?)? as u64;
+                    Some(n.count_ones() as i64)
                 }
                 _ => None,
             },
@@ -2385,9 +2397,11 @@ impl Parser {
                 continue;
             }
             if self.eat(TokenKind::Register) {
-                // GNU register vars are not linkable objects — treat as local static.
+                // Plain C `register T x;` is just a stack-local hint — NOT
+                // static duration. Treating it as static made
+                // `register struct vars *v = &var` emit `.quad var` into .data
+                // (U var at link) for Postgres regexec.
                 is_register = true;
-                is_static = true;
                 continue;
             }
             if self.eat(TokenKind::Auto) {
@@ -2943,7 +2957,7 @@ impl Parser {
         // `(...)` so headers still parse (DEFINE uses clean string templates).
         //
         // Special case: `asm(ALTERNATIVE("old", "new", CAP) : …)` when the
-        // preprocessor did not expand ALTERNATIVE (ggcc PP gap). Use the first
+        // preprocessor did not expand ALTERNATIVE (acc PP gap). Use the first
         // string (oldinstr = default non-cap path) as the template so critical
         // paths like `msr tpidr_el1` / `mrs tpidr_el1` are not dropped to empty
         // (that left __my_cpu_offset == garbage and percpu FAR=0).
@@ -2954,6 +2968,7 @@ impl Parser {
                 lines: Vec::new(),
                 in_loads: Vec::new(),
                 out_stores: Vec::new(),
+                out_store_exprs: Vec::new(),
             });
         }
         let after = self.toks.get(self.i + 1).map(|t| &t.kind);
@@ -2973,6 +2988,7 @@ impl Parser {
                 lines: Vec::new(),
                 in_loads: Vec::new(),
                 out_stores: Vec::new(),
+                out_store_exprs: Vec::new(),
             });
         }
 
@@ -3022,6 +3038,7 @@ impl Parser {
                     lines: Vec::new(),
                     in_loads: Vec::new(),
                     out_stores: Vec::new(),
+                    out_store_exprs: Vec::new(),
                 });
             }
             return self.finish_asm_stmt_with_template(old);
@@ -3053,6 +3070,7 @@ impl Parser {
                 lines: Vec::new(),
                 in_loads: Vec::new(),
                 out_stores: Vec::new(),
+                out_store_exprs: Vec::new(),
             });
         }
 
@@ -3084,6 +3102,7 @@ impl Parser {
                 lines: Vec::new(),
                 in_loads: Vec::new(),
                 out_stores: Vec::new(),
+                out_store_exprs: Vec::new(),
             });
         }
 
@@ -3095,6 +3114,8 @@ impl Parser {
         let mut op_reg: Vec<u8> = Vec::new();
         let mut op_var: Vec<Option<String>> = Vec::new();
         let mut op_is_out: Vec<bool> = Vec::new();
+        // True when constraint contains '+' (read-write): load before asm too.
+        let mut op_plus: Vec<bool> = Vec::new();
         let mut next_reg: u8 = 0;
         let mut alloc_reg = || -> u8 {
             loop {
@@ -3125,6 +3146,7 @@ impl Parser {
                         op_var.push(None);
                         op_is_out.push(is_out);
                         op_expr.push(None);
+                        op_plus.push(false);
                     } else {
                         let e = p.parse_assign()?;
                         p.expect(TokenKind::RParen)?;
@@ -3139,7 +3161,24 @@ impl Parser {
                             }
                         };
                         let is_imm_c = cstr.contains('i') || cstr.contains('n');
-                        let is_reg_c = cstr.contains('r') || cstr.contains('g');
+                        // x86 letter classes: r/g general; q = low-byte-capable;
+                        // a/b/c/d/S/D fixed regs. Do not treat bare 'm' as reg.
+                        let body = cstr.trim_start_matches(['=', '+', '&', '%', ' ']);
+                        let is_reg_c = body.contains('r')
+                            || body.contains('g')
+                            || body.contains('q')
+                            || body.contains('Q')
+                            || body.starts_with('a')
+                            || body.starts_with('b')
+                            || body.starts_with('c')
+                            || body.starts_with('d')
+                            || body.starts_with('S')
+                            || body.starts_with('D');
+                        let is_mem_c = !is_reg_c
+                            && (body.starts_with('m')
+                                || body.starts_with('o')
+                                || body.contains('m'));
+                        let has_plus = cstr.contains('+');
                         let imm = if is_imm_c && matching.is_none() {
                             p.const_array_len(&e)
                                 .or_else(|| p.const_offsetof(&e))
@@ -3154,6 +3193,7 @@ impl Parser {
                             op_var.push(None);
                             op_is_out.push(is_out);
                             op_expr.push(None);
+                            op_plus.push(false);
                         } else if let Some(mi) = matching {
                             op_kind.push(3);
                             op_imm.push(mi);
@@ -3161,8 +3201,19 @@ impl Parser {
                             op_var.push(None);
                             op_is_out.push(is_out);
                             op_expr.push(Some(e));
+                            op_plus.push(has_plus);
                         } else if is_reg_c {
-                            let reg = alloc_reg();
+                            // Fixed x86 letter constraints must use the real
+                            // physical register (cmpxchg requires %eax for "a").
+                            let reg = match body {
+                                "a" => 0u8,   // %rax
+                                "b" => 19u8,  // %rbx
+                                "c" => 11u8,  // %rcx
+                                "d" => 3u8,   // %rdx
+                                "S" => 17u8,  // %rsi
+                                "D" => 1u8,   // %rdi
+                                _ => alloc_reg(),
+                            };
                             let var = match &e {
                                 Expr::Var(n) => Some(n.clone()),
                                 _ => None,
@@ -3173,6 +3224,17 @@ impl Parser {
                             op_var.push(var);
                             op_is_out.push(is_out);
                             op_expr.push(Some(e));
+                            op_plus.push(has_plus);
+                        } else if is_mem_c {
+                            // "+m"(*lock) → address in a GP reg, template uses (xN).
+                            let reg = alloc_reg();
+                            op_kind.push(4);
+                            op_imm.push(0);
+                            op_reg.push(reg);
+                            op_var.push(None);
+                            op_is_out.push(is_out);
+                            op_expr.push(Some(e));
+                            op_plus.push(has_plus);
                         } else {
                             op_kind.push(2);
                             op_imm.push(0);
@@ -3180,6 +3242,7 @@ impl Parser {
                             op_var.push(None);
                             op_is_out.push(is_out);
                             op_expr.push(None);
+                            op_plus.push(false);
                         }
                     }
                     if p.eat(TokenKind::Comma) {
@@ -3260,7 +3323,25 @@ impl Parser {
 
         let mut in_loads: Vec<(u8, Expr)> = Vec::new();
         let mut out_stores: Vec<(u8, String)> = Vec::new();
+        let mut out_store_exprs: Vec<(u8, Expr)> = Vec::new();
         for i in 0..op_kind.len() {
+            if op_kind[i] == 4 {
+                // Memory operand: load the *address* of the lvalue into the reg.
+                if let Some(e) = op_expr[i].clone() {
+                    let addr = match e {
+                        Expr::Unary {
+                            op: UnaryOp::Deref,
+                            expr,
+                        } => *expr,
+                        other => Expr::Unary {
+                            op: UnaryOp::Addr,
+                            expr: Box::new(other),
+                        },
+                    };
+                    in_loads.push((op_reg[i], addr));
+                }
+                continue;
+            }
             if op_kind[i] != 1 {
                 continue;
             }
@@ -3269,6 +3350,23 @@ impl Parser {
                     out_stores.push((op_reg[i], v.clone()));
                 } else if let Some(Expr::Var(n)) = &op_expr[i] {
                     out_stores.push((op_reg[i], n.clone()));
+                } else if let Some(e) = op_expr[i].clone() {
+                    // "=a"(*expected) — write register back through lvalue.
+                    out_store_exprs.push((op_reg[i], e));
+                }
+                // "+r"(x) / "a"(*p) read-write: preload current value.
+                if op_plus[i] || matches!(
+                    op_expr[i],
+                    Some(Expr::Unary {
+                        op: UnaryOp::Deref,
+                        ..
+                    })
+                ) {
+                    if let Some(e) = op_expr[i].clone() {
+                        in_loads.push((op_reg[i], e));
+                    } else if let Some(ref v) = op_var[i] {
+                        in_loads.push((op_reg[i], Expr::Var(v.clone())));
+                    }
                 }
             } else if let Some(e) = op_expr[i].clone() {
                 // Input: evaluate expression into the register (Var, Addr, Cast…).
@@ -3330,6 +3428,9 @@ impl Parser {
                         out.push_str(&format!("{}", op_imm[idx]));
                     } else if idx < op_kind.len() && op_kind[idx] == 1 {
                         out.push_str(&format!("{reg_prefix}{}", op_reg[idx]));
+                    } else if idx < op_kind.len() && op_kind[idx] == 4 {
+                        // Memory operand → (xN); soften/rewrite turns into (%reg).
+                        out.push_str(&format!("(x{})", op_reg[idx]));
                     } else {
                         // Drop unresolvable %N (codegen filters), TLBI ALL-form exception.
                         let trimmed = out.trim_end();
@@ -3374,6 +3475,7 @@ impl Parser {
             lines,
             in_loads,
             out_stores,
+            out_store_exprs,
         })
     }
 
@@ -3537,6 +3639,12 @@ impl Parser {
             return Ok(Stmt::Continue);
         }
         if self.eat(TokenKind::Goto) {
+            // GCC computed goto: `goto *expr;`
+            if self.eat(TokenKind::Star) {
+                let e = self.parse_expr()?;
+                self.expect(TokenKind::Semicolon)?;
+                return Ok(Stmt::GotoIndirect(e));
+            }
             let t = self.expect(TokenKind::Ident(String::new()))?;
             let name = match t.kind {
                 TokenKind::Ident(s) => s,
@@ -3659,7 +3767,7 @@ impl Parser {
         // Block-scope `extern T name;` must NOT become a stack local — otherwise
         // `&sqlite3_search_count` in Tcl_LinkVar points at a frame slot and
         // SQLite index search-count tests always see 0.
-        let is_static = self.at(&TokenKind::Static) || self.at(&TokenKind::Register);
+        let is_static = self.at(&TokenKind::Static);
         let is_extern = self.at(&TokenKind::Extern);
         let mut sec_attr: Option<String> = None;
         if let TokenKind::Section(sec) = self.peek_kind().clone() {
@@ -4010,10 +4118,9 @@ impl Parser {
         if self.at(&TokenKind::AndAnd) {
             if let Some(TokenKind::Ident(_)) = self.toks.get(self.i + 1).map(|t| &t.kind) {
                 self.bump(); // &&
-                if let TokenKind::Ident(_lab) = self.peek_kind().clone() {
+                if let TokenKind::Ident(lab) = self.peek_kind().clone() {
                     self.bump();
-                    // Soft: label address is not a real constant for DEFINE; use 0.
-                    return Ok(Expr::Int(0));
+                    return Ok(Expr::AddrOfLabel(lab));
                 }
             }
         }
@@ -4146,9 +4253,9 @@ impl Parser {
                 // GP-only cursor would read 0. Use a dedicated FP walker for those.
                 let is_fp = matches!(ty, Type::Float | Type::Double);
                 let helper = if is_fp {
-                    "__ggcc_va_arg_fp"
+                    "__acc_va_arg_fp"
                 } else {
-                    "__ggcc_va_arg"
+                    "__acc_va_arg"
                 };
                 // Lower to (*(T*)helper(&ap)) soft form.
                 return Ok(Expr::Unary {
@@ -4389,10 +4496,15 @@ impl Parser {
         while self.eat(TokenKind::Star) {
             loop {
                 match self.peek_kind().clone() {
-                    TokenKind::Const | TokenKind::Volatile => {
+                    TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
                         self.bump();
                     }
-                    TokenKind::Ident(s) if s == "restrict" => {
+                    TokenKind::Ident(s)
+                        if matches!(
+                            s.as_str(),
+                            "restrict" | "__restrict" | "__restrict__" | "pg_restrict"
+                        ) =>
+                    {
                         self.bump();
                     }
                     _ => break,
@@ -4430,11 +4542,13 @@ impl Parser {
                     ty = Type::Ptr(Box::new(ty)); // function type ≈ pointer
                 }
                 while self.eat(TokenKind::LBracket) {
-                    let nsz = if let TokenKind::IntLit(v) = self.peek_kind().clone() {
-                        self.bump();
-                        v
-                    } else {
+                    let nsz = if self.at(&TokenKind::RBracket) {
                         0
+                    } else if self.eat(TokenKind::Star) {
+                        0
+                    } else {
+                        let e = self.parse_expr()?;
+                        self.const_array_len(&e).unwrap_or(0)
                     };
                     self.expect(TokenKind::RBracket)?;
                     ty = Type::Array(Box::new(ty), nsz);
@@ -4459,11 +4573,14 @@ impl Parser {
             }
         }
         while self.eat(TokenKind::LBracket) {
-            let nsz = if let TokenKind::IntLit(v) = self.peek_kind().clone() {
-                self.bump();
-                v
-            } else {
+            // Abstract array bound may be a const expr: `(T (*)[INIT_FORKNUM + 1])`
+            let nsz = if self.at(&TokenKind::RBracket) {
                 0
+            } else if self.eat(TokenKind::Star) {
+                0
+            } else {
+                let e = self.parse_expr()?;
+                self.const_array_len(&e).unwrap_or(0)
             };
             self.expect(TokenKind::RBracket)?;
             ty = Type::Array(Box::new(ty), nsz);
@@ -5042,5 +5159,65 @@ mod weak_tests {
             _ => None,
         }).expect("foo fn");
         assert!(f.is_weak, "foo should be weak, got is_weak={}", f.is_weak);
+    }
+
+    #[test]
+    fn enum_const_containing_attribute_is_not_gnu_attr() {
+        // Regression: is_gnu_attr_name used to match any *ATTRIBUTE* substring,
+        // soft-skipping postgres attribute_reloptions (RELOPT_KIND_ATTRIBUTE).
+        let src = r#"
+            enum { RELOPT_KIND_ATTRIBUTE = 2 };
+            typedef unsigned char bytea;
+            typedef struct AttributeOpts { float n_distinct; } AttributeOpts;
+            void *build_reloptions(int kind, unsigned long sz);
+            bytea *attribute_reloptions(void) {
+                return (bytea *) build_reloptions(RELOPT_KIND_ATTRIBUTE, sizeof(AttributeOpts));
+            }
+        "#;
+        let toks = Lexer::tokenize(src).unwrap();
+        let mut p = Parser::new(toks);
+        let prog = p.parse_program().unwrap();
+        assert!(
+            prog.items.iter().any(|i| matches!(i, Item::Func(f) if f.name == "attribute_reloptions" && f.body.is_some())),
+            "attribute_reloptions must parse with body"
+        );
+    }
+
+    #[test]
+    fn goto_indirect_parses() {
+        let src = "void f(void *p) { goto *p; }";
+        let toks = Lexer::tokenize(src).unwrap();
+        let mut p = Parser::new(toks);
+        let prog = p.parse_program().unwrap();
+        let f = prog.items.iter().find_map(|i| match i {
+            Item::Func(f) if f.name == "f" => Some(f),
+            _ => None,
+        }).expect("f");
+        let body = f.body.as_ref().expect("body");
+        assert!(
+            body.iter().any(|s| matches!(s, crate::ast::Stmt::GotoIndirect(_))),
+            "expected GotoIndirect, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn abstract_array_bound_const_expr() {
+        let src = r#"
+            enum { INIT_FORKNUM = 3 };
+            typedef int BlockNumber;
+            void *palloc(unsigned long);
+            void f(void) {
+                BlockNumber (*block)[INIT_FORKNUM + 1];
+                block = (BlockNumber (*)[INIT_FORKNUM + 1]) palloc(16);
+                (void)block;
+            }
+        "#;
+        let toks = Lexer::tokenize(src).unwrap();
+        let mut p = Parser::new(toks);
+        let prog = p.parse_program().unwrap();
+        assert!(
+            prog.items.iter().any(|i| matches!(i, Item::Func(f) if f.name == "f" && f.body.is_some())),
+            "pointer-to-array cast with const expr bound must parse"
+        );
     }
 }

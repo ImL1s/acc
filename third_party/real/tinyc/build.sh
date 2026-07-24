@@ -1,10 +1,10 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CC="${CC:-$ROOT/target/release/ggcc}"
+CC="${CC:-$ROOT/target/release/acc}"
 if [[ ! -x "$CC" ]]; then
   (cd "$ROOT" && cargo build --release)
-  CC="$ROOT/target/release/ggcc"
+  CC="$ROOT/target/release/acc"
 fi
 cd "$(dirname "$0")"
 "$CC" -o tinyc_bin main.c

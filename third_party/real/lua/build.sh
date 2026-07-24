@@ -1,16 +1,16 @@
 #!/usr/bin/env zsh
-# Stage B real project: Lua 5.4.6 multi-file under CC=ggcc.
+# Stage B real project: Lua 5.4.6 multi-file under CC=acc.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CC="${CC:-$ROOT/target/release/ggcc}"
+CC="${ACC_CC:-${CC:-$ROOT/target/release/acc}}"
 if [[ ! -x "$CC" ]]; then
   (cd "$ROOT" && cargo build --release)
-  CC="$ROOT/target/release/ggcc"
+  CC="$ROOT/target/release/acc"
 fi
 LUA_SRC="$ROOT/third_party/real/lua-5.4.6/src"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
-WORKDIR="${TMPDIR:-/tmp}/ggcc_lua_build_$$"
+WORKDIR="${TMPDIR:-/tmp}/acc_lua_build_$$"
 mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -25,8 +25,8 @@ for f in $CORE; do
   "$CC" -S -o "$WORKDIR/${f}.s" "$LUA_SRC/${f}.c" "${FLAGS[@]}"
   objs+=("$WORKDIR/${f}.s")
 done
-"$CC" -S -o "$WORKDIR/linit_ggcc.s" "$HERE/linit_ggcc.c" "${FLAGS[@]}"
-objs+=("$WORKDIR/linit_ggcc.s")
+"$CC" -S -o "$WORKDIR/linit_acc.s" "$HERE/linit_acc.c" "${FLAGS[@]}"
+objs+=("$WORKDIR/linit_acc.s")
 cc -o "$HERE/lua_bin" "${objs[@]}" -lm
 
 case "${1:-test}" in

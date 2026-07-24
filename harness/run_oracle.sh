@@ -6,14 +6,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BIN="${GGCC_BIN:-$ROOT/target/release/ggcc}"
+BIN="${ACC_BIN:-${GGCC_BIN:-$ROOT/target/release/acc}}"
 ORACLE_DIR="$ROOT/oracles"
-WORKDIR="${GGCC_ORACLE_WORK:-$ROOT/target/oracle_work}"
+WORKDIR="${ACC_ORACLE_WORK:-${GGCC_ORACLE_WORK:-$ROOT/target/oracle_work}}"
 
 if [[ ! -x "$BIN" ]]; then
-  echo "Building ggcc (release)..."
+  echo "Building acc (release)..."
   cargo build --release
-  BIN="$ROOT/target/release/ggcc"
+  BIN="$ROOT/target/release/acc"
 fi
 
 if [[ ! -x "$BIN" ]]; then

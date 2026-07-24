@@ -20,7 +20,7 @@ int main(void) {
     f = fact(5);
     if (f != 120)
         return 1;
-    if (slen("ggcc") != 4)
+    if (slen("acc") != 3)
         return 2;
     printf("tinyc ok\n");
     return 0;

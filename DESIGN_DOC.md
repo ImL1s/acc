@@ -1,6 +1,6 @@
-# ggcc Design Document
+# acc Design Document
 
-Architecture of **ggcc** (clean-room C compiler in Rust). For build/usage/status see [README.md](README.md) and [harness/progress.md](harness/progress.md).
+Architecture of **acc** (clean-room C compiler in Rust). For build/usage/status see [README.md](README.md) and [harness/progress.md](harness/progress.md).
 
 This document describes **this** tree only. It is implemented completely from scratch and is not derived from CCC `src/`.
 
@@ -120,12 +120,12 @@ harness/
 ## Driver and Toolchain Boundary
 
 **Allowed:**
-- Emitting textual assembly (`.s`) directly from `ggcc`.
+- Emitting textual assembly (`.s`) directly from `acc`.
 - Invoking system `as`, `ld`, or `cc` **only** on the emitted `.s` file or object files produced from it.
 
 **Strictly Forbidden on PASS Path:**
 - Passing user or kernel `.c` files to external C compilers (`gcc`, `clang`, `ccc`, `tcc`).
-- Soft fallback to host `cc` (`GGCC_ALLOW_SOFT_SYSCC=1` triggers hard error).
+- Soft fallback to host `cc` (`ACC_ALLOW_SOFT_SYSCC=1` triggers hard error).
 - Pre-compiled binaries or fixture output spoofing.
 
 ---

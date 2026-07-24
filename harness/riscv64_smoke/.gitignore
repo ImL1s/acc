@@ -1,0 +1,4 @@
+/target/
+/out/*.riscv64
+/out/*.s
+Cargo.lock

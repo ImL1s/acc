@@ -1,10 +1,17 @@
 mod ast;
+mod assigned_names;
 mod codegen;
 mod driver;
 mod lexer;
 mod parser;
 mod preprocess;
 mod token;
+
+#[cfg(feature = "builtin_assembler")]
+mod assembler;
+
+#[cfg(feature = "builtin_linker")]
+mod linker;
 
 use codegen::{Target, TargetOs};
 use driver::{CompileOptions, compile};
@@ -14,15 +21,17 @@ use std::process;
 
 fn usage() -> ! {
     eprintln!(
-        "ggcc — from-scratch minimal C compiler\n\
-         usage: ggcc [-o <output>] [-S] [--keep-asm] [-m aarch64|x86_64] [--target-os darwin|linux]\n\
-                [-I dir] [-Dname[=val]] <input.c>\n\
+        "acc — from-scratch minimal C compiler\n\
+         usage: acc [-o <output>] [-S] [--keep-asm] [-m aarch64|x86_64|i686|riscv64]\n\
+                [--target-os darwin|linux] [-I dir] [-Dname[=val]] <input.c>\n\
          \n\
          Compiles C with the in-tree frontend/codegen. System `cc` is used only\n\
          to assemble/link emitted assembly, never to compile the user's .c.\n\
          \n\
          -m aarch64          emit aarch64 (default)\n\
          -m x86_64           emit x86_64 System V\n\
+         -m i686             emit i686 ILP32 (Linux ELF; link -m32 -no-pie)\n\
+         -m riscv64          emit riscv64 LP64 (Linux ELF; prefer riscv64-linux-gnu-gcc)\n\
          --target-os darwin  Mach-O / Darwin asm (default on macOS host)\n\
          --target-os linux   ELF / Linux asm (for Docker Stage C)\n\
          -I dir              add include search path\n\
@@ -61,11 +70,13 @@ fn main() {
             "--keep-asm" => keep_asm = true,
             "-m" => {
                 let t = args.next().unwrap_or_else(|| {
-                    eprintln!("ERROR: -m requires aarch64 or x86_64");
+                    eprintln!("ERROR: -m requires aarch64, x86_64, i686, or riscv64");
                     process::exit(2);
                 });
                 target = Target::parse(&t).unwrap_or_else(|| {
-                    eprintln!("ERROR: unknown target '{t}' (use aarch64 or x86_64)");
+                    eprintln!(
+                        "ERROR: unknown target '{t}' (use aarch64, x86_64, i686, or riscv64)"
+                    );
                     process::exit(2);
                 });
             }
@@ -162,7 +173,7 @@ fn main() {
             }
         };
         // Match `compile()`: inject -D / -include before preprocessing so
-        // `ggcc -E -DFOO=` agrees with `ggcc -S -DFOO=` (empty #define REDIS_STATIC=).
+        // `acc -E -DFOO=` agrees with `acc -S -DFOO=` (empty #define REDIS_STATIC=).
         let mut prefixed = String::new();
         for (k, v) in &defines {
             match v {

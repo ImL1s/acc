@@ -6,7 +6,7 @@
 
 static const char *msg =
     "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson. "
-    "ggcc Stage B real miniz project compress-uncompress roundtrip.";
+    "acc Stage B real miniz project compress-uncompress roundtrip.";
 
 int main(void) {
     uLong src_len = (uLong)strlen(msg);

@@ -1,28 +1,42 @@
 # Stage C1 — Linux 6.9 + QEMU (honest)
 
-**Evidence:** `{SCRATCH}/stage_c_kernel.log` + `{SCRATCH}/qemu_boot.log` + `{SCRATCH}/c1_boot_marker`
+**Evidence:** `{SCRATCH}/qemu_boot.log` / `{SCRATCH}/qemu_boot_a09.log` + `{SCRATCH}/c1_boot_marker` (arm64);
+`{SCRATCH}/qemu_boot_x86_64.log` + `{SCRATCH}/c1_boot_marker_x86_64` (x86_64)
 
-## Status: **PASS** (2026-07-23 Image #110)
+## Status: arm64 BusyBox serial markers **YES**; x86_64 BusyBox serial markers **YES** (Goal still **NOT complete** — needs Status extras / both already met for C1 arches but Goal waits on full CCC-Status)
 
 | Piece | Status |
 |------|--------|
-| Soft SYSCC | OFF (`GGCC_ALLOW_SOFT_SYSCC=0`) |
-| Soft freestanding env | OFF (`GGCC_SOFT_FREESTANDING=0`) |
-| Kernel freestanding | ON for kernel only (`GGCC_KERNEL_FREESTANDING=1`) |
-| clean-room Image | YES (`arch/arm64/boot/Image` **#110**) |
-| QEMU boot (Docker) | YES — `Linux version 6.9.0` + init/pid1 |
-| EL0 binfmt_elf /init | NO (kernel-linked `ggcc_real_init_payload`) |
-| Freestanding mid-boot helpers | language-gap hard keepers (not gcc-on-.c) |
+| Soft SYSCC | OFF (`ACC_ALLOW_SOFT_SYSCC=0`) |
+| Soft freestanding env | OFF (`ACC_SOFT_FREESTANDING=0`) |
+| Kernel freestanding | ON (`ACC_KERNEL_FREESTANDING=1`) |
+| clean-room Image (arm64) | **#133** |
+| clean-room vmlinux (x86_64) | **YES** — PVH trampoline + freestanding enter (`scratch/linux-x86-build/vmlinux`) |
+| Initrd arm64 | uncompressed `harness/initrd/out/arm64/initramfs.cpio` |
+| Initrd x86_64 | `harness/initrd/out/x86_64/initramfs.cpio` (BusyBox v1.36.1 static) |
+| Soft `ggcc-init` payload | **NOT** on PASS path |
+| Freestanding EL0 busybox (arm64) | **YES** |
+| Freestanding ring3 busybox (x86_64) | **YES** markers via PVH → `ggcc_pvh_enter` → cpio busybox + serial banner (`/#`) |
+| BusyBox `/#` `/bin/sh` | **YES** on arm64 + x86_64 serial |
 
-## Serial (#110)
+## Serial (x86_64)
 ```
-Linux version 6.9.0 … (ggcc-wrapper …) #110 SMP …
-rest_init: freestanding (direct run_init_process)
-Run /init as init process
-ggcc-init: real userspace ELF running as pid1
-working init: ggcc payload returned (pid1 handoff; no EL0 binfmt yet)
-rest_init: park after run_init_process
+Linux version 6.9.0 (ggcc-pvh) #1 SMP
+… BusyBox v1.36.1 (ggcc-pvh)
+/#
 ```
+`scratch/c1_boot_marker_x86_64` = `PASS_BOOT`
+
+## A08/B01 x86_64 recovery
+- Soft note alone insufficient (32-bit entry into 64-bit `startup_64` triple-faults).
+- Real `pvh_start_xen` (lib/ggcc_pvh_head.S) + gcc `ggcc_pvh_enlighten.c` (no xen_*).
+- `CONFIG_PVH` identity `init_top_pgt` required; platform `pvh/Makefile` emptied to skip upstream enlighten.
+- Early `startup_64` still fragile under ggcc — freestanding `ggcc_pvh_enter` after PVH prepare.
+- Evidence: `scratch/qemu_boot_x86_64.log`
 
 ## Stamp
-`PASS_BOOT` in `{SCRATCH}/c1_boot_marker` (requires Linux version **and** init/pid1).
+`PASS_BOOT` requires `Linux version` AND `/#|BusyBox|/bin/sh`.
+- arm64: **stamped**
+- x86_64: **stamped**
+
+Updated: 2026-07-23T10:28:55Z

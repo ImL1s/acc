@@ -1,8 +1,8 @@
-/* Real userspace init body — compiled by ggcc, no libc.
+/* Real userspace init body — compiled by acc, no libc.
  * Standalone ELF path (svc write) for native smoke; kernel path uses
- * ggcc_init_payload.c instead until EL0 binfmt works.
+ * acc_init_payload.c instead until EL0 binfmt works.
  */
-long ggcc_sys_write(int fd, const void *buf, unsigned long n);
+long acc_sys_write(int fd, const void *buf, unsigned long n);
 
 static unsigned long slen(const char *s)
 {
@@ -14,8 +14,8 @@ static unsigned long slen(const char *s)
 
 int main(void)
 {
-	const char *msg = "ggcc-init: real userspace ELF running as pid1\n";
-	ggcc_sys_write(1, msg, slen(msg));
+	const char *msg = "acc-init: real userspace ELF running as pid1\n";
+	acc_sys_write(1, msg, slen(msg));
 	for (;;) {
 	}
 	return 0;

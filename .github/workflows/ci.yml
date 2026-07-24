@@ -67,6 +67,6 @@ jobs:
 
       - name: Run Real-World Project Wrappers (Stage B)
         run: |
-          CC=$PWD/target/release/ggcc third_party/real/miniz/build.sh test
-          CC=$PWD/target/release/ggcc third_party/real/lua/build.sh test
-          CC=$PWD/target/release/ggcc third_party/real/sqlite/build.sh test
+          CC=$PWD/target/release/acc third_party/real/miniz/build.sh test
+          CC=$PWD/target/release/acc third_party/real/lua/build.sh test
+          CC=$PWD/target/release/acc third_party/real/sqlite/build.sh test

@@ -6,9 +6,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BIN="${GGCC_BIN:-$ROOT/target/release/ggcc}"
+BIN="${ACC_BIN:-${GGCC_BIN:-$ROOT/target/release/acc}}"
 SUITE="${CTESTSUITE_DIR:-$ROOT/third_party/c-testsuite/tests/single-exec}"
-WORKDIR="${GGCC_ORACLE_WORK:-$ROOT/target/ctest_work}"
+WORKDIR="${ACC_ORACLE_WORK:-${GGCC_ORACLE_WORK:-$ROOT/target/ctest_work}}"
 # Optional: limit range, e.g. START=1 END=50
 START="${CTEST_START:-1}"
 END="${CTEST_END:-220}"
@@ -17,7 +17,7 @@ MIN_PASS="${CTEST_MIN_PASS:-0}"
 
 if [[ ! -x "$BIN" ]]; then
   cargo build --release
-  BIN="$ROOT/target/release/ggcc"
+  BIN="$ROOT/target/release/acc"
 fi
 
 if [[ ! -d "$SUITE" ]]; then
