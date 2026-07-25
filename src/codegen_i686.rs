@@ -173,9 +173,9 @@ impl Codegen {
     }
 
     fn type_size(&self, ty: &Type) -> i64 {
-        match ty {
+        match ty.unqual() {
             Type::Void => 0,
-            Type::Char | Type::SChar => 1,
+            Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong => 4, // ILP32
@@ -186,20 +186,21 @@ impl Codegen {
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.size).unwrap_or(4),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).size,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).size,
+            Type::Const(_) => unreachable!(),
         }
     }
 
     fn stack_slot_size(&self, ty: &Type) -> i64 {
-        match ty {
+        match ty.unqual() {
             Type::Array(e, n) => self.type_size(e) * n,
             other => self.type_size(other).max(4),
         }
     }
 
     fn type_align(&self, ty: &Type) -> i64 {
-        match ty {
+        match ty.unqual() {
             Type::Void => 1,
-            Type::Char | Type::SChar => 1,
+            Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float | Type::Long | Type::ULong | Type::Ptr(_) => 4,
             Type::Double => 4, // i386 SysV: double align 4
@@ -207,6 +208,7 @@ impl Codegen {
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.align).unwrap_or(4),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).align,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).align,
+            Type::Const(_) => unreachable!(),
         }
     }
 

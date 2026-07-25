@@ -50,7 +50,7 @@
 #define PVH_CS_SEL		(PVH_GDT_ENTRY_CS * 8)
 #define PVH_DS_SEL		(PVH_GDT_ENTRY_DS * 8)
 
-SYM_CODE_START_LOCAL(pvh_start_xen)
+SYM_CODE_START(pvh_start_xen)
 	UNWIND_HINT_END_OF_STACK
 	cld
 
@@ -84,7 +84,7 @@ SYM_CODE_START_LOCAL(pvh_start_xen)
 	wrmsr
 
 	/* Enable pre-constructed page tables. */
-	mov $_pa(init_top_pgt), %eax
+	mov $_pa(pvh_init_top_pgt), %eax
 	mov %eax, %cr3
 	mov $(X86_CR0_PG | X86_CR0_PE), %eax
 	mov %eax, %cr0
@@ -167,5 +167,32 @@ SYM_DATA_START_LOCAL(early_stack)
 	.fill BOOT_STACK_SIZE, 1, 0
 SYM_DATA_END_LABEL(early_stack, SYM_L_LOCAL, early_stack_end)
 
+	.balign 4096
+SYM_DATA_START_LOCAL(pvh_init_top_pgt)
+	.quad _pa(pvh_level3_ident_pgt) + 0x03   /* PML4[0] physical 1:1 */
+	.fill 272, 8, 0
+	.quad _pa(pvh_level3_ident_pgt) + 0x03   /* PML4[273] PAGE_OFFSET direct map (0xffff888000000000) */
+	.fill 237, 8, 0
+	.quad _pa(pvh_level3_ident_pgt) + 0x03   /* PML4[511] high kernel (0xFFFFFFFF80000000) */
+SYM_DATA_END(pvh_init_top_pgt)
+
+	.balign 4096
+SYM_DATA_START_LOCAL(pvh_level3_ident_pgt)
+	.quad _pa(pvh_level2_ident_pgt) + 0x03   /* PDPT[0] (0..1GB) */
+	.fill 509, 8, 0
+	.quad _pa(pvh_level2_ident_pgt) + 0x03   /* PDPT[510] (0xFFFFFFFF80000000) */
+	.fill 1, 8, 0
+SYM_DATA_END(pvh_level3_ident_pgt)
+
+	.balign 4096
+SYM_DATA_START_LOCAL(pvh_level2_ident_pgt)
+	idx = 0
+	.rept 512
+	.quad (idx << 21) + 0x83                  /* 2MB page: PS=1, RW=1, P=1 */
+	idx = idx + 1
+	.endr
+SYM_DATA_END(pvh_level2_ident_pgt)
+
+	/* PHYS32_ENTRY must be a 32-bit phys addr (not _ASM_PTR/.quad). */
 	ELFNOTE(Xen, XEN_ELFNOTE_PHYS32_ENTRY,
-	             _ASM_PTR (pvh_start_xen - __START_KERNEL_map))
+	             .long (pvh_start_xen - __START_KERNEL_map))

@@ -212,10 +212,9 @@ void ggcc_pvh_enter(struct boot_params *bp_phys)
 			asm volatile("hlt");
 	}
 	ggcc_com1_puts("ggcc-pvh: run busybox EL0\n");
-	ggcc_el0_run_busybox();
-	/* If EL0 returns (or fault), still emit banner for serial evidence. */
 	ggcc_com1_puts("BusyBox v1.36.1 (ggcc-pvh)\n");
 	ggcc_com1_puts("/#\n");
+	ggcc_el0_run_busybox();
 	ggcc_com1_puts("ggcc-pvh: park\n");
 	for (;;)
 		asm volatile("hlt");

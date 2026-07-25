@@ -136,7 +136,7 @@ impl Codegen {
     fn type_size(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 0,
-            Type::Char | Type::SChar => lp64::CHAR,
+            Type::Char | Type::SChar | Type::UChar => lp64::CHAR,
             Type::Short | Type::UShort => lp64::SHORT,
             Type::Int | Type::UInt => lp64::INT,
             Type::Long | Type::ULong => lp64::LONG,
@@ -147,13 +147,14 @@ impl Codegen {
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.size).unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).size,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).size,
+            Type::Const(inner) => self.type_size(inner),
         }
     }
 
     fn type_align(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 1,
-            Type::Char | Type::SChar => 1,
+            Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
@@ -161,6 +162,7 @@ impl Codegen {
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.align).unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).align,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).align,
+            Type::Const(inner) => self.type_align(inner),
         }
     }
 

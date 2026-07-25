@@ -1321,10 +1321,26 @@ pub fn preprocess_with_options_arch(
          #endif\n\
          int getpagesize(void);\n\
          int getpid(void);\n\
-         /* zlib soft header (guarded): SQLite zipfileInflate/Deflate need z_stream
+         /* zlib soft header (guarded): SQLite zipfileInflate/Deflate need z_stream\n\
           * when angle <zlib.h> is skipped. Init2 macros expand to libz *_ forms. */\n\
          #ifndef ZLIB_H\n\
          #define ZLIB_H\n\
+         #define Z_OK 0\n\
+         #define Z_STREAM_END 1\n\
+         #define Z_NEED_DICT 2\n\
+         #define Z_ERRNO (-1)\n\
+         #define Z_STREAM_ERROR (-2)\n\
+         #define Z_DATA_ERROR (-3)\n\
+         #define Z_MEM_ERROR (-4)\n\
+         #define Z_BUF_ERROR (-5)\n\
+         #define Z_VERSION_ERROR (-6)\n\
+         #define Z_NO_FLUSH 0\n\
+         #define Z_PARTIAL_FLUSH 1\n\
+         #define Z_SYNC_FLUSH 2\n\
+         #define Z_FULL_FLUSH 3\n\
+         #define Z_FINISH 4\n\
+         #define Z_BLOCK 5\n\
+         #define Z_TREES 6\n\
          typedef unsigned char Byte;\n\
          typedef Byte Bytef;\n\
          typedef struct z_stream_s {\n\
@@ -1501,6 +1517,12 @@ pub fn preprocess_with_options_arch(
            sa_family_t sin6_family; unsigned short sin6_port; unsigned int sin6_flowinfo;\n\
            struct in6_addr sin6_addr; unsigned int sin6_scope_id;\n\
          }};\n\
+         /* glibc Linux: sun_path[108]; soft-skip of <sys/un.h> left sockaddr_un\n\
+          * incomplete → sizeof(sun_path)=4 → postmaster \"socket path too long\n\
+          * (maximum 3 bytes)\" and make check fail after green initdb. */\n\
+         struct sockaddr_un {{\n\
+           sa_family_t sun_family; char sun_path[108];\n\
+         }};\n\
          /* select(2) fd_set — needed when <sys/select.h> is soft-skipped\n\
           * (postgres ServerLoop / RADIUS auth). */\n\
          #ifndef FD_SETSIZE\n\
@@ -1542,6 +1564,7 @@ pub fn preprocess_with_options_arch(
         pthread_stubs = pthread_stubs,
     );
     let mut out = out_prefix;
+    let mut macro_stacks: HashMap<String, Vec<Option<MacroBody>>> = HashMap::new();
     if for_linux {
         // Kernel-only post-PP passes mutate expanded source without full string
         // awareness; running them on PostgreSQL/Redis/SQLite breaks string
@@ -1551,6 +1574,7 @@ pub fn preprocess_with_options_arch(
             include_dir,
             extra_includes,
             &mut macros,
+            &mut macro_stacks,
             &mut out,
             true,
             source_name,
@@ -1567,6 +1591,7 @@ pub fn preprocess_with_options_arch(
             include_dir,
             extra_includes,
             &mut macros,
+            &mut macro_stacks,
             &mut out,
             true,
             source_name,
@@ -2219,6 +2244,7 @@ fn preprocess_into(
     include_dir: Option<&std::path::Path>,
     extra_includes: &[&std::path::Path],
     macros: &mut HashMap<String, MacroBody>,
+    macro_stacks: &mut HashMap<String, Vec<Option<MacroBody>>>,
     out: &mut String,
     emit_body: bool,
     source_name: &str,
@@ -2293,6 +2319,7 @@ fn preprocess_into(
                                 include_dir,
                                 extra_includes,
                                 macros,
+                                macro_stacks,
                                 out,
                                 emit_body,
                                 source_name,
@@ -2338,6 +2365,7 @@ fn preprocess_into(
                                 include_dir,
                                 extra_includes,
                                 macros,
+                                macro_stacks,
                                 out,
                                 emit_body,
                                 source_name,
@@ -2361,6 +2389,7 @@ fn preprocess_into(
                             nested_dir.or(include_dir),
                             extra_includes,
                             macros,
+                            macro_stacks,
                             out,
                             emit_body,
                             &inc_name,
@@ -2446,6 +2475,37 @@ fn preprocess_into(
                 cond_stack
                     .pop()
                     .ok_or_else(|| "#endif without #if".to_string())?;
+                continue;
+            }
+            if dir.starts_with("pragma") {
+                if !is_active(&cond_stack) {
+                    continue;
+                }
+                let rest = dir["pragma".len()..].trim();
+                if let Some(arg) = rest.strip_prefix("push_macro").map(|s| s.trim()) {
+                    let macro_name = arg
+                        .trim_matches(|c| c == '(' || c == ')' || c == '"' || c == '\'' || c == ' ');
+                    let current_def = macros.get(macro_name).cloned();
+                    macro_stacks
+                        .entry(macro_name.to_string())
+                        .or_default()
+                        .push(current_def);
+                } else if let Some(arg) = rest.strip_prefix("pop_macro").map(|s| s.trim()) {
+                    let macro_name = arg
+                        .trim_matches(|c| c == '(' || c == ')' || c == '"' || c == '\'' || c == ' ');
+                    if let Some(stack) = macro_stacks.get_mut(macro_name) {
+                        if let Some(prev_def) = stack.pop() {
+                            match prev_def {
+                                Some(def) => {
+                                    macros.insert(macro_name.to_string(), def);
+                                }
+                                None => {
+                                    macros.remove(macro_name);
+                                }
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             if dir.starts_with("if") {
@@ -2846,6 +2906,18 @@ fn linux_angle_include_stub(path: &str) -> Option<&'static str> {
              extern int optind, opterr, optopt;\n\
              int getopt(int, char * const *, const char *);\n\
              int getopt_long(int, char * const *, const char *, const struct option *, int *);\n\
+             #endif\n",
+        ),
+        // glibc Linux LP64: sun_path is 108 bytes (UNIXSOCK_PATH_BUFLEN).
+        "sys/un.h" => Some(
+            "#ifndef _SYS_UN_H\n\
+             #define _SYS_UN_H 1\n\
+             #include <stddef.h>\n\
+             typedef unsigned short sa_family_t;\n\
+             struct sockaddr_un {\n\
+               sa_family_t sun_family;\n\
+               char sun_path[108];\n\
+             };\n\
              #endif\n",
         ),
         _ => None,

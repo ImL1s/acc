@@ -446,6 +446,8 @@ static unsigned long ggcc_build_user_cr3(void)
 
 	pml4[0] = pdpt_phys | 0x007UL; /* present|rw|user */
 	pdpt[0] = pd_phys | 0x007UL;
+	for (i = 0; i < 512; i++)
+		pd[i] = (i << 21) | GGCC_PTE_USER | GGCC_PDE_PS;
 	/* VA 0x400000..0x9fffff → USER_PHYS (3×2MB) */
 	for (i = 0; i < 3; i++) {
 		unsigned long va_idx = 2UL + i;

@@ -376,7 +376,55 @@ impl<'a> Lexer<'a> {
                             }
                             out.push(val as char);
                         }
+                        b'u' | b'U' => {
+                            let max_digits = if e == b'u' { 4 } else { 8 };
+                            let mut val = 0u32;
+                            let mut digits = 0;
+                            while digits < max_digits {
+                                match self.peek() {
+                                    Some(d) if d.is_ascii_hexdigit() => {
+                                        self.bump();
+                                        val = val.wrapping_mul(16).wrapping_add(match d {
+                                            b'0'..=b'9' => (d - b'0') as u32,
+                                            b'a'..=b'f' => (d - b'a' + 10) as u32,
+                                            b'A'..=b'F' => (d - b'A' + 10) as u32,
+                                            _ => 0,
+                                        });
+                                        digits += 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            if let Some(ch) = std::char::from_u32(val) {
+                                out.push(ch);
+                            } else {
+                                out.push(val as u8 as char);
+                            }
+                        }
                         other => out.push(other as char),
+                    }
+                } else if c >= 0x80 {
+                    let start_idx = self.i - 1;
+                    let extra = if (c & 0xE0) == 0xC0 {
+                        1
+                    } else if (c & 0xF0) == 0xE0 {
+                        2
+                    } else if (c & 0xF8) == 0xF0 {
+                        3
+                    } else {
+                        0
+                    };
+                    for _ in 0..extra {
+                        if matches!(self.peek(), Some(b) if (b & 0xC0) == 0x80) {
+                            self.bump();
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Ok(s) = std::str::from_utf8(&self.src[start_idx..self.i]) {
+                        out.push_str(s);
+                    } else {
+                        out.push(c as char);
                     }
                 } else {
                     out.push(c as char);
@@ -464,7 +512,52 @@ impl<'a> Lexer<'a> {
                     }
                     val
                 }
+                b'u' | b'U' => {
+                    let max_digits = if e == b'u' { 4 } else { 8 };
+                    let mut val = 0i64;
+                    let mut digits = 0;
+                    while digits < max_digits {
+                        match self.peek() {
+                            Some(d) if d.is_ascii_hexdigit() => {
+                                self.bump();
+                                val = val * 16
+                                    + match d {
+                                        b'0'..=b'9' => (d - b'0') as i64,
+                                        b'a'..=b'f' => (d - b'a' + 10) as i64,
+                                        b'A'..=b'F' => (d - b'A' + 10) as i64,
+                                        _ => 0,
+                                    };
+                                digits += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                    val
+                }
                 other => other as i64,
+            }
+        } else if c >= 0x80 {
+            let start_idx = self.i - 1;
+            let extra = if (c & 0xE0) == 0xC0 {
+                1
+            } else if (c & 0xF0) == 0xE0 {
+                2
+            } else if (c & 0xF8) == 0xF0 {
+                3
+            } else {
+                0
+            };
+            for _ in 0..extra {
+                if matches!(self.peek(), Some(b) if (b & 0xC0) == 0x80) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            if let Ok(s) = std::str::from_utf8(&self.src[start_idx..self.i]) {
+                s.chars().next().map(|ch| ch as i64).unwrap_or(c as i64)
+            } else {
+                c as i64
             }
         } else {
             c as i64
@@ -507,7 +600,6 @@ impl<'a> Lexer<'a> {
             let Some(c) = self.peek() else {
                 return Ok(self.make(TokenKind::Eof, line, col));
             };
-            // wide char/string: L'x' / L"..." (before general ident path)
             if c == b'L'
                 && (self.peek2() == Some(b'\'') || self.peek2() == Some(b'"'))
             {

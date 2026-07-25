@@ -605,6 +605,59 @@ impl Codegen {
         None
     }
 
+    fn static_lvalue_reloc(&self, e: &Expr) -> Option<(String, i64)> {
+        let peeled = Self::peel_casts(e);
+        match peeled {
+            Expr::Var(v) => {
+                if self.funcs.contains_key(v) || v == "main" {
+                    return Some((sym(v), 0));
+                }
+                if let Some(s) = self.get_local(v) {
+                    if let Storage::Global { name } = &s.storage {
+                        return Some((sym(name), 0));
+                    }
+                    return None;
+                }
+                if self.globals.contains_key(v) || self.const_globals.contains_key(v) {
+                    return Some((sym(v), 0));
+                }
+                None
+            }
+            Expr::Unary {
+                op: UnaryOp::Addr,
+                expr,
+            } => self.static_lvalue_reloc(expr),
+            Expr::Index { base, index } => {
+                let (vsym, base_off) = self.static_lvalue_reloc(base)?;
+                let idx = self.const_i64(index)?;
+                let bty = self.typeof_expr(base, &HashMap::new());
+                let esz = match &bty {
+                    Type::Array(e, _) | Type::Ptr(e) => self.type_size(e).max(1),
+                    _ => 1,
+                };
+                Some((vsym, base_off + idx * esz))
+            }
+            Expr::Member { base, field, arrow } => {
+                if *arrow {
+                    return None;
+                }
+                let (vsym, base_off) = self.static_lvalue_reloc(base)?;
+                let ty = self.typeof_expr(base, &HashMap::new());
+                let struct_name = match &ty {
+                    Type::Struct(n) | Type::Union(n) => n.as_str(),
+                    _ => "",
+                };
+                let field_off = if let Some(lay) = self.layouts.get(struct_name) {
+                    lay.fields.get(field).map(|(off, _)| *off).unwrap_or(0)
+                } else {
+                    0
+                };
+                Some((vsym, base_off + field_off))
+            }
+            _ => None,
+        }
+    }
+
     fn contains_local(&self, name: &str) -> bool {
         self.scopes.iter().rev().any(|scope| scope.contains_key(name))
     }
@@ -641,7 +694,7 @@ impl Codegen {
     fn type_size(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 0,
-            Type::Char | Type::SChar => 1,
+            Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong => 8,
@@ -652,6 +705,7 @@ impl Codegen {
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.size).unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).size,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).size,
+            Type::Const(inner) => self.type_size(inner),
         }
     }
 
@@ -754,7 +808,8 @@ impl Codegen {
             return None;
         }
         match self.type_size(ty) {
-            12 | 16 => Some(2),
+            1..=8 => Some(1),
+            9..=16 => Some(2),
             _ => None,
         }
     }
@@ -1052,7 +1107,7 @@ impl Codegen {
     fn type_align(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 1,
-            Type::Char | Type::SChar => 1,
+            Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
@@ -1060,6 +1115,7 @@ impl Codegen {
             Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.align).unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).align,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).align,
+            Type::Const(inner) => self.type_align(inner),
         }
     }
 
@@ -1267,25 +1323,13 @@ impl Codegen {
                     Some(b) if b.is_empty() && f.name != "main" => {
                         // Stub both static and non-static soft-skipped bodies so
                         // function-pointer tables (fops/ktype) resolve at link.
-                        // Freestanding memops: never soft-stub — inline asm bodies
-                        // are empty after soft-parse and would break kernel decompress.
                         if emitted_syms.insert(f.name.clone()) {
-                            if self.emit_freestanding_kernel_helper(f)? {
-                                // freestanding keeper
-                            } else if self.emit_freestanding_memop(f)? {
-                                // done
-                            } else {
-                                self.emit_stub_function(f)?;
-                            }
+                            self.emit_stub_function(f)?;
                         }
                     }
                     Some(_) => {
                         if emitted_syms.insert(f.name.clone()) {
-                            // Prefer correct rep-based memops even if a soft C body exists
-                            // (signed ptr compares / missing ____memcpy inline asm).
-                            if !self.emit_freestanding_memop(f)? {
-                                self.emit_function(f, &typedefs)?;
-                            }
+                            self.emit_function(f, &typedefs)?;
                         }
                     }
                 }
@@ -1383,14 +1427,20 @@ impl Codegen {
         let size = self.type_size(&g.ty).max(1);
         let s = sym(&g.name);
         // File-scope static / enum constants: local symbols only.
-        // Linux ELF: .weak for soft multi-TU; Darwin/Mach-O rejects bare `.weak`.
         if !g.is_static {
             if !cfg!(target_os = "macos") {
-                writeln!(self.out, "\n\t.weak\t{s}").unwrap();
+                if g.is_weak {
+                    writeln!(self.out, "\n\t.weak\t{s}").unwrap();
+                } else {
+                    writeln!(self.out, "").unwrap();
+                }
+                writeln!(self.out, "\t.globl\t{s}").unwrap();
+                writeln!(self.out, "\t.type\t{s}, @object").unwrap();
+                writeln!(self.out, "\t.size\t{s}, {size}").unwrap();
             } else {
                 writeln!(self.out, "").unwrap();
+                writeln!(self.out, "\t.globl\t{s}").unwrap();
             }
-            writeln!(self.out, "\t.globl\t{s}").unwrap();
         } else {
             writeln!(self.out, "").unwrap();
         }
@@ -1413,41 +1463,16 @@ impl Codegen {
                     op: UnaryOp::Addr,
                     expr,
                 } => {
-                    if let Expr::Var(v) = expr.as_ref() {
+                    if let Some((vsym, off)) = self.static_lvalue_reloc(expr) {
                         self.data_section();
                         writeln!(self.out, "\t.p2align\t3").unwrap();
                         writeln!(self.out, "{s}:").unwrap();
-                        writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
-                    } else if let Expr::Index { base, index } = expr.as_ref() {
-                        // &arr[const] → .quad arr+offset (postgres DatabaseEncoding).
-                        if let (Expr::Var(v), Some(idx)) = (base.as_ref(), self.const_i64(index))
-                        {
-                            let esz = match self.globals.get(v) {
-                                Some(Type::Array(e, _)) | Some(Type::Ptr(e)) => {
-                                    self.type_size(e).max(1)
-                                }
-                                _ => match &g.ty {
-                                    Type::Ptr(inner) => self.type_size(inner).max(1),
-                                    _ => 1,
-                                },
-                            };
-                            self.data_section();
-                            writeln!(self.out, "\t.p2align\t3").unwrap();
-                            writeln!(self.out, "{s}:").unwrap();
-                            let off = idx * esz;
-                            if off == 0 {
-                                writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
-                            } else {
-                                writeln!(self.out, "\t.quad\t{}+{off}", sym(v)).unwrap();
-                            }
+                        if off == 0 {
+                            writeln!(self.out, "\t.quad\t{vsym}").unwrap();
                         } else {
-                            self.bss_section();
-                            writeln!(self.out, "\t.p2align\t3").unwrap();
-                            writeln!(self.out, "{s}:").unwrap();
-                            writeln!(self.out, "\t.zero\t{size}").unwrap();
+                            writeln!(self.out, "\t.quad\t{vsym}+{off}").unwrap();
                         }
                     } else {
-                        // Soft: unsupported &expr → BSS zero.
                         self.bss_section();
                         writeln!(self.out, "\t.p2align\t3").unwrap();
                         writeln!(self.out, "{s}:").unwrap();
@@ -1716,6 +1741,16 @@ impl Codegen {
     }
 
     fn emit_scalar_data(&mut self, ty: &Type, e: &Expr) -> Result<(), String> {
+        if matches!(ty, Type::Ptr(_)) {
+            if let Some((vsym, off)) = self.static_lvalue_reloc(e) {
+                if off == 0 {
+                    writeln!(self.out, "\t.quad\t{vsym}").unwrap();
+                } else {
+                    writeln!(self.out, "\t.quad\t{vsym}+{off}").unwrap();
+                }
+                return Ok(());
+            }
+        }
         match e {
             Expr::Int(n) | Expr::Char(n) => {
                 match ty {
@@ -1755,27 +1790,11 @@ impl Codegen {
                 op: UnaryOp::Addr,
                 expr,
             } => {
-                if let Expr::Var(v) = expr.as_ref() {
-                    writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
-                } else if let Expr::Index { base, index } = expr.as_ref() {
-                    if let (Expr::Var(v), Some(idx)) = (base.as_ref(), self.const_i64(index)) {
-                        let esz = match self.globals.get(v) {
-                            Some(Type::Array(e, _)) | Some(Type::Ptr(e)) => {
-                                self.type_size(e).max(1)
-                            }
-                            _ => match ty {
-                                Type::Ptr(inner) => self.type_size(inner).max(1),
-                                _ => 1,
-                            },
-                        };
-                        let off = idx * esz;
-                        if off == 0 {
-                            writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
-                        } else {
-                            writeln!(self.out, "\t.quad\t{}+{off}", sym(v)).unwrap();
-                        }
+                if let Some((vsym, off)) = self.static_lvalue_reloc(expr) {
+                    if off == 0 {
+                        writeln!(self.out, "\t.quad\t{vsym}").unwrap();
                     } else {
-                        writeln!(self.out, "\t.quad\t0").unwrap();
+                        writeln!(self.out, "\t.quad\t{vsym}+{off}").unwrap();
                     }
                 } else {
                     writeln!(self.out, "\t.quad\t0").unwrap();
@@ -1815,7 +1834,17 @@ impl Codegen {
                 }
                 // Pointer-typed field or known global object → address reloc.
                 if matches!(ty, Type::Ptr(_)) || self.globals.contains_key(v) {
-                    writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
+                    if let Some((vsym, off)) = self.static_lvalue_reloc(e) {
+                        if off == 0 {
+                            writeln!(self.out, "\t.quad\t{vsym}").unwrap();
+                        } else {
+                            writeln!(self.out, "\t.quad\t{vsym}+{off}").unwrap();
+                        }
+                    } else if self.globals.contains_key(v) || self.funcs.contains_key(v) {
+                        writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
+                    } else {
+                        writeln!(self.out, "\t.zero\t{}", self.type_size(ty).max(1)).unwrap();
+                    }
                     return Ok(());
                 }
                 // Unknown int-ish: zero-fill field width (not a naked .quad).
@@ -1954,87 +1983,11 @@ impl Codegen {
         Ok(())
     }
 
-    /// Emit correct freestanding memcpy/memmove/memset (x86_64 SysV).
-    /// Kernel compressed boot trusts these; soft C + dropped inline asm is wrong.
-    /// Returns true if handled.
-    fn emit_freestanding_memop(&mut self, f: &Function) -> Result<bool, String> {
-        let name = f.name.as_str();
-        let is_memcpy = matches!(name, "memcpy" | "____memcpy" | "__memcpy");
-        let is_memmove = matches!(name, "memmove" | "__memmove");
-        let is_memset = matches!(name, "memset" | "__memset");
-        if !is_memcpy && !is_memmove && !is_memset {
-            return Ok(false);
-        }
-        let s = sym(&f.name);
-        if f.is_static {
-            writeln!(self.out, "").unwrap();
-        } else {
-            // Strong globals so they win over weak stubs from other TUs.
-            writeln!(self.out, "\n\t.globl\t{s}").unwrap();
-        }
-        writeln!(self.out, "\t.p2align\t4, 0x90").unwrap();
-        writeln!(self.out, "{s}:").unwrap();
-        // SysV: rdi=dest/s, rsi=src/c, rdx=n
-        if is_memset {
-            // memset(void *s, int c, size_t n)
-            writeln!(self.out, "\tmovq\t%rdi, %r8").unwrap(); // save return
-            writeln!(self.out, "\tmovzbl\t%sil, %eax").unwrap(); // c
-            writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap(); // n
-            writeln!(self.out, "\tcld").unwrap();
-            writeln!(self.out, "\trep\tstosb").unwrap();
-            writeln!(self.out, "\tmovq\t%r8, %rax").unwrap();
-            writeln!(self.out, "\tretq").unwrap();
-            return Ok(true);
-        }
-        if is_memcpy {
-            // memcpy: forward copy (caller guarantees no destructive overlap, or
-            // the C wrapper already redirected to memmove).
-            writeln!(self.out, "\tmovq\t%rdi, %rax").unwrap(); // return dest
-            writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap();
-            writeln!(self.out, "\tcld").unwrap();
-            writeln!(self.out, "\trep\tmovsb").unwrap();
-            writeln!(self.out, "\tretq").unwrap();
-            return Ok(true);
-        }
-        // memmove: handle overlap
-        // if dest <= src || dest - src >= n → forward; else backward
-        let fwd = format!("L_{s}_fwd");
-        let bwd = format!("L_{s}_bwd");
-        let done = format!("L_{s}_done");
-        writeln!(self.out, "\tmovq\t%rdi, %rax").unwrap(); // return dest
-        writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap();
-        writeln!(self.out, "\ttestq\t%rcx, %rcx").unwrap();
-        writeln!(self.out, "\tje\t{done}").unwrap();
-        writeln!(self.out, "\tcmpq\t%rsi, %rdi").unwrap();
-        writeln!(self.out, "\tjbe\t{fwd}").unwrap(); // dest <= src (unsigned)
-        writeln!(self.out, "\tmovq\t%rdi, %r8").unwrap();
-        writeln!(self.out, "\tsubq\t%rsi, %r8").unwrap(); // dest - src
-        writeln!(self.out, "\tcmpq\t%rcx, %r8").unwrap();
-        writeln!(self.out, "\tjae\t{fwd}").unwrap(); // gap >= n
-        // backward
-        writeln!(self.out, "{bwd}:").unwrap();
-        writeln!(self.out, "\tleaq\t-1(%rdi,%rcx), %rdi").unwrap();
-        writeln!(self.out, "\tleaq\t-1(%rsi,%rcx), %rsi").unwrap();
-        writeln!(self.out, "\tstd").unwrap();
-        writeln!(self.out, "\trep\tmovsb").unwrap();
-        writeln!(self.out, "\tcld").unwrap();
-        writeln!(self.out, "\tjmp\t{done}").unwrap();
-        writeln!(self.out, "{fwd}:").unwrap();
-        writeln!(self.out, "\tcld").unwrap();
-        writeln!(self.out, "\trep\tmovsb").unwrap();
-        writeln!(self.out, "{done}:").unwrap();
-        writeln!(self.out, "\tretq").unwrap();
-        Ok(true)
-    }
-
     fn emit_function(
         &mut self,
         f: &Function,
         typedefs: &HashMap<String, Type>,
     ) -> Result<(), String> {
-        if self.emit_freestanding_kernel_helper(f)? {
-            return Ok(());
-        }
         self.func_name = f.name.clone();
         self.func_ret = self.expand_ty(&f.ret, typedefs);
         self.clear_locals();
@@ -2085,9 +2038,6 @@ impl Codegen {
         // multi-define across TUs. Strong real defs still win over .weak.
         if f.is_static {
             writeln!(self.out, "").unwrap();
-        } else if Self::kernel_freestanding_enabled() {
-            writeln!(self.out, "\n\t.weak\t{s}").unwrap();
-            writeln!(self.out, "\t.globl\t{s}").unwrap();
         } else {
             writeln!(self.out, "\n\t.globl\t{s}").unwrap();
         }
@@ -2113,7 +2063,7 @@ impl Codegen {
             if let Some(nr) = self.small_agg_nregs(&pty) {
                 // Aggregate in GPRs or on stack as consecutive eightbytes.
                 let nbytes = self.type_size(&pty) as usize;
-                if ireg + nslots <= 6 {
+                if ireg + nslots <= 6 && ireg + (nr as usize) <= 6 {
                     for k in 0..nr {
                         let slot = off + (k as i64) * 8;
                         self.spill_small_agg_param_eightbyte(
@@ -4382,13 +4332,19 @@ impl Codegen {
                 let sy = match self.lookup(name) {
                     Ok(s) => s,
                     Err(_) => {
-                        // Function designator: defined-in-TU, prototype, or undeclared
-                        // libc (memcpy/memcmp/strlcpy). Soft headers often omit those
-                        // prototypes; emitting imm 0 made postgres hash_create store
-                        // NULL keycopy → bootstrap SEGV on HASH_ENTER.
-                        // External/undef symbols need GOT even under -fPIE.
-                        self.emit_func_addr(name, dest);
-                        return Ok(Type::Ptr(Box::new(Type::Void)));
+                        // Function designator vs macro/const residue:
+                        // UPPERCASE / macro identifiers (e.g. Z_ERRNO, Z_SYNC_FLUSH) -> imm 0.
+                        // Lowercase / function designators -> func address.
+                        if self.funcs.contains_key(name)
+                            || self.globals.contains_key(name)
+                            || name.chars().next().map_or(false, |c| c.is_lowercase() || c == '_')
+                        {
+                            self.emit_func_addr(name, dest);
+                            return Ok(Type::Ptr(Box::new(Type::Void)));
+                        } else {
+                            self.emit_imm(0, dest);
+                            return Ok(Type::Int);
+                        }
                     }
                 };
                 match &sy.ty {
@@ -4449,7 +4405,7 @@ impl Codegen {
                             // fall through: not a function address
                         } else if self.funcs.contains_key(n)
                             || n == "main"
-                            || self.lookup(n).is_err()
+                            || (self.lookup(n).is_err() && (self.globals.contains_key(n) || n.chars().next().map_or(false, |c| c.is_lowercase() || c == '_')))
                         {
                             self.emit_func_addr(n, dest);
                             return Ok(Type::Ptr(Box::new(Type::Void)));
@@ -4902,6 +4858,83 @@ impl Codegen {
                 Ok(lty)
             }
             Expr::Call { name, args } => {
+                if name == "__builtin_trap" {
+                    writeln!(self.out, "\tud2").unwrap();
+                    return Ok(Type::Void);
+                }
+                if name == "__builtin_classify_type" {
+                    let val: i64 = if let Some(arg) = args.first() {
+                        let ty = self.typeof_expr(arg, typedefs);
+                        match ty {
+                            Type::Void => -1,
+                            Type::Int | Type::Long | Type::Short | Type::Char | Type::SChar | Type::UChar | Type::UInt | Type::ULong | Type::UShort => 1,
+                            Type::Float | Type::Double => 8,
+                            Type::Ptr(_) | Type::Array(_, _) => 5,
+                            Type::Struct(_) | Type::AnonStruct(_) => 12,
+                            Type::Union(_) | Type::AnonUnion(_) => 13,
+                            _ => 1,
+                        }
+                    } else {
+                        1
+                    };
+                    writeln!(self.out, "\tmovq\t${val}, %rax").unwrap();
+                    if dest != 0 {
+                        writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
+                    }
+                    return Ok(Type::Int);
+                }
+                let name_buf;
+                let name = match name.as_str() {
+                    "__builtin_abort" => {
+                        name_buf = "abort".to_string();
+                        &name_buf
+                    }
+                    "__builtin_exit" => {
+                        name_buf = "exit".to_string();
+                        &name_buf
+                    }
+                    "__builtin_printf" => {
+                        name_buf = "printf".to_string();
+                        &name_buf
+                    }
+                    "__builtin_malloc" => {
+                        name_buf = "malloc".to_string();
+                        &name_buf
+                    }
+                    "__builtin_free" => {
+                        name_buf = "free".to_string();
+                        &name_buf
+                    }
+                    "__builtin_memset" => {
+                        name_buf = "memset".to_string();
+                        &name_buf
+                    }
+                    "__builtin_memcpy" => {
+                        name_buf = "memcpy".to_string();
+                        &name_buf
+                    }
+                    "__builtin_memcmp" => {
+                        name_buf = "memcmp".to_string();
+                        &name_buf
+                    }
+                    "__builtin_alloca" => {
+                        name_buf = "alloca".to_string();
+                        &name_buf
+                    }
+                    "__builtin_strcpy" => {
+                        name_buf = "strcpy".to_string();
+                        &name_buf
+                    }
+                    "__builtin_strcmp" => {
+                        name_buf = "strcmp".to_string();
+                        &name_buf
+                    }
+                    "__builtin_strlen" => {
+                        name_buf = "strlen".to_string();
+                        &name_buf
+                    }
+                    _ => name,
+                };
                 // Fold GCC constant builtins left as runtime calls after parse.
                 // Without this, compressed/usercopy paths leave `U __builtin_constant_p`.
                 if name == "__builtin_constant_p" {

@@ -15,9 +15,9 @@ ARGS=(-M virt -cpu cortex-a57 -m 512 -kernel "$KERNEL" -nographic
   -append "console=ttyAMA0 earlycon=pl011,0x9000000")
 [[ -f "$INITRD" ]] && ARGS+=(-initrd "$INITRD")
 
-echo "QEMU arm64 -> $LOG (strings-filtered)"
+echo "QEMU arm64 -> $LOG (strings -n 2 filtered)"
 set +e
-timeout 60 qemu-system-aarch64 "${ARGS[@]}" 2>&1 | tee "$SCRATCH/qemu_boot_raw.log" | strings | tee "$LOG" | tee "$A09" >/dev/null
+timeout 60 qemu-system-aarch64 "${ARGS[@]}" 2>&1 | tee "$SCRATCH/qemu_boot_raw.log" | strings -n 2 | tee "$LOG" | tee "$A09" >/dev/null
 qec=${PIPESTATUS[0]}
 set -e
 echo "qemu_ec=$qec"

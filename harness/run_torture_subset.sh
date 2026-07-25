@@ -23,6 +23,10 @@ WORKDIR="${GGCC_TORTURE_WORK:-$ROOT/target/torture_work}"
 TORTURE_DIR="${TORTURE_DIR:-$ROOT/third_party/gcc-torture}"
 IMAGE="${GGCC_DOCKER_IMAGE:-ggcc-linux}"
 PLATFORM="${GGCC_DOCKER_PLATFORM:-linux/amd64}"
+# Status-track default: x86_64/linux (ggcc defaults to -m aarch64 — wrong for Docker amd64).
+ARCH="${GGCC_ARCH:-${ACC_ARCH:-x86_64}}"
+TARGET_OS="${GGCC_TARGET_OS:-${ACC_TARGET_OS:-linux}}"
+GGCC_FLAGS=(-m "$ARCH" --target-os "$TARGET_OS")
 
 # Interim c-testsuite IDs when vendor tree missing.
 DEFAULT_IDS=(00001 00002 00005 00010 00020 00030 00040 00050 00060 00070 00080 00090 00100)
@@ -42,11 +46,23 @@ run_in_docker() {
     echo "docker image $IMAGE missing; building…" >&2
     docker build -t "$IMAGE" -f "$ROOT/harness/docker/Dockerfile.linux" "$ROOT/harness/docker"
   fi
+  # Map host TORTURE_LOG into the container work tree when under $ROOT.
+  local docker_log="${TORTURE_LOG:-}"
+  if [[ -n "$docker_log" && "$docker_log" == "$ROOT"/* ]]; then
+    docker_log="/work/${docker_log#"$ROOT"/}"
+  elif [[ -n "$docker_log" && "$docker_log" != /* ]]; then
+    docker_log="/work/$docker_log"
+  fi
   docker run --rm --platform "$PLATFORM" \
     -v "$ROOT:/work" -w /work \
     -e TORTURE_DIR="/work/third_party/gcc-torture" \
     -e TORTURE_LIMIT="${TORTURE_LIMIT:-100}" \
+    -e TORTURE_LOG="${docker_log}" \
     -e GGCC_BIN="/work/target-linux/release/ggcc" \
+    -e GGCC_ARCH="${ARCH}" \
+    -e GGCC_TARGET_OS="${TARGET_OS}" \
+    -e ACC_ARCH="${ARCH}" \
+    -e ACC_TARGET_OS="${TARGET_OS}" \
     -e GGCC_USE_DOCKER=0 \
     "$IMAGE" bash -lc '
 set -euo pipefail
@@ -77,7 +93,7 @@ torture_has_c() {
 
 if torture_has_c; then
   mode="gcc-torture-execute"
-  LOG="$SCRATCH/torture_gcc_subset.log"
+  LOG="${TORTURE_LOG:-$SCRATCH/torture_gcc_subset.log}"
   limit="${TORTURE_LIMIT:-100}"
   while IFS= read -r f; do
     [[ ${#ids[@]} -lt "$limit" ]] || break
@@ -85,6 +101,7 @@ if torture_has_c; then
   done < <(find -L "$TORTURE_DIR" -maxdepth 1 -type f -name '*.c' | sort)
 else
   ids=("${DEFAULT_IDS[@]}")
+  LOG="${TORTURE_LOG:-$SCRATCH/torture_subset.log}"
 fi
 
 : >"$LOG"
@@ -95,6 +112,8 @@ fi
   echo "bin=$BIN"
   echo "suite=$SUITE"
   echo "torture_dir=$TORTURE_DIR"
+  echo "arch=$ARCH target_os=$TARGET_OS"
+  echo "ggcc_flags=${GGCC_FLAGS[*]}"
   echo "host=$(uname -s)/$(uname -m)"
 } | tee -a "$LOG"
 
@@ -137,7 +156,7 @@ run_one_ctest() {
   rm -f "$out_bin"
   local compile_log
   set +e
-  compile_log="$(perl -e 'alarm shift; exec @ARGV' 15 "$BIN" -o "$out_bin" "$src" 2>&1)"
+  compile_log="$(perl -e 'alarm shift; exec @ARGV' 15 "$BIN" "${GGCC_FLAGS[@]}" -o "$out_bin" "$src" 2>&1)"
   local cstatus=$?
   set -e
   if [[ $cstatus -ne 0 || ! -f "$out_bin" ]]; then
@@ -174,7 +193,7 @@ run_one_file() {
   rm -f "$out_bin"
   set +e
   local compile_log
-  compile_log="$(perl -e 'alarm shift; exec @ARGV' 30 "$BIN" -o "$out_bin" "$src" 2>&1)"
+  compile_log="$(perl -e 'alarm shift; exec @ARGV' 30 "$BIN" "${GGCC_FLAGS[@]}" -o "$out_bin" "$src" 2>&1)"
   local cstatus=$?
   set -e
   if [[ $cstatus -ne 0 || ! -f "$out_bin" ]]; then
@@ -218,13 +237,16 @@ fi
 {
   echo "=== torture_subset summary $(stamp) ==="
   echo "mode=$mode"
+  echo "arch=$ARCH target_os=$TARGET_OS"
   echo "passed=$passed"
+  echo "pass=$passed"
   echo "fail=$failed"
   echo "failed=$failed"
   echo "skipped=$skipped"
   echo "total=$total"
   echo "attempted=$attempted"
   echo "rate=${rate}%"
+  echo "pass=${passed} fail=${failed} total=${total} rate=${rate}%"
   if [[ "$mode" == "gcc-torture-execute" ]]; then
     echo "vendor_path=$TORTURE_DIR"
     echo "bar=IN_PROGRESS_not_99pct"

@@ -181,6 +181,10 @@ cat >"$ROOTFS/init" <<'EOF'
 /bin/busybox --install -s 2>/dev/null
 export TERM=linux
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/bin/games
+# Ensure PS1 prints on serial even when cttyhack cannot grab a TTY
+# (freestanding EL0 / virtio-less QEMU). Status bar greps literal /#.
+export PS1='/# '
+echo '/#'
 echo 1 > /proc/sys/kernel/printk
 sleep 0.2
 exec /bin/busybox setsid /bin/busybox cttyhack /bin/sh

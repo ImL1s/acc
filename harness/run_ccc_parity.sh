@@ -4,6 +4,8 @@
 # and structured JSON / Markdown summaries under evidence/<ggcc-sha>/.
 set -euo pipefail
 
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -16,9 +18,9 @@ done
 
 if [[ "$CLEAN" -eq 1 ]]; then
   echo "== Phase 0 Reset: Cleaning build artifacts and scratch logs =="
-  cargo clean || rm -rf target
-  rm -rf target/oracle_work target/ctest_work scratch/stage_a_4isa_work
-  rm -f scratch/*.log scratch/*.txt
+  cargo clean || rm -rf target || true
+  rm -rf target/oracle_work target/ctest_work scratch/stage_a_4isa_work || true
+  rm -f scratch/*.log scratch/*.txt || true
 fi
 
 echo "== Building ggcc (release profile) =="
@@ -84,7 +86,9 @@ for gate_spec in "${GATES[@]}"; do
     OVERALL_PASS=0
   fi
 
-  # Compute log sha256 hash
+  # Compute log sha256 hash (flush stdio buffer first to avoid race)
+  sync 2>/dev/null || true
+  sleep 0.5
   LOG_HASH="$(python3 -c "import hashlib; print(hashlib.sha256(open('$LOG_FILE', 'rb').read()).hexdigest())")"
 
   # Determine architecture

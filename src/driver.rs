@@ -251,6 +251,15 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
         ));
     }
 
+    #[cfg(target_os = "macos")]
+    if opts.target_os == TargetOs::Darwin {
+        let _ = Command::new("codesign")
+            .arg("-s")
+            .arg("-")
+            .arg(&opts.output)
+            .output();
+    }
+
     if !opts.keep_asm {
         let _ = fs::remove_file(&asm_path);
     }

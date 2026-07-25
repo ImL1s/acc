@@ -15,7 +15,7 @@ pub enum Item {
     UnionDef { name: String, fields: Vec<Field> },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
     pub ty: Type,
@@ -57,13 +57,15 @@ pub struct VarDecl {
     pub section: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Void,
     /// Plain / unsigned char (zero-extended on load).
     Char,
     /// `signed char` (sign-extended on load). Required for lemon `yyRuleInfoNRhs[]`.
     SChar,
+    /// `unsigned char` (zero-extended on load).
+    UChar,
     Short,
     /// `unsigned short` (zero-extended on load).
     UShort,
@@ -82,6 +84,21 @@ pub enum Type {
     Union(String),
     AnonStruct(Vec<Field>),
     AnonUnion(Vec<Field>),
+    Const(Box<Type>),
+}
+
+impl Type {
+    pub fn is_const(&self) -> bool {
+        matches!(self, Type::Const(_))
+    }
+
+    pub fn unqual(&self) -> &Type {
+        let mut t = self;
+        while let Type::Const(inner) = t {
+            t = inner;
+        }
+        t
+    }
 }
 
 #[derive(Debug, Clone)]

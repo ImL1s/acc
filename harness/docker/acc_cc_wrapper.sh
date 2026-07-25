@@ -35,6 +35,9 @@ fi
 # userspace Redis/SQLite keep real bodies. Kernel build_kernel.sh sets =1.
 if [[ "${ACC_KERNEL_FREESTANDING:-0}" == "1" ]]; then
   export ACC_KERNEL_FREESTANDING=1
+  # Kernel mcmodel forbids GOT; soft must use RIP-relative (D-pg237). Never enable GOT here.
+  unset ACC_USE_GOT || true
+  export ACC_USE_GOT=0
 else
   export ACC_KERNEL_FREESTANDING=0
 fi
@@ -508,7 +511,8 @@ if [[ "$(basename "$src")" == "acc_pvh_enlighten.c" || "$(basename "$src")" == "
   while [[ $i -lt ${#args_all[@]} ]]; do
     flg="${args_all[$i]}"
     case "$flg" in
-      -m64|-mcmodel=*|-mno-red-zone|-mskip-rax-setup)
+      # Drop only ABI-hostile flags; KEEP -m64/-mcmodel=kernel (R_X86_64_32 otherwise).
+      -mno-red-zone|-mskip-rax-setup|-fcf-protection*|-ftrivial-auto-var-init=*)
         i=$((i + 1)); continue ;;
       -include)
         next="${args_all[$((i + 1))]:-}"
@@ -523,6 +527,8 @@ if [[ "$(basename "$src")" == "acc_pvh_enlighten.c" || "$(basename "$src")" == "
     pvh_flags+=("$flg")
     i=$((i + 1))
   done
+  # Force kernel code model even if filtered/missing from passthrough.
+  pvh_flags+=(-m64 -mcmodel=kernel -fno-PIE)
   if [[ -n "${DEP_MF:-}" ]]; then
     pvh_flags+=(-MMD -MF "$DEP_MF")
   fi
@@ -788,6 +794,18 @@ case "$mode" in
         sys_flags+=("$flg")
       fi
     done
+    # Soft AArch64 sometimes emits load-acquire/store-release without [] —
+    # e.g. `stlr wt,xn`, `ldxrh wt,xn`, `stlxrh ws,wt,xn`. Normalize.
+    if [[ "${ACC_M:-${ACC_ARCH:-}}" == "aarch64" || "${ACC_M:-}" == "arm64" ]] \
+      || grep -qE 'aarch64' "$asm_out" 2>/dev/null; then
+      if grep -qE '[[:space:]](stlr|ldar|stlrb|ldarb|stlrh|ldarh|ldxr|ldaxr|stxr|stlxr|ldxrh|ldaxrh|stxrh|stlxrh)[[:space:]]+(w[0-9]+|x[0-9]+),' "$asm_out" 2>/dev/null; then
+        sed -E \
+          -e 's/\b(stlxrh|stxrh|stlxr|stxr)[[:space:]]+(w[0-9]+|x[0-9]+),[[:space:]]*(w[0-9]+|x[0-9]+),[[:space:]]*(w[0-9]+|x[0-9]+)\b/\1 \2,\3,[\4]/g' \
+          -e 's/\b(stlr|ldar|stlrb|ldarb|stlrh|ldarh|ldxr|ldaxr|ldxrh|ldaxrh)[[:space:]]+(w[0-9]+|x[0-9]+),[[:space:]]*(w[0-9]+|x[0-9]+)\b/\1 \2,[\3]/g' \
+          "$asm_out" >"$asm_out.fix"
+        mv "$asm_out.fix" "$asm_out"
+      fi
+    fi
     if [[ -n "$out" ]]; then
       "$SYSCC" -c -o "$out" "${sys_flags[@]}" "$asm_out"
     else
@@ -799,6 +817,15 @@ case "$mode" in
   link)
     # compile C → asm → obj, then link: objects/archives first, libs last
     # (same order as multi-.c: objs, other_inputs, passthru_sys, -lm -ldl -lpthread)
+    if [[ "${ACC_M:-${ACC_ARCH:-}}" == "aarch64" || "${ACC_M:-}" == "arm64" ]]; then
+      if grep -qE '[[:space:]](stlr|ldar|stlrb|ldarb|stlrh|ldarh|ldxr|ldaxr|stxr|stlxr|ldxrh|ldaxrh|stxrh|stlxrh)[[:space:]]+(w[0-9]+|x[0-9]+),' "$asm_out" 2>/dev/null; then
+        sed -E \
+          -e 's/\b(stlxrh|stxrh|stlxr|stxr)[[:space:]]+(w[0-9]+|x[0-9]+),[[:space:]]*(w[0-9]+|x[0-9]+),[[:space:]]*(w[0-9]+|x[0-9]+)\b/\1 \2,\3,[\4]/g' \
+          -e 's/\b(stlr|ldar|stlrb|ldarb|stlrh|ldarh|ldxr|ldaxr|ldxrh|ldaxrh)[[:space:]]+(w[0-9]+|x[0-9]+),[[:space:]]*(w[0-9]+|x[0-9]+)\b/\1 \2,[\3]/g' \
+          "$asm_out" >"$asm_out.fix"
+        mv "$asm_out.fix" "$asm_out"
+      fi
+    fi
     "$SYSCC" -c -o "$obj_out" "$asm_out"
     if [[ -n "$out" ]]; then
       "$SYSCC" -o "$out" "$obj_out" "${s_sources[@]}" "${other_inputs[@]}" "${passthru_sys[@]}" -lm -ldl -lpthread

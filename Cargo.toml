@@ -9,6 +9,10 @@ license = "MIT"
 name = "acc"
 path = "src/main.rs"
 
+[lib]
+name = "acc"
+path = "src/lib.rs"
+
 [features]
 default = []
 # Optional in-tree assembler scaffold (M1). Default build still uses system `cc`
@@ -19,4 +23,6 @@ builtin_assembler = []
 builtin_linker = ["builtin_assembler"]
 
 [profile.release]
+opt-level = 1
 lto = false
+codegen-units = 16

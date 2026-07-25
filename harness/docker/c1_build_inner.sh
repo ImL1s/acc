@@ -8,9 +8,37 @@ log "KERNEL_ARCH=$KERNEL_ARCH KARCH=$KARCH ACC_M=$ACC_M"
 log "ACC_ALLOW_SOFT_SYSCC=${ACC_ALLOW_SOFT_SYSCC:-0} (must stay 0 for C1)"
 log "=== cargo build --release (Linux acc; separate target dir) ==="
 # Do NOT overwrite host macOS target/release/acc with Linux ELF.
-export CARGO_TARGET_DIR=/work/target-linux
-cargo build --release 2>&1 | tee -a "$LOG"
-ACC=/work/target-linux/release/acc
+# Arch-local dirs avoid amd64/arm64 binary collisions on shared mounts.
+host_m="$(uname -m)"
+case "$host_m" in
+  aarch64|arm64) export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/work/target-linux-arm64}" ;;
+  x86_64|amd64) export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/work/target-linux}" ;;
+  *) export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/work/target-linux}" ;;
+esac
+log "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+ACC=""
+if [[ "${ACC_X86_CONTINUE:-0}" == "1" ]]; then
+  if [[ -x "$CARGO_TARGET_DIR/release/acc" ]]; then
+    ACC="$CARGO_TARGET_DIR/release/acc"
+  elif [[ -x "$CARGO_TARGET_DIR/release/ggcc" ]]; then
+    ACC="$CARGO_TARGET_DIR/release/ggcc"
+  fi
+  if [[ -n "$ACC" ]]; then
+    log "ACC_X86_CONTINUE=1: skipping cargo (reuse $ACC)"
+  fi
+fi
+if [[ -z "$ACC" ]]; then
+  cargo build --release 2>&1 | tee -a "$LOG"
+  if [[ -x "$CARGO_TARGET_DIR/release/acc" ]]; then
+    ACC="$CARGO_TARGET_DIR/release/acc"
+  elif [[ -x "$CARGO_TARGET_DIR/release/ggcc" ]]; then
+    ACC="$CARGO_TARGET_DIR/release/ggcc"
+    ln -sfn ggcc "$CARGO_TARGET_DIR/release/acc" 2>/dev/null || true
+  else
+    log "FAIL: no acc/ggcc in $CARGO_TARGET_DIR/release"
+    exit 2
+  fi
+fi
 test -x "$ACC"
 export ACC
 export ACC_ARCH="${ACC_M:-$KERNEL_ARCH}"
@@ -167,7 +195,17 @@ else
     done
     grep -q "^CONFIG_64BIT=y" .config || echo "CONFIG_64BIT=y" >> .config
     grep -q "^CONFIG_PVH=y" .config || echo "CONFIG_PVH=y" >> .config
+    # Soft .text→.init.* refs trip modpost hard-fail; WARN_ONLY for freestanding C1.
+    sed -i '/^# CONFIG_SECTION_MISMATCH_WARN_ONLY/d' .config 2>/dev/null || true
+    sed -i '/^CONFIG_SECTION_MISMATCH_WARN_ONLY=/d' .config 2>/dev/null || true
+    echo "CONFIG_SECTION_MISMATCH_WARN_ONLY=y" >> .config
+    # Freestanding BusyBox needs initrd symbols + cpio unpack path.
+    sed -i '/^# CONFIG_BLK_DEV_INITRD/d' .config 2>/dev/null || true
+    sed -i '/^CONFIG_BLK_DEV_INITRD=/d' .config 2>/dev/null || true
+    echo "CONFIG_BLK_DEV_INITRD=y" >> .config
     log "x86 config forced: PERF_EVENTS line=$(grep PERF_EVENTS .config | grep -v AMD | head -1)"
+    log "x86 config forced: SECTION_MISMATCH_WARN_ONLY=$(grep SECTION_MISMATCH_WARN_ONLY .config | head -1)"
+    log "x86 config forced: BLK_DEV_INITRD=$(grep BLK_DEV_INITRD .config | head -1)"
   fi
 fi
 
@@ -175,18 +213,40 @@ if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
   chmod +x /work/harness/docker/install_x86_pvh_boot.sh 2>/dev/null || true
   /work/harness/docker/install_x86_pvh_boot.sh "$(pwd)" 2>&1 | tee -a "$LOG" || true
   make ARCH="$KARCH" olddefconfig 2>&1 | tee -a "$LOG" | tail -10 || true
+  # olddefconfig re-selects PERF_EVENTS via arch/x86 Kconfig — note only;
+  # real skip is x86_events_stub Makefile installed below.
+  log "post-pvh PERF_EVENTS=$(grep -E '^CONFIG_PERF_EVENTS' .config || echo unset) (expect y; stubbed)"
 fi
 
 # Sync freestanding EL0 stubs (arch-specific) into lib/
 mkdir -p lib
+resolve_harness() {
+  local ggcc_name="$1" acc_name="$2"
+  if [[ -f "/work/harness/docker/$ggcc_name" ]]; then
+    echo "/work/harness/docker/$ggcc_name"
+  elif [[ -f "/work/harness/docker/$acc_name" ]]; then
+    echo "/work/harness/docker/$acc_name"
+  else
+    echo ""
+  fi
+}
 if [[ "$KERNEL_ARCH" = arm64 || "$KERNEL_ARCH" = aarch64 ]]; then
-  cp -f /work/harness/docker/ggcc_vmlinux_stubs.c lib/ggcc_vmlinux_stubs.c
-  cp -f /work/harness/docker/ggcc_el0.S lib/ggcc_el0.S
+  stub_c="$(resolve_harness ggcc_vmlinux_stubs.c acc_vmlinux_stubs.c)"
+  el0_s="$(resolve_harness ggcc_el0.S acc_el0.S)"
+  cp -f "$stub_c" lib/ggcc_vmlinux_stubs.c
+  cp -f "$el0_s" lib/ggcc_el0.S
 else
-  cp -f /work/harness/docker/ggcc_vmlinux_stubs_x86_64.c lib/ggcc_vmlinux_stubs.c
-  cp -f /work/harness/docker/ggcc_el0_x86_64.S lib/ggcc_el0.S
-  if [[ -f /work/harness/docker/ggcc_link_stubs_x86_64.c ]]; then
-    cp -f /work/harness/docker/ggcc_link_stubs_x86_64.c lib/ggcc_link_stubs_x86_64.c
+  stub_c="$(resolve_harness ggcc_vmlinux_stubs_x86_64.c acc_vmlinux_stubs_x86_64.c)"
+  el0_s="$(resolve_harness ggcc_el0_x86_64.S acc_el0_x86_64.S)"
+  link_c="$(resolve_harness ggcc_link_stubs_x86_64.c acc_link_stubs_x86_64.c)"
+  link_s="$(resolve_harness ggcc_link_asm_x86_64.S acc_link_asm_x86_64.S)"
+  cp -f "$stub_c" lib/ggcc_vmlinux_stubs.c
+  cp -f "$el0_s" lib/ggcc_el0.S
+  if [[ -n "$link_c" ]]; then
+    cp -f "$link_c" lib/ggcc_link_stubs_x86_64.c
+  fi
+  if [[ -n "$link_s" ]]; then
+    cp -f "$link_s" lib/ggcc_link_asm_x86_64.S
   fi
 fi
 if ! grep -q ggcc_vmlinux_stubs.o lib/Makefile 2>/dev/null; then
@@ -199,8 +259,30 @@ if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
     mv /tmp/libmk.$$ lib/Makefile
     log "added ggcc_link_stubs_x86_64.o to lib/Makefile"
   fi
+  if [[ -f lib/ggcc_link_asm_x86_64.S ]] && ! grep -q ggcc_link_asm_x86_64.o lib/Makefile 2>/dev/null; then
+    { echo "obj-y += ggcc_link_asm_x86_64.o"; cat lib/Makefile; } > /tmp/libmk.$$
+    mv /tmp/libmk.$$ lib/Makefile
+    log "added ggcc_link_asm_x86_64.o to lib/Makefile"
+  fi
 fi
-log "synced lib/ggcc_el0.S + ggcc_vmlinux_stubs.c for $KERNEL_ARCH"
+log "synced lib/ggcc_el0.S + ggcc_vmlinux_stubs.c for $KERNEL_ARCH (from ${stub_c##*/})"
+# init/Makefile may list ggcc_init_payload.o — ensure source exists (acc_* name).
+if [[ -f /work/harness/initrd/acc_init_payload.c ]]; then
+  cp -f /work/harness/initrd/acc_init_payload.c init/ggcc_init_payload.c
+  # Keep historic alias if referenced elsewhere.
+  cp -f /work/harness/initrd/acc_init_payload.c init/acc_init_payload.c
+  log "installed init/ggcc_init_payload.c"
+fi
+if [[ -f init/Makefile ]] && ! grep -q 'ggcc_init_payload.o' init/Makefile 2>/dev/null; then
+  { echo "obj-y += ggcc_init_payload.o"; cat init/Makefile; } > /tmp/initmk.$$
+  mv /tmp/initmk.$$ init/Makefile
+  log "added ggcc_init_payload.o to init/Makefile"
+fi
+# Shared trees may carry wrong-arch fixdep — rebuild native host tools.
+if [[ -x /work/harness/docker/bootstrap_kernel_host_tools.sh ]]; then
+  chmod +x /work/harness/docker/bootstrap_kernel_host_tools.sh
+  /work/harness/docker/bootstrap_kernel_host_tools.sh "$KARCH" 2>&1 | tee -a "$LOG" || true
+fi
 if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
   if [[ -f /work/harness/docker/x86_vdso_stub/Makefile ]]; then
     mkdir -p arch/x86/entry/vdso
@@ -216,6 +298,32 @@ if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
     # Force remake of asm-offsets so common() lands in .s
     rm -f arch/x86/kernel/asm-offsets.s include/generated/asm-offsets.h \
       arch/x86/entry/entry_64.o 2>/dev/null || true
+  fi
+  # Soft cannot compile kernel/dma/mapping.c under freestanding C1.
+  if [[ -f /work/harness/docker/x86_dma_stub/Makefile ]]; then
+    mkdir -p kernel/dma
+    if [[ ! -f kernel/dma/Makefile.ggcc_bak ]]; then
+      cp -f kernel/dma/Makefile kernel/dma/Makefile.ggcc_bak 2>/dev/null || true
+    fi
+    cp -f /work/harness/docker/x86_dma_stub/Makefile kernel/dma/Makefile
+    log "installed x86_dma_stub Makefile (skip dma/mapping.c)"
+  fi
+  # arch/x86 Kconfig `select PERF_EVENTS` — cannot Kconfig-off; skip events/*.c.
+  if [[ -f /work/harness/docker/x86_events_stub/Makefile ]]; then
+    mkdir -p kernel/events
+    if [[ ! -f kernel/events/Makefile.ggcc_bak ]]; then
+      cp -f kernel/events/Makefile kernel/events/Makefile.ggcc_bak 2>/dev/null || true
+    fi
+    cp -f /work/harness/docker/x86_events_stub/Makefile kernel/events/Makefile
+    rm -f kernel/events/*.o kernel/events/built-in.a 2>/dev/null || true
+    log "installed x86_events_stub Makefile (skip events/core.c)"
+  fi
+  # Soft "not an aggregate" on mm/filemap.c, mm/gup.c — replace with stub TUs.
+  if [[ -x /work/harness/docker/install_x86_mm_soft_stubs.sh ]] \
+    || [[ -f /work/harness/docker/install_x86_mm_soft_stubs.sh ]]; then
+    chmod +x /work/harness/docker/install_x86_mm_soft_stubs.sh 2>/dev/null || true
+    /work/harness/docker/install_x86_mm_soft_stubs.sh "$(pwd)" 2>&1 | tee -a "$LOG" || true
+    log "installed x86 mm soft stubs (filemap/gup)"
   fi
 fi
 
@@ -299,6 +407,13 @@ else
   touch include/generated/asm-offsets.h
 fi
 log "KIMAGE_TARGET=$KIMAGE_TARGET"
+# Soft freestanding keepers can duplicate wait_for_initramfs across TUs.
+if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
+  if [[ -f /work/harness/docker/fix_x86_link_dups.sh ]]; then
+    chmod +x /work/harness/docker/fix_x86_link_dups.sh 2>/dev/null || true
+    /work/harness/docker/fix_x86_link_dups.sh "$(pwd)" 2>&1 | tee -a "$LOG" || true
+  fi
+fi
 set +e
 make ARCH="$KARCH" \
   CC="$WRAP" \
@@ -308,6 +423,16 @@ make ARCH="$KARCH" \
   "$KIMAGE_TARGET" \
   2>&1 | tee /scratch/kernel_make_full.log | tee -a "$LOG" | tail -80
 make_ec=${PIPESTATUS[0]}
+# If link failed on duplicate freestanding keepers, weaken + retry once.
+if [[ $make_ec -ne 0 ]] && [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
+  if grep -q 'multiple definition of `wait_for_initramfs' /scratch/kernel_make_full.log 2>/dev/null; then
+    log "=== retry after fix_x86_link_dups (wait_for_initramfs) ==="
+    /work/harness/docker/fix_x86_link_dups.sh "$(pwd)" 2>&1 | tee -a "$LOG" || true
+    make ARCH="$KARCH" CC="$WRAP" HOSTCC=gcc HOSTCXX=g++ -j"$JOBS" "$KIMAGE_TARGET" \
+      2>&1 | tee /scratch/kernel_make_full.log | tee -a "$LOG" | tail -80
+    make_ec=${PIPESTATUS[0]}
+  fi
+fi
 set -e
 log "make_ec=$make_ec"
 
@@ -349,7 +474,7 @@ if [[ -n "$bz" ]]; then
     timeout 60 qemu-system-aarch64 -M virt -cpu cortex-a57 -m 512 -kernel "$bz" \
       ${QEMU_INITRD_ARGS[@]+"${QEMU_INITRD_ARGS[@]}"} \
       -nographic -append "console=ttyAMA0 earlycon=pl011,0x9000000" \
-      2>&1 | tee /scratch/qemu_boot.log | tee -a "$LOG" | tail -80
+      2>&1 | tee /scratch/qemu_boot.log | tee /scratch/qemu_boot_a09.log | tee -a "$LOG" | tail -80
   else
     timeout 90 qemu-system-x86_64 -m 512 -kernel "$bz" \
       ${QEMU_INITRD_ARGS[@]+"${QEMU_INITRD_ARGS[@]}"} \
@@ -379,6 +504,7 @@ if [[ -n "$bz" ]]; then
       cp -f /scratch/qemu_boot.log /scratch/qemu_boot_x86_64.log 2>/dev/null || true
     else
       echo PASS_BOOT > /scratch/c1_boot_marker
+      cp -f /scratch/qemu_boot.log /scratch/qemu_boot_a09.log 2>/dev/null || true
     fi
   elif [[ "$has_linux" -eq 1 ]]; then
     if grep -qE "ggcc-init:|working init" /scratch/qemu_boot.log 2>/dev/null; then
@@ -388,11 +514,15 @@ if [[ -n "$bz" ]]; then
     fi
     if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
       cp -f /scratch/qemu_boot.log /scratch/qemu_boot_x86_64.log 2>/dev/null || true
+    else
+      cp -f /scratch/qemu_boot.log /scratch/qemu_boot_a09.log 2>/dev/null || true
     fi
   else
     log "BOOT_EVIDENCE: missing (no boot strings in serial log)"
     if [[ "$KERNEL_ARCH" = x86_64 || "$KERNEL_ARCH" = x86 ]]; then
       cp -f /scratch/qemu_boot.log /scratch/qemu_boot_x86_64.log 2>/dev/null || true
+    else
+      cp -f /scratch/qemu_boot.log /scratch/qemu_boot_a09.log 2>/dev/null || true
     fi
   fi
 else

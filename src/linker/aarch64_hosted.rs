@@ -5,11 +5,11 @@
 
 use super::archive::read_archive;
 use super::elf_read::{
-    parse_elf_rel, ObjectFile, ParsedReloc, ParsedSection, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE,
-    SHN_COMMON, SHN_UNDEF, SHT_NOBITS, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STB_WEAK,
+    parse_elf_rel, ObjectFile, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_COMMON, SHN_UNDEF,
+    SHT_NOBITS, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STB_WEAK, STT_SECTION,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const R_AARCH64_NONE: u32 = 0;
 const R_AARCH64_ABS64: u32 = 257;
@@ -205,7 +205,9 @@ fn collect_undefs(objects: &[Vec<u8>]) -> Result<Vec<String>, String> {
     Ok(undefs)
 }
 
-/// Map `.text.foo` → `.text` so musl Scrt1 `.text._start_c` lands with `.text`.
+/// Map input section variants to output sections (GNU ld-ish).
+/// Critical for musl: `.bss.main_tls` / `.bss.builtin_tls` must join `.bss`,
+/// and Scrt1 `.text._start_c` must join `.text`.
 fn canonical_sec_name(name: &str) -> &str {
     if let Some(rest) = name.strip_prefix(".text.") {
         if !rest.is_empty() {
@@ -215,6 +217,30 @@ fn canonical_sec_name(name: &str) -> &str {
     if let Some(rest) = name.strip_prefix(".rodata.") {
         if !rest.is_empty() {
             return ".rodata";
+        }
+    }
+    if let Some(rest) = name.strip_prefix(".bss.") {
+        if !rest.is_empty() {
+            return ".bss";
+        }
+    }
+    if let Some(rest) = name.strip_prefix(".tbss.") {
+        if !rest.is_empty() {
+            return ".tbss";
+        }
+    }
+    if let Some(rest) = name.strip_prefix(".tdata.") {
+        if !rest.is_empty() {
+            return ".tdata";
+        }
+    }
+    // Keep `.data.rel.ro` distinct; other `.data.*` fold into `.data`.
+    if name == ".data.rel.ro" || name.starts_with(".data.rel.ro.") {
+        return ".data.rel.ro";
+    }
+    if let Some(rest) = name.strip_prefix(".data.") {
+        if !rest.is_empty() {
+            return ".data";
         }
     }
     name
@@ -256,6 +282,11 @@ fn link_objects_hosted(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
             });
             entry.align = entry.align.max(sec.align.max(1));
             entry.sh_flags |= sec.sh_flags;
+            // Once any contribution is NOBITS, keep the merged section NOBITS
+            // (`.bss.*` fragments must not become file-backed PROGBITS).
+            if sec.sh_type == SHT_NOBITS {
+                entry.sh_type = SHT_NOBITS;
+            }
             align_vec(&mut entry.data, entry.align);
             let base = entry.data.len() as u64;
             bases.insert(sec.shndx, base);
@@ -719,27 +750,48 @@ fn link_objects_hosted(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
         };
         let sec = &merged[name];
         for r in &sec.relocs {
-            let sym_name = resolve_sym_name(&parsed, r)?;
+            let sym = parsed[r.obj_index]
+                .symbols
+                .get(r.sym_index as usize)
+                .ok_or_else(|| format!("bad reloc sym index {}", r.sym_index))?;
+            let sym_name = sym.name.as_str();
             let s_va = if r.r_type == R_AARCH64_TLS_TPREL64
                 || r.r_type == R_AARCH64_TLSLE_ADD_TPREL_HI12
                 || r.r_type == R_AARCH64_TLSLE_LDST8_TPREL_LO12
                 || r.r_type == R_AARCH64_TLSLE_LDST32_TPREL_LO12
                 || r.r_type == R_AARCH64_TLSLE_LDST64_TPREL_LO12
             {
-                symbol_tls_offset(&sym_name, &defs, &merged)?
+                symbol_tls_offset(sym_name, &defs, &merged)?
+            } else if sym.sym_type == STT_SECTION
+                || (sym_name.is_empty()
+                    && sym.shndx != SHN_UNDEF
+                    && sym.shndx != 0
+                    && r.sym_index != 0)
+            {
+                // STT_SECTION often has empty st_name; resolve via shndx — do NOT
+                // fall back to the reloc's own section (that mapped .bss.main_tls
+                // → .text / _start and caused SEGV_ACCERR in __init_tls).
+                section_va_for_shndx(
+                    r.obj_index,
+                    sym.shndx,
+                    &parsed,
+                    &obj_sec_base,
+                    &sec_addr,
+                )?
             } else if sym_name.is_empty() {
                 sec_va
             } else if sym_name.starts_with('.') {
                 lookup_symbol_va(
-                    &sym_name,
+                    sym_name,
                     &parsed,
                     r.obj_index,
                     &obj_sec_base,
                     &sec_addr,
                 )?
+                .or_else(|| sec_addr.get(sym_name).copied())
                 .ok_or_else(|| format!("hosted link: local symbol `{sym_name}` missing"))?
             } else if let Some(va) = resolve_sym_va(
-                &sym_name,
+                sym_name,
                 &parsed,
                 r,
                 &defs,
@@ -748,7 +800,7 @@ fn link_objects_hosted(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
             )? {
                 va
             } else {
-                symbol_va(&sym_name, &defs, &sec_addr)?
+                symbol_va(sym_name, &defs, &sec_addr)?
             };
             let p = sec_va + r.offset;
             let fo = if sec_va < rw_vma_start {
@@ -914,6 +966,35 @@ fn lookup_symbol_va(
     Ok(None)
 }
 
+/// Resolve a section (STT_SECTION / empty-name) reloc target via `st_shndx`.
+fn section_va_for_shndx(
+    obj_index: usize,
+    shndx: u16,
+    parsed: &[ObjectFile],
+    obj_sec_base: &[HashMap<u16, u64>],
+    sec_addr: &HashMap<String, u64>,
+) -> Result<u64, String> {
+    let obj = &parsed[obj_index];
+    let base = obj_sec_base
+        .get(obj_index)
+        .and_then(|m| m.get(&shndx).copied())
+        .ok_or_else(|| {
+            format!("hosted link: section shndx {shndx} missing in object {obj_index}")
+        })?;
+    let sec_name = obj
+        .sections
+        .iter()
+        .find(|s| s.shndx == shndx)
+        .map(|s| canonical_sec_name(&s.name).to_string())
+        .ok_or_else(|| {
+            format!("hosted link: no parsed section for shndx {shndx} in object {obj_index}")
+        })?;
+    let sec_va = sec_addr.get(&sec_name).ok_or_else(|| {
+        format!("hosted link: section `{sec_name}` (shndx {shndx}) not laid out")
+    })?;
+    Ok(sec_va + base)
+}
+
 fn symbol_tls_offset(
     name: &str,
     defs: &HashMap<String, Def>,
@@ -977,6 +1058,7 @@ fn is_rw_section(name: &str, flags: u64) -> bool {
         return false;
     }
     if name == ".bss"
+        || name.starts_with(".bss.")
         || name == ".got"
         || name == ".got.plt"
         || name == ".tbss"
@@ -1004,14 +1086,30 @@ fn section_rank(name: &str, map: &HashMap<String, MergedSec>) -> (u8, String) {
         2
     } else if name == ".rodata" || name.starts_with(".rodata") {
         4
-    } else if name == ".data.rel.ro" {
+    } else if name == ".preinit_array" {
         5
-    } else if name == ".dynamic" {
+    } else if name == ".init_array" {
         6
-    } else if is_rw_section(name, flags) {
+    } else if name == ".fini_array" {
         7
+    } else if name == ".data.rel.ro" {
+        8
+    } else if name == ".dynamic" {
+        9
+    } else if name == ".got" || name == ".got.plt" {
+        10
+    } else if name == ".data" || name.starts_with(".data.") {
+        11
+    } else if name == ".tdata" {
+        12
+    } else if name == ".tbss" {
+        13
+    } else if name == ".bss" || name.starts_with(".bss.") {
+        14
+    } else if is_rw_section(name, flags) {
+        13
     } else {
-        6
+        4
     };
     (rank, name.to_string())
 }

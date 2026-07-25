@@ -15,12 +15,39 @@ VER="${KERNEL_VER:-6.9}"
 SRC_DIR="${KERNEL_SRC:-$ROOT/third_party/linux-$VER}"
 LOG="$SCRATCH/stage_c_kernel.log"
 WRAPPER="$ROOT/harness/docker/acc_cc_wrapper.sh"
-IMAGE="${ACC_DOCKER_IMAGE:-acc-linux}"
 # Default kernel arch = host/container native. On Apple Silicon Docker (aarch64)
 # building x86_64 produces unassemblable .s (host as is aarch64). Prefer arm64
 # unless user forces KERNEL_ARCH=x86_64 with --platform linux/amd64.
 if [[ -z "${KERNEL_ARCH:-}" ]]; then
   KERNEL_ARCH=x86_64
+fi
+# Prefer arch-tagged ggcc-linux images when present; fall back to ggcc-linux / acc-linux.
+if [[ -z "${ACC_DOCKER_IMAGE:-}" ]]; then
+  case "$KERNEL_ARCH" in
+    arm64|aarch64)
+      if docker image inspect ggcc-linux-arm64 >/dev/null 2>&1; then
+        IMAGE=ggcc-linux-arm64
+      elif docker image inspect ggcc-linux >/dev/null 2>&1; then
+        IMAGE=ggcc-linux
+      else
+        IMAGE=acc-linux
+      fi
+      ;;
+    x86_64|x86|amd64)
+      if docker image inspect ggcc-linux-amd64 >/dev/null 2>&1; then
+        IMAGE=ggcc-linux-amd64
+      elif docker image inspect ggcc-linux >/dev/null 2>&1; then
+        IMAGE=ggcc-linux
+      else
+        IMAGE=acc-linux
+      fi
+      ;;
+    *)
+      IMAGE=ggcc-linux
+      ;;
+  esac
+else
+  IMAGE="$ACC_DOCKER_IMAGE"
 fi
 DOCKER_PLATFORM_ARGS=()
 case "$(uname -m)" in
@@ -210,6 +237,8 @@ docker run --rm \
   -e ACC_KERNEL_FREESTANDING=1 \
   -e INITRD_PATH="$INITRD_PATH" \
   -e INITRD_REL="${INITRD_REL:-${INITRD_PATH#$ROOT/}}" \
+  -e ACC_X86_PERSISTENT_BUILD="${ACC_X86_PERSISTENT_BUILD:-0}" \
+  -e ACC_X86_CONTINUE="${ACC_X86_CONTINUE:-0}" \
   "$IMAGE" bash /work/harness/docker/c1_build_inner.sh
 docker_ec=$?
 set -e

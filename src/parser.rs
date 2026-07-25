@@ -286,7 +286,7 @@ impl Parser {
                     || s == "__gnuc_va_list"
                     || s.ends_with("_t")
                     || s.ends_with("_T")
-                    || matches!(s.as_str(), "u8" | "u16" | "u32" | "u64" | "s8" | "s16" | "s32" | "s64" | "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool")
+                    || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool")
                     || self.typedefs.iter().any(|t| t == s)
             }
             TokenKind::Section(_) | TokenKind::Packed | TokenKind::Weak => true,
@@ -1290,7 +1290,7 @@ impl Parser {
             // types like malloc_zone_t). Register as opaque int typedef and continue.
             TokenKind::Ident(s) => {
                 self.bump();
-                if (s.ends_with("_t") || s.ends_with("_T") || matches!(s.as_str(), "u8" | "u16" | "u32" | "u64" | "s8" | "s16" | "s32" | "s64" | "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool"))
+                if (s.ends_with("_t") || s.ends_with("_T") || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool"))
                     && !self.typedefs.iter().any(|t| t == &s)
                 {
                     self.typedefs.push(s.clone());
@@ -1837,8 +1837,8 @@ impl Parser {
     }
 
     fn const_type_align(&self, ty: &Type) -> i64 {
-        match ty {
-            Type::Void | Type::Char | Type::SChar => 1,
+        match ty.unqual() {
+            Type::Void | Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
@@ -1849,6 +1849,7 @@ impl Parser {
                 .unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields_const(fs, false, false).1,
             Type::AnonUnion(fs) => self.layout_fields_const(fs, true, false).1,
+            Type::Const(_) => unreachable!(),
         }
     }
 
@@ -1976,9 +1977,9 @@ impl Parser {
 
     /// Sizeof for constant-expression evaluation at parse time (array bounds).
     fn const_type_size(&self, ty: &Type) -> Option<i64> {
-        Some(match ty {
+        Some(match ty.unqual() {
             Type::Void => 0,
-            Type::Char | Type::SChar => 1,
+            Type::Char | Type::SChar | Type::UChar => 1,
             Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
@@ -1993,6 +1994,7 @@ impl Parser {
             }
             Type::AnonStruct(fs) => self.layout_fields_const(fs, false, false).0,
             Type::AnonUnion(fs) => self.layout_fields_const(fs, true, false).0,
+            Type::Const(_) => unreachable!(),
         })
     }
 
@@ -2127,17 +2129,64 @@ impl Parser {
         }
     }
 
+    pub fn int_lit_type(n: i64) -> Type {
+        if n < 0 {
+            Type::ULong
+        } else if n > u32::MAX as i64 {
+            Type::Long
+        } else if n > i32::MAX as i64 {
+            Type::UInt
+        } else {
+            Type::Int
+        }
+    }
+
+    fn strip_qualifiers_and_decay(&self, ty: Type) -> Type {
+        let unqual = ty.unqual().clone();
+        match unqual {
+            Type::Array(elem, _) => Type::Ptr(elem),
+            other => other,
+        }
+    }
+
+    fn types_compatible(&self, t1: &Type, t2: &Type) -> bool {
+        let t1 = self.strip_qualifiers_and_decay(t1.clone());
+        let t2 = self.strip_qualifiers_and_decay(t2.clone());
+        match (&t1, &t2) {
+            (Type::Int, Type::Int)
+            | (Type::UInt, Type::UInt)
+            | (Type::Char, Type::Char)
+            | (Type::SChar, Type::SChar)
+            | (Type::UChar, Type::UChar)
+            | (Type::Short, Type::Short)
+            | (Type::UShort, Type::UShort)
+            | (Type::Long, Type::Long)
+            | (Type::ULong, Type::ULong)
+            | (Type::Float, Type::Float)
+            | (Type::Double, Type::Double)
+            | (Type::Void, Type::Void) => true,
+            (Type::Ptr(a), Type::Ptr(b)) => self.types_compatible(a, b),
+            (Type::Struct(a), Type::Struct(b)) => a == b,
+            (Type::Union(a), Type::Union(b)) => a == b,
+            _ => false,
+        }
+    }
+
     /// Best-effort type of an expression for parse-time sizeof/array bounds.
     /// Uses local_types (params + locals) and struct field layouts.
     fn const_expr_type(&self, e: &Expr) -> Option<Type> {
         match e {
-            Expr::Int(_) | Expr::Char(_) => Some(Type::Int),
+            Expr::Int(n) => Some(Self::int_lit_type(*n)),
+            Expr::Char(_) => Some(Type::Int),
             Expr::Float(_) => Some(Type::Double),
             Expr::String(s) => {
                 Some(Type::Array(Box::new(Type::Char), (s.len() + 1) as i64))
             }
             Expr::Var(name) => {
-                if let Some(t) = self.lookup_var_type(name) {
+                if let Some(t) = self.lookup_local_type(name) {
+                    return Some(t.clone());
+                }
+                if let Some(t) = self.global_types.get(name) {
                     return Some(t.clone());
                 }
                 if self.enum_values.contains_key(name) {
@@ -2181,14 +2230,17 @@ impl Parser {
                 // Prefer floating / pointer width when either side has it.
                 let lt = self.const_expr_type(left);
                 let rt = self.const_expr_type(right);
-                match (lt, rt) {
+                let l_unqual = lt.as_ref().map(|t| t.unqual());
+                let r_unqual = rt.as_ref().map(|t| t.unqual());
+                match (l_unqual, r_unqual) {
                     (Some(Type::Double), _) | (_, Some(Type::Double)) => Some(Type::Double),
                     (Some(Type::Float), _) | (_, Some(Type::Float)) => Some(Type::Float),
                     (Some(Type::Ptr(p)), _) | (_, Some(Type::Ptr(p))) => {
-                        Some(Type::Ptr(p))
+                        Some(Type::Ptr(p.clone()))
                     }
                     (Some(Type::ULong), _) | (_, Some(Type::ULong)) => Some(Type::ULong),
                     (Some(Type::Long), _) | (_, Some(Type::Long)) => Some(Type::Long),
+                    (Some(Type::UInt), _) | (_, Some(Type::UInt)) => Some(Type::UInt),
                     _ => Some(Type::Int),
                 }
             }
@@ -2526,7 +2578,7 @@ impl Parser {
                     if let Some((p2, v2)) = fp2 {
                         items.push(Item::Func(Function {
                             name: n2,
-                            ret: base.clone(),
+                            ret: t2,
                             params: p2,
                             variadic: v2,
                             body: None,
@@ -2534,7 +2586,6 @@ impl Parser {
                             is_weak,
                             section: sec_attr.clone(),
                         }));
-                        let _ = t2;
                     } else {
                         let init = if self.eat(TokenKind::Assign) {
                             Some(self.parse_initializer()?)
@@ -2577,7 +2628,7 @@ impl Parser {
         } else {
             None
         };
-        let ty = Self::infer_array_size(ty, &init);
+        let ty = self.infer_array_size(ty, &init);
         // Sticky weak: once a name is declared __weak in this TU, later
         // definitions (e.g. version.c #include of version-timestamp.c) stay weak.
         let mut is_weak = is_weak;
@@ -2610,7 +2661,7 @@ impl Parser {
             } else {
                 None
             };
-            let t2 = Self::infer_array_size(t2, &init2);
+            let t2 = self.infer_array_size(t2, &init2);
             let mut w2 = is_weak;
             if w2 {
                 self.weak_names.insert(n2.clone());
@@ -2643,32 +2694,35 @@ impl Parser {
         Ok(items)
     }
 
-    fn infer_array_size(ty: Type, init: &Option<Expr>) -> Type {
+    fn scalar_count(&self, ty: &Type) -> usize {
+        match ty {
+            Type::Array(elem, len) => ((*len).max(1) as usize) * self.scalar_count(elem),
+            Type::Struct(name) => {
+                if let Some(fs) = self.struct_fields.get(name) {
+                    fs.iter().map(|f| self.scalar_count(&f.ty)).sum()
+                } else {
+                    1
+                }
+            }
+            Type::Union(name) => {
+                if let Some(fs) = self.struct_fields.get(name) {
+                    fs.iter().map(|f| self.scalar_count(&f.ty)).max().unwrap_or(1)
+                } else {
+                    1
+                }
+            }
+            Type::AnonStruct(fs) => fs.iter().map(|f| self.scalar_count(&f.ty)).sum(),
+            Type::AnonUnion(fs) => fs.iter().map(|f| self.scalar_count(&f.ty)).max().unwrap_or(1),
+            _ => 1,
+        }
+    }
+
+    fn infer_array_size(&self, ty: Type, init: &Option<Expr>) -> Type {
         match (&ty, init) {
             (Type::Array(elem, 0), Some(Expr::String(s))) => {
                 Type::Array(elem.clone(), (s.len() as i64) + 1)
             }
             (Type::Array(elem, 0), Some(Expr::InitList { fields })) => {
-                // max of len or designated indices
-                let mut max_i = fields.len() as i64;
-                let mut idx = 0i64;
-                for (name, _) in fields {
-                    if let Some(n) = name {
-                        // designated [n] encoded? we use name as "0","1" for index later
-                        if let Ok(i) = n.parse::<i64>() {
-                            idx = i + 1;
-                            if idx > max_i {
-                                max_i = idx;
-                            }
-                            continue;
-                        }
-                    }
-                    idx += 1;
-                    if idx > max_i {
-                        max_i = idx;
-                    }
-                }
-                // simpler: track while parsing — use fields len and [n] designators stored as Some(index)
                 let mut cur = 0i64;
                 let mut high = 0i64;
                 for (des, _) in fields {
@@ -2680,7 +2734,14 @@ impl Parser {
                     high = high.max(cur + 1);
                     cur += 1;
                 }
-                Type::Array(elem.clone(), high.max(1))
+                let elem_sc = self.scalar_count(elem).max(1) as i64;
+                let has_sub_initlists = fields.iter().any(|(_, e)| matches!(e, Expr::InitList { .. }));
+                let count = if !has_sub_initlists && elem_sc > 1 {
+                    (high + elem_sc - 1) / elem_sc
+                } else {
+                    high
+                };
+                Type::Array(elem.clone(), count.max(1))
             }
             _ => ty,
         }
@@ -3820,7 +3881,7 @@ impl Parser {
             } else {
                 None
             };
-            let ty = Self::infer_array_size(ty, &init);
+            let ty = self.infer_array_size(ty, &init);
             // Record type for later sizeof(local) / sizeof(p->field) bounds.
             if !is_extern {
                 self.insert_local_type(&name, ty.clone());
@@ -4665,7 +4726,15 @@ impl Parser {
         match self.peek_kind().clone() {
             TokenKind::IntLit(n) => {
                 self.bump();
-                Ok(Expr::Int(n))
+                let ty = Self::int_lit_type(n);
+                if ty == Type::Int {
+                    Ok(Expr::Int(n))
+                } else {
+                    Ok(Expr::Cast {
+                        ty,
+                        expr: Box::new(Expr::Int(n)),
+                    })
+                }
             }
             TokenKind::FloatLit(f) => {
                 self.bump();
@@ -4740,25 +4809,32 @@ impl Parser {
             }
             TokenKind::Ident(name) if name == "_Generic" => {
                 // C11 _Generic(controlling-expr, type: expr, ..., default: expr)
-                // Kernel headers use this inside READ_ONCE/typeof; pick the last
-                // association (usually `default`) as the value — enough to parse.
                 self.bump();
                 self.expect(TokenKind::LParen)?;
-                let _ctrl = self.parse_assign()?;
+                let ctrl = self.parse_assign()?;
+                let raw_ty = self.const_expr_type(&ctrl).unwrap_or(Type::Int);
+                let ctrl_ty = self.strip_qualifiers_and_decay(raw_ty);
                 self.expect(TokenKind::Comma)?;
-                let mut result = Expr::Int(0);
+                let mut matched_res: Option<Expr> = None;
+                let mut default_res: Option<Expr> = None;
                 loop {
                     if self.at(&TokenKind::RParen) {
                         break;
                     }
-                    // `default` is a keyword (TokenKind::Default), not Ident.
                     if self.eat(TokenKind::Default) {
                         self.expect(TokenKind::Colon)?;
-                        result = self.parse_assign()?;
+                        let val = self.parse_assign()?;
+                        if default_res.is_none() {
+                            default_res = Some(val);
+                        }
                     } else if self.is_typename() {
-                        let _ty = self.parse_type_name()?;
+                        let parsed_assoc = self.parse_type_name()?;
+                        let assoc_ty = self.strip_qualifiers_and_decay(parsed_assoc);
                         self.expect(TokenKind::Colon)?;
-                        result = self.parse_assign()?;
+                        let val = self.parse_assign()?;
+                        if self.types_compatible(&ctrl_ty, &assoc_ty) && matched_res.is_none() {
+                            matched_res = Some(val);
+                        }
                     } else {
                         return Err(format!(
                             "expected type or default in _Generic at {}:{}",
@@ -4771,7 +4847,7 @@ impl Parser {
                     }
                 }
                 self.expect(TokenKind::RParen)?;
-                Ok(result)
+                Ok(matched_res.or(default_res).unwrap_or(Expr::Int(0)))
             }
             TokenKind::Ident(name) => {
                 self.bump();
