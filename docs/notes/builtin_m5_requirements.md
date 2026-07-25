@@ -1,6 +1,6 @@
 # Builtin M5 — hosted link without system `cc`/`ld`
 
-**Status:** IN PROGRESS — do **not** create `scratch/builtin_m5_marker` until docker smoke is green.
+**Status:** PASS — `scratch/builtin_m5_marker` stamped (strict docker Hello).
 
 ## Approach (chosen)
 
@@ -32,10 +32,10 @@ GGCC_BUILTIN_AS=1 GGCC_BUILTIN_LD=1 GGCC_BUILTIN_LD_STRICT=1 \
 | `GGCC_BUILTIN_LD_STRICT=1` | No silent fallback to system `cc`/`ld` (required for marker path) |
 | `GGCC_DEBUG_M5=1` | Linker debug (GOT layout, key symbol VAs) |
 
-## Marker path (when green)
+## Marker path
 
 `scratch/builtin_m5_marker` — same honesty shape as M2/M4.  
-Harness: `harness/docker/run_builtin_m5.sh` (strace asserts no `cc`/`ld`, run prints `Hello, world!`).
+Harness: `harness/docker/run_builtin_m5.sh` (strace asserts no `cc`/`ld`/`as`, run prints `Hello, world!`).
 
 ## Requirements
 
@@ -44,15 +44,15 @@ Harness: `harness/docker/run_builtin_m5.sh` (strace asserts no `cc`/`ld`, run pr
 3. Evidence: docker aarch64 run prints `Hello, world!\n`, exit 0.
 4. Driver: `GGCC_BUILTIN_AS=1` + `GGCC_BUILTIN_LD=1` + strict mode for marker.
 
-## Implementation notes (2026-07-24 evening)
+## Implementation notes (2026-07-24)
 
-- `src/linker/aarch64_hosted.rs` — archive-driven musl static link, GOT fill, crt section order (`.init` → `.text` → `.fini`), `.text.*` → `.text`.
+- `src/linker/aarch64_hosted.rs` — archive-driven musl static link, GOT fill, crt section order, `.text.*` / `.bss.*` canonicalization.
 - `src/linker/archive.rs` — Unix `ar` reader.
 - `tests/builtin_m5_hello.c` — smoke source.
 - Env aliases: `ACC_BUILTIN_*` and `GGCC_BUILTIN_*` both accepted.
 - Harness: `harness/docker/run_builtin_m5.sh`.
 
-### Fixes landed (still no marker)
+### Fixes landed
 
 | Fix | Result |
 |-----|--------|
@@ -61,9 +61,16 @@ Harness: `harness/docker/run_builtin_m5.sh` (strace asserts no `cc`/`ld`, run pr
 | `_DYNAMIC` → real DT_NULL `.dynamic` in RW (not `LOAD_BASE`) | Scrt1 ADRP lands off ELF header |
 | `e_version = 1` | ELF header Version current |
 | CRT | `Scrt1.o` (matches `musl-gcc -static`) |
+| **STT_SECTION empty-name resolve via `st_shndx`** | `.bss.main_tls` / `.bss.builtin_tls` no longer alias `.text`/`_start` |
+| Canonicalize `.bss.*` → `.bss`; rank `.bss` last | RW `p_memsz > p_filesz` (real BSS); `__init_tls` writes writable TLS |
 
-### Still open
+### Root cause (SEGV_ACCERR)
 
-- Runtime **`SEGV_ACCERR` at `0x400148`** (branch in `_start`), exit 139.
-- Same user `.o` linked with system `as` + `musl-gcc -static` prints `Hello, world!` — codegen/asm OK; builtin ELF layout/relocs still wrong.
-- **Do not** stamp `scratch/builtin_m5_marker` until strict path Hello works.
+Musl `__init_tls` relocates against **STT_SECTION** symbols for `.bss.main_tls` / `.bss.builtin_tls`. Those symbols have **empty `st_name`**. The linker treated empty name as “current section”, so ADRP+ADD pointed at `.text` (`0x400130` = `_start`). `__init_tls` then `str` into RX → `SEGV_ACCERR`.
+
+### Verify
+
+```bash
+bash harness/docker/run_builtin_m5.sh
+test -f scratch/builtin_m5_marker
+```

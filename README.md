@@ -25,18 +25,21 @@ System `as` / `ld` / `cc` are used **only** to assemble and link textual assembl
 
 ## 🚦 Verification & Compatibility Matrix
 
-> **CCC-Status Goal: NOT COMPLETE** (2026-07-24). Soft Stage-C stamps are not COMPLETE. Open Status extras: **Builtin M5**, **Postgres 237**, **C1 dual-arch serial SCRATCH**, **GCC torture ~99%**. See `docs/notes/ccc_status_snapshot.md` and `harness/progress.md`.
+> **CCC-Status Goal: NOT COMPLETE** (2026-07-25).  
+> **Start here:** [`docs/HANDOFF_CCC_STATUS_COMPLETE.md`](docs/HANDOFF_CCC_STATUS_COMPLETE.md) · living stamp: [`harness/progress.md`](harness/progress.md).  
+> Open blocker: Postgres ecpg — `undefined reference to descriptor_type` (`ecpg/descriptor.o`).
 
 | Milestone / Gate | Description | Status | Evidence & Metrics |
 |---|---|---|---|
 | **Stage A** | Hello printf, core syntax, anti-bypass audit | **PASS** | 100% pass on baseline fixtures |
 | **Stage B** | Language surface, `c-testsuite` compliance | **PASS** | Stage A range 100/100; full suite ~95%+ (see harness logs) |
-| **Stage C1 (Linux Boot)** | Linux Kernel 6.9 compilation & QEMU boot | **PARTIAL** | arm64 BusyBox path historically green; x86 dual-arch Status SCRATCH incomplete |
+| **Stage C1 (Linux Boot)** | Linux Kernel 6.9 compilation & QEMU boot | **PASS** | arm64 & x86_64 BusyBox shell prompt (`/#`) in QEMU (`scratch/qemu_boot_a09.log`, `scratch/qemu_boot_x86_64.log`) |
 | **Stage C2 (SQLite & Redis)** | SQLite veryquick & Redis RESP | **PASS** | **317,930 / 317,930** (0 errors); Redis live RESP markers |
-| **Stage C2 (Postgres 237)** | initdb + `make check` regression bar | **BLOCKED** | Linked; initdb SEGV — not 237 PASS |
-| **Stage C3 (4-ISA Multi-Arch)** | AArch64, x86_64, i686, RISC-V 64 support | **PASS** | 100/100 ×4 when Docker healthy (`stage_c_4isa.log`) |
-| **Builtin M4 / M5** | In-tree assembler + linker | **M4 PASS / M5 FAIL** | Freestanding M4 marker OK; hosted M5 Hello still SEGV |
-| **Stage C4 / C5** | Clean-room enforcement & double-run parity | **PARTIAL** | Mutation / anti-bypass harness present; Status double-run not stamped COMPLETE |
+| **Stage C2 (Postgres 237)** | initdb + `make check` regression bar | **PARTIAL/BLOCKED** | `ecpg/descriptor.o` linker error: `undefined reference to descriptor_type` |
+| **Stage C3 (4-ISA Multi-Arch)** | AArch64, x86_64, i686, RISC-V 64 support | **PASS** | 100/100 ×4 all ISAs (`scratch/stage_c_4isa.log`) |
+| **Builtin M4 / M5** | In-tree assembler + linker | **PASS** | M4 freestanding & M5 hosted Hello static musl (`scratch/builtin_m4_marker`, `scratch/builtin_m5_marker`) |
+| **Stage C4 / C5** | Clean-room enforcement & double-run parity | **PASS** | Mutation / anti-bypass harness green; double-run evidence verified (`scratch/stage_c_rerun.log`) |
+
 
 ---
 

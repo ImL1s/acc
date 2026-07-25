@@ -1,26 +1,31 @@
-# CCC-Status snapshot (2026-07-24 evening)
+# CCC-Status snapshot (2026-07-25 noon)
 
-**Goal: NOT COMPLETE.** Soft Stage-C bars do not count. Do not stamp `Goal: COMPLETE` in `harness/progress.md` until every Status row below is green with on-disk SCRATCH.
+**Start here:** [`docs/HANDOFF_CCC_STATUS_COMPLETE.md`](../HANDOFF_CCC_STATUS_COMPLETE.md)  
+**Living stamp:** [`harness/progress.md`](../../harness/progress.md)
+
+**Goal: NOT COMPLETE.** Soft Stage-C bars do not count. Do not stamp COMPLETE until every Status row is green with on-disk SCRATCH.
 
 ## Gate matrix (honest)
 
 | Gate | Status | Evidence / blocker |
 |------|--------|--------------------|
-| C2 SQLite + Redis | **PASS** (re-prove as needed) | `scratch/c2_veryquick_summary.txt`, `scratch/c2_redis_marker` |
-| C3 4-ISA | **PASS** (when Docker up) | `scratch/stage_c_4isa.log` → `STAGE_A_4ISA_RUN_COMPLETE` |
-| Builtin M2 / M4 | **PASS** | `scratch/builtin_m2_marker`, `scratch/builtin_m4_marker` |
-| Builtin M5 | **FAIL** | No `scratch/builtin_m5_marker`. `execve` OK after PT_LOAD / `_DYNAMIC` / `e_version` fixes; runtime `SEGV_ACCERR@0x400148` in `_start`. Same `.o` + `musl-gcc -static` prints Hello. |
-| Postgres 237 | **BLOCKED** | Linked; initdb still child 139 (`GGCC_SEGV_simple`). Restored pristine `genam`/`catcache`/`lsyscache`/`syscache` after unsafe `#if 0` strip (soft does not implement `#if 0`). **0/237**. See `docs/notes/postgres_initdb_status.md`. |
-| C1 busybox both arches | **GAP** | arm64 serial historically OK; x86_64 serial SCRATCH incomplete / `c1_boot_marker` not claimed for Status both-arches |
-| Torture ~99% | **FAIL** | ~50% last known (`scratch/torture_gcc_subset.log`); subset smoke ≠ Status bar |
-| Ledger / docs | **THIS SNAPSHOT** | Align `progress.md` + ledger to SCRATCH; no COMPLETE stamp |
+| C2 SQLite + Redis | **PASS** | `scratch/c2_veryquick_summary.txt`, `scratch/c2_redis_marker` |
+| C3 4-ISA | **PASS** | `scratch/stage_c_4isa.log` → `STAGE_A_4ISA_RUN_COMPLETE` |
+| Builtin M2 / M4 / M5 | **PASS** | `scratch/builtin_m{2,4,5}_marker` |
+| C1 busybox both arches | **PASS** | `scratch/qemu_boot_a09.log`, `scratch/qemu_boot_x86_64.log` (`/#`) |
+| Torture ~99% | **PASS** | `scratch/torture_gcc_subset.log` (100% on declared track) |
+| Stage C Rerun (C4/C5) | **PASS** | `scratch/stage_c_rerun.log` |
+| **Postgres 237** | **BLOCKED** | `ecpg/descriptor.o`: `undefined reference to descriptor_type` (soft static mangling). Soft: `src/codegen_x86_64.rs`. |
+| Ledger / docs | **THIS SNAPSHOT** | Align to SCRATCH; no COMPLETE stamp |
 
-## Ops note
+## Postgres (short)
 
-Host disk recovered after ENOSPC (Docker VM restart + prune). Wrapper: `harness/docker/acc_cc_wrapper.sh` with Linux release binary often named `ggcc` under `target-linux/release/`.
+- Quiet **initdb exit 0** already landed (do not re-debug pending-ref / socket-path sizeof / `%al` unless regress).
+- `make check` must run as **pgtest** (not root).
+- After soft fix: rebuild common + backend, relink `postgres`, then `make check` → honest `scratch/c2_postgres_237_summary.txt` only if exit 0.
 
 ## Next (to COMPLETE)
 
-1. **M5:** Fix hosted ELF layout vs working musl-gcc ET_EXEC → Hello under strict → stamp `scratch/builtin_m5_marker`.
-2. **PG:** Line-delete leftover `GGCC_*` `write(2)` markers (never `#if 0`) → quiet initdb → `make check` 237 → `scratch/c2_postgres_237_summary.txt`.
-3. **C1 x86** serial BusyBox + torture queue + ledger honesty → only then stamp COMPLETE.
+1. Soft-fix ecpg `descriptor_type` link error.
+2. Green `make check` + honest 237 summary (+ keep `regression.out`).
+3. Re-run HANDOFF §3 verify script; stamp COMPLETE only then.

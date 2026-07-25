@@ -36,6 +36,7 @@ Human-side method aligned with Anthropic CCC experiment; real capability, not to
 
 > Soft Stage-C stamps (acc-init-only boot, `sqlite_reg`, SDS, soft 2-ISA green) are **not** Goal COMPLETE.
 > Strict contracts: `harness/STAGE_CONTRACTS.md`, `harness/real_projects.md`.
+> **Start here (goal + handoff):** [`docs/HANDOFF_CCC_STATUS_COMPLETE.md`](docs/HANDOFF_CCC_STATUS_COMPLETE.md).
 > Full roadmap: [`docs/plans/2026-07-23-ccc-full-parity.md`](docs/plans/2026-07-23-ccc-full-parity.md).
 > Finish sequencing (2026-07-24): [`docs/plans/2026-07-24-ccc-status-complete-finish.md`](docs/plans/2026-07-24-ccc-status-complete-finish.md) — **harness OK / CCC `src/` forbidden**.
 > Cursor plan Status matrix: **CCC Full Finish** (`CCC Full Finish-e6f6e6a3`).

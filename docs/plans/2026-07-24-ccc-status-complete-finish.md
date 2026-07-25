@@ -1,9 +1,13 @@
 # CCC-Status COMPLETE Finish Implementation Plan
 
+> **Canonical goal + handoff (read first):** [`docs/HANDOFF_CCC_STATUS_COMPLETE.md`](../HANDOFF_CCC_STATUS_COMPLETE.md)
+>
 > **For Codex:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 > **Parallel:** Use dispatching-parallel-agents — one agent per domain below; **never** two agents editing the same soft-codegen file at once.
 
 **Goal:** Drive clean-room `ggcc` to honest **`Goal: COMPLETE`** under CCC-Status gates (Postgres 237, M5, torture/~99%, C1 serial SCRATCH, ledger/docs aligned) — **without copying Claude CCC compiler `src/`**.
+
+**Status (2026-07-25):** Goal still **NOT COMPLETE**. Most gates PASS (M5, C1 dual-arch, torture, C2/C3, C4/C5). **Sole open Status blocker:** Postgres ecpg `undefined reference to descriptor_type`. See living `harness/progress.md`.
 
 **Architecture:** Keep ggcc as the only C compiler for user `.c`. Finish remaining Status extras as **independent workstreams** that share only honesty artifacts (`progress.md`, ledger). Soft x86_64 codegen has a **single owner** for the Postgres initdb path. CCC **harness / methodology** may be referenced; CCC **compiler body** may not.
 
