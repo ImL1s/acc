@@ -5,12 +5,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 fail=0
 
+GREP="$(command -v rg || echo "grep -E")"
+
 echo "== clean-room: no CCC tree =="
 if [[ -d "$ROOT/claudes-c-compiler" ]] || [[ -d "$ROOT/vendor/claudes-c-compiler" ]]; then
   echo "FAIL: vendored CCC tree present"
   fail=1
 fi
-if rg -n --glob '!target/**' 'anthropics/claudes-c-compiler|Claude.s C Compiler|ccc-x86' src harness oracles 2>/dev/null; then
+if $GREP -n --exclude-dir=target 'anthropics/claudes-c-compiler|Claude.s C Compiler|ccc-x86' src harness oracles 2>/dev/null; then
   echo "FAIL: CCC provenance markers under implementation paths"
   fail=1
 else
@@ -19,7 +21,7 @@ fi
 
 echo "== no external C compiler on user .c in driver =="
 # driver must not Command::new("gcc") / clang on the input .c
-if rg -n 'Command::new\("(gcc|clang|ccc)"\)' src 2>/dev/null; then
+if $GREP -n 'Command::new\("(gcc|clang|ccc)"\)' src 2>/dev/null; then
   echo "FAIL: spawns external C compiler by name"
   fail=1
 else
@@ -27,14 +29,14 @@ else
 fi
 
 # Ensure compile path reads source and runs parser
-if ! rg -n 'parser::parse' src/driver.rs >/dev/null; then
+if ! $GREP -n 'parser::parse' src/driver.rs >/dev/null; then
   echo "FAIL: driver does not call parser::parse"
   fail=1
 else
   echo "PASS: driver calls parser::parse"
 fi
 
-if ! rg -n 'emit_assembly' src/driver.rs >/dev/null; then
+if ! $GREP -n 'emit_assembly' src/driver.rs >/dev/null; then
   echo "FAIL: driver does not emit assembly via codegen"
   fail=1
 else

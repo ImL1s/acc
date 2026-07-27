@@ -40,7 +40,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zsh build-essential gcc g++ make qemu-system-arm qemu-user qemu-user-static gcc-aarch64-linux-gnu gcc-i686-linux-gnu tcl-dev
+          sudo apt-get install -y zsh build-essential gcc g++ make ripgrep qemu-system-arm qemu-user qemu-user-static gcc-aarch64-linux-gnu gcc-i686-linux-gnu tcl-dev
 
       - name: Cargo Check & Code Format
         run: |
