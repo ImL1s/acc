@@ -19,7 +19,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
-fn usage() -> ! {
+fn usage_exit(code: i32) -> ! {
     eprintln!(
         "acc — from-scratch minimal C compiler\n\
          usage: acc [-o <output>] [-S] [--keep-asm] [-m aarch64|x86_64|i686|riscv64]\n\
@@ -38,7 +38,11 @@ fn usage() -> ! {
          -Dname[=val]        define macro (default val=1)\n\
          -include file       pre-include file (like first #include)"
     );
-    process::exit(2);
+    process::exit(code);
+}
+
+fn usage() -> ! {
+    usage_exit(2);
 }
 
 fn main() {
@@ -57,7 +61,7 @@ fn main() {
 
     while let Some(a) = args.next() {
         match a.as_str() {
-            "-h" | "--help" => usage(),
+            "-h" | "--help" => usage_exit(0),
             "-o" => {
                 let p = args.next().unwrap_or_else(|| {
                     eprintln!("ERROR: -o requires a path");
