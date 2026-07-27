@@ -4360,17 +4360,21 @@ impl Parser {
                 } else {
                     "__acc_va_arg"
                 };
-                // Lower to (*(T*)helper(&ap)) soft form.
+                // Lower to (*(T*)helper(&ap, sizeof(T))) soft form.
+                let sz_expr = Expr::SizeofType(ty.clone());
                 return Ok(Expr::Unary {
                     op: UnaryOp::Deref,
                     expr: Box::new(Expr::Cast {
                         ty: Type::Ptr(Box::new(ty)),
                         expr: Box::new(Expr::Call {
                             name: helper.into(),
-                            args: vec![Expr::Unary {
-                                op: UnaryOp::Addr,
-                                expr: Box::new(ap),
-                            }],
+                            args: vec![
+                                Expr::Unary {
+                                    op: UnaryOp::Addr,
+                                    expr: Box::new(ap),
+                                },
+                                sz_expr,
+                            ],
                         }),
                     }),
                 });

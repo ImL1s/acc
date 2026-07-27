@@ -6316,8 +6316,8 @@ impl Codegen {
                     return Ok(Type::Ptr(Box::new(Type::Char)));
                 }
                 if name == "__acc_va_arg" {
-                    // args: &ap  (pointer to va_list / char*)
-                    // Returns the current cursor (for *(type*)cursor); advances ap by 8.
+                    // args: &ap, [optional size] (pointer to va_list / char*)
+                    // Returns the current cursor (for *(type*)cursor); advances ap by size (rounded up to 8).
                     if args.is_empty() {
                         return Err("__acc_va_arg needs &ap".into());
                     }
@@ -6331,8 +6331,14 @@ impl Codegen {
                     self.emit_lvalue_addr(ap_lvalue, 9, typedefs)?;
                     // x9 = &ap; x0 = ap (cursor to return)
                     writeln!(self.out, "\tldr\tx0, [x9]").unwrap();
-                    // ap += 8
-                    writeln!(self.out, "\tadd\tx10, x0, #8").unwrap();
+                    if args.len() > 1 {
+                        self.emit_expr_rval(&args[1], 11, typedefs)?;
+                        writeln!(self.out, "\tadd\tx11, x11, #7").unwrap();
+                        writeln!(self.out, "\tand\tx11, x11, #~7").unwrap();
+                        writeln!(self.out, "\tadd\tx10, x0, x11").unwrap();
+                    } else {
+                        writeln!(self.out, "\tadd\tx10, x0, #8").unwrap();
+                    }
                     writeln!(self.out, "\tstr\tx10, [x9]").unwrap();
                     if dest != 0 {
                         writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();

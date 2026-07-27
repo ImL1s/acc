@@ -1028,7 +1028,7 @@ pub fn preprocess_with_options_arch(
             params: vec!["ap".into(), "type".into()],
             // type is substituted textually (may include `*`).
             // Codegen rewrites *(double*)__acc_va_arg to the VR walker.
-            body: "(*(type*)__acc_va_arg(&(ap)))".into(),
+            body: "(*(type*)__acc_va_arg(&(ap), sizeof(type)))".into(),
             variadic: false,
         },
     );
