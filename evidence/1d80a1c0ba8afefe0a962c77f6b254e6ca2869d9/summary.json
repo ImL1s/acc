@@ -1,0 +1,97 @@
+{
+  "compiler_sha": "1d80a1c0ba8afefe0a962c77f6b254e6ca2869d9",
+  "timestamp_start": "2026-07-25T16:28:23Z",
+  "timestamp_finish": "2026-07-25T16:37:25Z",
+  "overall_status": "PASS",
+  "tool_versions": {
+    "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)",
+    "cargo": "cargo 1.88.0 (873a06493 2025-05-10)",
+    "git": "git version 2.50.1 (Apple Git-155)"
+  },
+  "gates": [
+    {
+      "gate": "cargo_test",
+      "command": "cargo test --release",
+      "start_time": "2026-07-25T16:28:23Z",
+      "finish_time": "2026-07-25T16:28:26Z",
+      "duration_seconds": 3,
+      "exit_code": 0,
+      "status": "PASS",
+      "pass_count": 72,
+      "fail_count": 0,
+      "architecture": "arm64",
+      "log_file": "evidence/1d80a1c0ba8afefe0a962c77f6b254e6ca2869d9/cargo_test/cargo_test.log",
+      "evidence_hash": "93804d92974e4c7f10acbac162032bf829fc6527cbba16dfd9044084b2299f9c"
+    },
+    {
+      "gate": "inrepo_oracles",
+      "command": "zsh harness/run_oracle.sh",
+      "start_time": "2026-07-25T16:28:27Z",
+      "finish_time": "2026-07-25T16:28:29Z",
+      "duration_seconds": 2,
+      "exit_code": 0,
+      "status": "PASS",
+      "pass_count": 7,
+      "fail_count": 0,
+      "architecture": "arm64",
+      "log_file": "evidence/1d80a1c0ba8afefe0a962c77f6b254e6ca2869d9/inrepo_oracles/inrepo_oracles.log",
+      "evidence_hash": "dcb95d4b47f81e71135e2851b81050b11a95d97a5a3b9247667a4334e13809d2"
+    },
+    {
+      "gate": "ctestsuite",
+      "command": "zsh harness/run_ctestsuite.sh",
+      "start_time": "2026-07-25T16:28:30Z",
+      "finish_time": "2026-07-25T16:29:54Z",
+      "duration_seconds": 84,
+      "exit_code": 0,
+      "status": "PASS",
+      "pass_count": 214,
+      "fail_count": 6,
+      "architecture": "arm64",
+      "log_file": "evidence/1d80a1c0ba8afefe0a962c77f6b254e6ca2869d9/ctestsuite/ctestsuite.log",
+      "evidence_hash": "93b077861637c243aa182b5035f51e0daa2810a1209eb8ef7c7aa84e656cfdb6"
+    },
+    {
+      "gate": "multiarch_4isa",
+      "command": "bash harness/run_multiarch_4isa.sh",
+      "start_time": "2026-07-25T16:29:55Z",
+      "finish_time": "2026-07-25T16:37:23Z",
+      "duration_seconds": 448,
+      "exit_code": 0,
+      "status": "PASS",
+      "pass_count": 400,
+      "fail_count": 0,
+      "architecture": "arm64",
+      "log_file": "evidence/1d80a1c0ba8afefe0a962c77f6b254e6ca2869d9/multiarch_4isa/multiarch_4isa.log",
+      "evidence_hash": "3f348fa484340cdd5ded6e29339b5eb43b1a89d2a90da196f992472850f75da8"
+    },
+    {
+      "gate": "mutation_check",
+      "command": "zsh harness/run_mutation.sh",
+      "start_time": "2026-07-25T16:37:23Z",
+      "finish_time": "2026-07-25T16:37:24Z",
+      "duration_seconds": 1,
+      "exit_code": 0,
+      "status": "PASS",
+      "pass_count": 1,
+      "fail_count": 0,
+      "architecture": "arm64",
+      "log_file": "evidence/1d80a1c0ba8afefe0a962c77f6b254e6ca2869d9/mutation_check/mutation_check.log",
+      "evidence_hash": "62b2bf97ac752bb4f092fa4e3180a5492d1178e87def48368800b177e1f4e7a2"
+    },
+    {
+      "gate": "anti_bypass_audit",
+      "command": "zsh scripts/anti_bypass_audit.sh",
+      "start_time": "2026-07-25T16:37:24Z",
+      "finish_time": "2026-07-25T16:37:24Z",
+      "duration_seconds": 0,
+      "exit_code": 0,
+      "status": "PASS",
+      "pass_count": 1,
+      "fail_count": 0,
+      "architecture": "arm64",
+      "log_file": "evidence/1d80a1c0ba8afefe0a962c77f6b254e6ca2869d9/anti_bypass_audit/anti_bypass_audit.log",
+      "evidence_hash": "3cb5019704c2fc8613ba3a1ba8524e4b01ac1a58f998888bbe084cd205749061"
+    }
+  ]
+}

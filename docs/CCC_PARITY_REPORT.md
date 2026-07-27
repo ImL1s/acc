@@ -19,7 +19,7 @@
 | `GATE-03` | c-testsuite (Stage A) | `zsh harness/run_ctestsuite.sh` | **PASS** | 210 / 220 | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/ctestsuite/ctestsuite.log` | 95.45% pass rate (210 PASS / 10 FAIL, 121s) |
 | `GATE-04` | Multiarch 4-ISA | `bash harness/run_multiarch_4isa.sh` | **PASS** | 400 / 400 | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/multiarch_4isa/multiarch_4isa.log` | 100% PASS across all 4 ISAs (aarch64 100/100, x86_64 100/100, i686 100/100, riscv64 100/100; 1002s) |
 | `GATE-05` | Anti-Bypass Audit | `zsh scripts/anti_bypass_audit.sh` | **PASS** | 1 / 1 | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/anti_bypass_audit/anti_bypass_audit.log` | 0 clean-room or bypass violations (0s) |
-| `GATE-06` | Mutation Check | `zsh harness/mutation_check.sh` | **PASS** | 1 / 1 | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/mutation_check/mutation_check.log` | Dynamic string stdout verified (1s) |
+| `GATE-06` | Mutation Check | `zsh harness/run_mutation.sh` | **PASS** | 1 / 1 | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/mutation_check/mutation_check.log` | Dynamic string stdout verified (1s) |
 | `GATE-07` | Linux 6.9 Kernel Boot | `bash scripts/kernel_boot.sh` | **UNVERIFIED** | - | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/kernel_boot/kernel_boot.log` | Deferred to M1/M2 phase |
 | `GATE-08` | SQLite testfixture | `harness/real_projects/sqlite_test.sh` | **UNVERIFIED** | - | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/sqlite/sqlite.log` | Deferred to M2 phase |
 | `GATE-09` | Redis 7.2.5 RESP | `harness/real_projects/redis_test.sh` | **UNVERIFIED** | - | `evidence/bd92ef84efde231b5f8b8973022f630619861bec/redis/redis.log` | Deferred to M2 phase |

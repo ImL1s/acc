@@ -84,10 +84,10 @@ src/
   codegen_x86_64.rs x86_64 code generator (System V ABI & Darwin)
 
 harness/
-  run_oracle.sh / run_ctestsuite.sh / run_multiarch.sh
-  mutation_check.sh / scripts/anti_bypass_audit.sh
+  run_oracle.sh / run_ctestsuite.sh / run_multiarch.sh / run_multiarch_4isa.sh
+  run_mutation.sh / mutation_check.sh / scripts/anti_bypass_audit.sh
+  run_ccc_parity.sh / progress.md
   docker/           Linux kernel CC wrapper & Docker build setup
-  progress.md       Gate verification ledger & progress tracker
 ```
 
 ---

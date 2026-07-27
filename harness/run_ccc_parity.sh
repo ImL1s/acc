@@ -23,7 +23,7 @@ if [[ "$CLEAN" -eq 1 ]]; then
   rm -f scratch/*.log scratch/*.txt || true
 fi
 
-echo "== Building ggcc (release profile) =="
+echo "== Building acc (release profile) =="
 cargo build --release
 if [[ -f target/release/acc ]]; then
   cp -f target/release/acc target/release/ggcc
@@ -49,7 +49,7 @@ GATES=(
   "inrepo_oracles|zsh harness/run_oracle.sh"
   "ctestsuite|zsh harness/run_ctestsuite.sh"
   "multiarch_4isa|bash harness/run_multiarch_4isa.sh"
-  "mutation_check|zsh harness/mutation_check.sh"
+  "mutation_check|zsh harness/run_mutation.sh"
   "anti_bypass_audit|zsh scripts/anti_bypass_audit.sh"
 )
 

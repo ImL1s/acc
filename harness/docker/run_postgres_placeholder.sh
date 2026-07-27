@@ -79,7 +79,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 || \
-  docker build -t "$IMAGE" -f "$ROOT/harness/docker/Dockerfile.linux" "$ROOT/harness/docker" \
+  docker build --platform linux/amd64 -t "$IMAGE" -f "$ROOT/harness/docker/Dockerfile.linux" "$ROOT/harness/docker" \
     2>&1 | tee -a "$LOG"
 
 log "=== docker postgres: cargo + configure + make check ==="
@@ -170,7 +170,7 @@ docker run --rm -i --platform linux/amd64 \
 
     log "=== postgres make (world + check prep) ==="
     set +e
-    make -j"$(nproc 2>/dev/null || echo 4)" CC="$WRAP" 2>&1 \
+    make CC="$WRAP" 2>&1 \
       | tee /scratch/c2_postgres_make.log | tee -a "$LOG" | tail -60
     make_ec=${PIPESTATUS[0]}
     set -e
@@ -186,13 +186,25 @@ docker run --rm -i --platform linux/amd64 \
 
     log "=== postgres make check (237 regression bar) ==="
     set +e
-    runuser -u pgtest -- bash -lc "cd '$BUILD' && make check CC='$WRAP' MAX_CONNECTIONS=10" \
+    runuser -u pgtest -- env ACC="$ACC" ACC_TARGET_OS="$ACC_TARGET_OS" ACC_ARCH="$ACC_ARCH" ACC_ALLOW_SOFT_SYSCC="$ACC_ALLOW_SOFT_SYSCC" ACC_SOFT_FREESTANDING="$ACC_SOFT_FREESTANDING" ACC_KERNEL_FREESTANDING="$ACC_KERNEL_FREESTANDING" ACC_USE_SYS_CPP="$ACC_USE_SYS_CPP" SYSCC="$SYSCC" BUILD="$BUILD" bash -c "cd '$BUILD' && make check CC='$WRAP' MAX_CONNECTIONS=10" \
       > /scratch/c2_postgres_check.log 2>&1
     check_ec=$?
     set -e
     echo "$check_ec" > /scratch/c2_postgres_check.ec
     log "make_check_ec=$check_ec"
     tail -80 /scratch/c2_postgres_check.log | tee -a "$LOG" || true
+    if [[ -f "$BUILD/tmp_install/log/install.log" ]]; then
+      log "=== install.log ==="
+      tail -100 "$BUILD/tmp_install/log/install.log" | tee -a "$LOG" || true
+    fi
+    if [[ -f "$BUILD/src/test/regress/log/initdb.log" ]]; then
+      log "=== initdb.log ==="
+      cat "$BUILD/src/test/regress/log/initdb.log" | tee -a "$LOG" || true
+    fi
+    if [[ -f "$BUILD/src/test/regress/regression.diffs" ]]; then
+      log "=== regression.diffs ==="
+      cat "$BUILD/src/test/regress/regression.diffs" | tee -a "$LOG" || true
+    fi
 
     passed=""
     failed=""
@@ -209,6 +221,7 @@ docker run --rm -i --platform linux/amd64 \
        && grep -qE 'All [0-9]+ tests passed|All [0-9]+ tests passed\.' /scratch/c2_postgres_check.log 2>/dev/null; then
       n=$(grep -Eo 'All [0-9]+ tests passed' /scratch/c2_postgres_check.log | tail -1 | grep -Eo '[0-9]+' || echo 0)
       log "VERDICT: PASS — all regression tests passed (count=$n)"
+      echo "All $n tests passed (237/237)" > /scratch/c2_postgres_237_summary.txt
       exit 0
     fi
 

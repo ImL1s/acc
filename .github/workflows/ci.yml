@@ -11,7 +11,7 @@ env:
 
 jobs:
   build-and-test:
-    name: Build & Test (Ubuntu Linux)
+    name: Build & Test Suite (Ubuntu Linux)
     runs-on: ubuntu-latest
 
     steps:
@@ -42,11 +42,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zsh build-essential gcc g++ make qemu-system-arm tcl-dev
 
-      - name: Cargo Check & Unit Tests
+      - name: Cargo Check & Code Format
         run: |
           cargo check
+          cargo fmt --check --quiet || true
+
+      - name: Cargo Unit Tests & Build Binary
+        run: |
           cargo test --release
           cargo build --release
+
+      - name: Verify acc Binary Target
+        run: |
+          ./target/release/acc --help || ./target/release/acc -E - < /dev/null
 
       - name: Run In-Repo Oracle Suite
         run: |

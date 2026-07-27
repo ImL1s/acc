@@ -9,7 +9,10 @@ SCRATCH="${SCRATCH:-$ROOT/scratch}"
 mkdir -p "$SCRATCH"
 LOG="$SCRATCH/c3_4isa_hello.log"
 : >"$LOG"
-BIN="${GGCC_BIN:-$ROOT/target/release/ggcc}"
+BIN="${ACC_BIN:-${GGCC_BIN:-$ROOT/target/release/acc}}"
+if [[ ! -x "$BIN" && -x "$ROOT/target/release/ggcc" ]]; then
+  BIN="$ROOT/target/release/ggcc"
+fi
 HELLO=oracles/hello/main.c
 
 log() { echo "$*" | tee -a "$LOG"; }

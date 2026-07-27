@@ -17,7 +17,7 @@
 #   BUSYBOX_VER   default 1.36.1
 #   BUSYBOX_SRC   override unpacked busybox tree
 #   KERNEL_SRC    optional; if usr/gen_init_cpio exists, prefer it
-#   GGCC_DOCKER_IMAGE  default ggcc-linux
+#   ACC_DOCKER_IMAGE / GGCC_DOCKER_IMAGE  default acc-linux
 #   FORCE_DOCKER  1 = always build inside Docker
 #   JOBS          parallel make jobs
 set -euo pipefail
@@ -25,7 +25,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUSYBOX_VER="${BUSYBOX_VER:-1.36.1}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
-IMAGE="${GGCC_DOCKER_IMAGE:-ggcc-linux}"
+IMAGE="${ACC_DOCKER_IMAGE:-${GGCC_DOCKER_IMAGE:-acc-linux}}"
 FORCE_DOCKER="${FORCE_DOCKER:-0}"
 
 # Arch selection

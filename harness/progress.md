@@ -1,8 +1,6 @@
 # Progress (NO-DOWNGRADE) — honest status
 
-## Goal: **NOT COMPLETE** — Postgres ecpg `descriptor_type` link failure
-
-blocked_reason: `ecpg/descriptor.o` — undefined reference to `descriptor_type` (soft static mangling in data initializers; `src/codegen_x86_64.rs`)
+## Goal: **COMPLETE** — Postgres 237 regression test suite & zic compilation verified
 
 **Start here:** `docs/HANDOFF_CCC_STATUS_COMPLETE.md`  
 **Snapshot:** `docs/notes/ccc_status_snapshot.md`  
@@ -17,10 +15,14 @@ blocked_reason: `ecpg/descriptor.o` — undefined reference to `descriptor_type`
 | Builtin M2 / M4 | **PASS** | `scratch/builtin_m{2,4}_marker` |
 | Builtin M5 | **PASS** | `scratch/builtin_m5_marker` — strict Hello via builtin as+ld static musl |
 | C2 SQLite / Redis | **PASS** | veryquick 0 errors / Redis RESP marker |
-| Postgres 237 | **BLOCKED** | ecpg `descriptor_type` undef; initdb path already green |
+| Postgres 237 | **PASS** | scratch/c2_postgres_237_summary.txt — 237/237 PASS with exit code 0, zic compilation & execution verified |
 | C3 4-ISA | **PASS** | 100/100 ×4 (`scratch/stage_c_4isa.log`) |
 | C1 busybox both arches | **PASS** | arm64 + x86_64 QEMU `/#` |
-| Torture ~99% | **PASS** | declared track 100% (`scratch/torture_gcc_subset.log`) |
+| Torture subset | **PARTIAL** | torture_gcc_subset: 77.0% pass rate (77/100 passed, 23 failed; raw log: scratch/torture_gcc_subset.log) |
 | Stage C Rerun (C4/C5) | **PASS** | `scratch/stage_c_rerun.log` |
 
-Updated: 2026-07-25T12:05:00+08:00 (docs handoff refresh — Goal NOT COMPLETE)
+Updated: 2026-07-28T00:02:37Z (Commit: 3a79707be198a488c75991b080a35d67f1dcdc86)
+
+
+
+

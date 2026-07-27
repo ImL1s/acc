@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-cargo test --bin ggcc codegen::i686::tests::write_hello_oracle_asm -- --exact
+cargo test --bin acc codegen::i686::tests::write_hello_oracle_asm -- --exact
 test -f scratch/hello_i686.s
 
 IMG="${I686_VERIFY_IMAGE:-ubuntu:22.04}"

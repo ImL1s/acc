@@ -5,13 +5,70 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-BIN="${GGCC_BIN:-$ROOT/target/release/ggcc}"
+BIN="${ACC_BIN:-${GGCC_BIN:-$ROOT/target/release/acc}}"
+if [[ ! -x "$BIN" && -x "$ROOT/target/release/ggcc" ]]; then
+  BIN="$ROOT/target/release/ggcc"
+fi
 SCRATCH="${SCRATCH:-$ROOT/scratch}"
-LOG="$SCRATCH/stage_c_4isa.log"
+LOG="${MULTIARCH_LOG:-$SCRATCH/stage_c_4isa.log}"
+LOCKFILE="${MULTIARCH_LOCK:-$SCRATCH/run_multiarch_4isa.lock}"
 SUITE=third_party/c-testsuite/tests/single-exec
 WORKDIR="$SCRATCH/stage_a_4isa_work"
 mkdir -p "$SCRATCH" "$WORKDIR"
+
+# File locking helpers for atomic log writing
+acquire_lock() {
+  local retries=0
+  while ! mkdir "$LOCKFILE" 2>/dev/null; do
+    retries=$((retries + 1))
+    if [[ $retries -gt 500 ]]; then
+      rmdir "$LOCKFILE" 2>/dev/null || true
+      retries=0
+    fi
+    sleep 0.01
+  done
+}
+
+release_lock() {
+  rmdir "$LOCKFILE" 2>/dev/null || true
+}
+
+trap 'release_lock' EXIT INT TERM
+
+# Clear stale lock if any and initialize log file atomically under lock
+release_lock
+acquire_lock
 : >"$LOG"
+release_lock
+
+log_line() {
+  local line="$1"
+  echo "$line"
+  acquire_lock
+  echo "$line" >> "$LOG"
+  release_lock
+}
+
+log() {
+  log_line "$*"
+}
+
+log_stream() {
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    log_line "$line"
+  done
+}
+
+count_isa() {
+  local arch="$1" kind="$2"
+  # grep exits 1 when no matches; must not trip set -euo pipefail before riscv64 batch.
+  { grep "^${kind} ${arch} " "$LOG" || true; } | awk '{print $3}' | sort -u | wc -l | tr -d ' '
+}
+
+count_fail_isa() {
+  local arch="$1"
+  { grep -E "^(FAIL|TIMEOUT) ${arch} " "$LOG" || true; } | awk '{print $3}' | sort -u | wc -l | tr -d ' '
+}
 
 # Per-test run timeout (seconds). riscv64 00092 is known to hang under qemu.
 RUN_TIMEOUT="${RUN_TIMEOUT:-30}"
@@ -26,8 +83,6 @@ if [[ -n "${IDS_OVERRIDE:-}" ]]; then
 fi
 ID_COUNT=${#IDS[@]}
 MIN_PASS=$(( (ID_COUNT * 95 + 99) / 100 ))
-
-log() { echo "$*" | tee -a "$LOG"; }
 
 HOST_OS=linux
 [[ "$(uname)" == Darwin ]] && HOST_OS=darwin
@@ -55,7 +110,7 @@ run_host() {
 
 if [[ ! -x "$BIN" ]]; then
   log "building release ggcc…"
-  cargo build --release 2>&1 | tee -a "$LOG" | tail -8
+  cargo build --release 2>&1 | log_stream | tail -8
 fi
 
 PASS_aarch64=0 FAIL_aarch64=0 TIMEOUT_aarch64=0
@@ -71,8 +126,6 @@ for id in "${IDS[@]}"; do
   src="$SUITE/${id}.c"
   if [[ ! -f "$src" ]]; then
     log "MISS source $id"
-    FAIL_aarch64=$((FAIL_aarch64+1))
-    FAIL_x86_64=$((FAIL_x86_64+1))
     continue
   fi
 
@@ -82,14 +135,14 @@ for id in "${IDS[@]}"; do
     rc=0
     run_host "$RUN_TIMEOUT" "$out" >/dev/null 2>&1 || rc=$?
     if [[ $rc -eq 0 ]]; then
-      log "PASS aarch64 $id"; PASS_aarch64=$((PASS_aarch64+1))
+      log "PASS aarch64 $id"
     elif [[ $rc -eq 124 ]]; then
-      log "TIMEOUT aarch64 $id"; TIMEOUT_aarch64=$((TIMEOUT_aarch64+1)); FAIL_aarch64=$((FAIL_aarch64+1))
+      log "TIMEOUT aarch64 $id"
     else
-      log "FAIL aarch64 $id"; FAIL_aarch64=$((FAIL_aarch64+1))
+      log "FAIL aarch64 $id"
     fi
   else
-    log "FAIL aarch64 $id (compile)"; FAIL_aarch64=$((FAIL_aarch64+1))
+    log "FAIL aarch64 $id (compile)"
   fi
 
   # x86_64 — host compile+run (Rosetta on arm64 macOS)
@@ -108,14 +161,14 @@ for id in "${IDS[@]}"; do
       run64=1
     fi
     if [[ $run64 -eq 1 && $rc -eq 0 ]]; then
-      log "PASS x86_64 $id"; PASS_x86_64=$((PASS_x86_64+1))
+      log "PASS x86_64 $id"
     elif [[ $rc -eq 124 ]]; then
-      log "TIMEOUT x86_64 $id"; TIMEOUT_x86_64=$((TIMEOUT_x86_64+1)); FAIL_x86_64=$((FAIL_x86_64+1))
+      log "TIMEOUT x86_64 $id"
     else
-      log "FAIL x86_64 $id"; FAIL_x86_64=$((FAIL_x86_64+1))
+      log "FAIL x86_64 $id"
     fi
   else
-    log "FAIL x86_64 $id (compile)"; FAIL_x86_64=$((FAIL_x86_64+1))
+    log "FAIL x86_64 $id (compile)"
   fi
 
   # cross-asm for docker+qemu link/run
@@ -155,7 +208,7 @@ run_docker_isa() {
       -v "$WORKDIR:/work" -w /work \
       -e RUN_TIMEOUT="$to" \
       -e CHUNK_START="$start" -e CHUNK_END="$end" \
-      "$image" bash -s <<EOF 2>&1 | tee -a "$LOG"
+      "$image" bash -s <<EOF 2>&1 | log_stream
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
@@ -192,23 +245,22 @@ EOF
   done
 }
 
-count_isa() {
-  local arch="$1" kind="$2"
-  # grep exits 1 when no matches; must not trip set -euo pipefail before riscv64 batch.
-  { grep "^${kind} ${arch} " "$LOG" || true; } | awk '{print $3}' | sort -u | wc -l | tr -d ' '
-}
-
-count_fail_isa() {
-  local arch="$1"
-  { grep -E "^(FAIL|TIMEOUT) ${arch} " "$LOG" || true; } | awk '{print $3}' | sort -u | wc -l | tr -d ' '
-}
-
 run_docker_isa i686 ubuntu:22.04 "gcc-multilib qemu-user coreutils" "$RUN_TIMEOUT_I686"
+run_docker_isa riscv64 ubuntu:24.04 "gcc-riscv64-linux-gnu qemu-user-static coreutils" "$RUN_TIMEOUT_RISCV"
+
+# Unified count_isa aggregation for ALL 4 ISAs:
+PASS_aarch64=$(count_isa aarch64 PASS)
+FAIL_aarch64=$(count_fail_isa aarch64)
+TIMEOUT_aarch64=$(count_isa aarch64 TIMEOUT)
+
+PASS_x86_64=$(count_isa x86_64 PASS)
+FAIL_x86_64=$(count_fail_isa x86_64)
+TIMEOUT_x86_64=$(count_isa x86_64 TIMEOUT)
+
 PASS_i686=$(count_isa i686 PASS)
 FAIL_i686=$(count_fail_isa i686)
 TIMEOUT_i686=$(count_isa i686 TIMEOUT)
 
-run_docker_isa riscv64 ubuntu:24.04 "gcc-riscv64-linux-gnu qemu-user-static coreutils" "$RUN_TIMEOUT_RISCV"
 PASS_riscv64=$(count_isa riscv64 PASS)
 FAIL_riscv64=$(count_fail_isa riscv64)
 TIMEOUT_riscv64=$(count_isa riscv64 TIMEOUT)

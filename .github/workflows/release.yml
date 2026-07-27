@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    name: Build Release Binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: acc-x86_64-linux.tar.gz
+            binary_name: acc
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: acc-aarch64-linux.tar.gz
+            binary_name: acc
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: acc-x86_64-macos.tar.gz
+            binary_name: acc
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: acc-aarch64-macos.tar.gz
+            binary_name: acc
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Build Binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package Binary Artifact
+        run: |
+          mkdir -p bin_dist
+          cp target/${{ matrix.target }}/release/acc bin_dist/
+          cp README.md LICENSE bin_dist/ 2>/dev/null || true
+          tar -czvf ${{ matrix.artifact_name }} -C bin_dist .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+
+  github-release:
+    name: Create GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            acc-x86_64-linux.tar.gz/*
+            acc-aarch64-linux.tar.gz/*
+            acc-x86_64-macos.tar.gz/*
+            acc-aarch64-macos.tar.gz/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
