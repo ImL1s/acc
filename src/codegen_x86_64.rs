@@ -4938,7 +4938,7 @@ impl Codegen {
                         if dest != 0 {
                             writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                         }
-                        Ok(Type::Int)
+                        Ok(Self::usual_arith_conv(&lty, &rty))
                     }
                     BinOp::BitOr => {
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
@@ -4946,7 +4946,7 @@ impl Codegen {
                         if dest != 0 {
                             writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                         }
-                        Ok(Type::Int)
+                        Ok(Self::usual_arith_conv(&lty, &rty))
                     }
                     BinOp::BitXor => {
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
@@ -4954,7 +4954,7 @@ impl Codegen {
                         if dest != 0 {
                             writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                         }
-                        Ok(Type::Int)
+                        Ok(Self::usual_arith_conv(&lty, &rty))
                     }
                     BinOp::Shl => {
                         let res_ty = Self::usual_arith_conv(&lty, &Type::Int);
