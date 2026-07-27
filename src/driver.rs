@@ -189,8 +189,20 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
         }
     }
 
-    // Pick linker: optional override, else cross tool for riscv64, else `cc`.
+    // Pick linker: optional override, else cross tool for aarch64/riscv64 on x86_64 host, else `cc`.
     let default_linker = match opts.target {
+        Target::Aarch64 if opts.linker.is_none() && cfg!(target_arch = "x86_64") => {
+            if Command::new("aarch64-linux-gnu-gcc")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                "aarch64-linux-gnu-gcc"
+            } else {
+                "cc"
+            }
+        }
         Target::Riscv64 if opts.linker.is_none() => {
             if Command::new("riscv64-linux-gnu-gcc")
                 .arg("--version")
