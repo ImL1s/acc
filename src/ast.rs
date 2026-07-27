@@ -253,3 +253,11 @@ pub enum BinOp {
     /// Comma operator: evaluate left for side effects, result is right.
     Comma,
 }
+
+#[derive(Debug, Clone)]
+pub struct SwitchCaseItem {
+    pub is_default: bool,
+    pub val: Option<i64>,
+    pub lab: String,
+}
+

@@ -258,6 +258,18 @@ pub enum Target {
 }
 
 impl Target {
+    pub fn host() -> Self {
+        if cfg!(target_arch = "x86_64") {
+            Self::X86_64
+        } else if cfg!(target_arch = "i686") {
+            Self::I686
+        } else if cfg!(target_arch = "riscv64") {
+            Self::Riscv64
+        } else {
+            Self::Aarch64
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "aarch64" | "arm64" => Some(Self::Aarch64),
@@ -383,6 +395,7 @@ pub struct Codegen {
     /// Data symbols referenced via adrp/adr (for weak stub emission when DEFINE_PER_CPU
     /// or other macros failed to produce a definition in this TU).
     referenced_data_syms: std::collections::HashSet<String>,
+    sret_off: i64,
 }
 
 /// Kernel/PI linker symbols that must remain undefined in TUs so PROVIDE
@@ -453,6 +466,7 @@ impl Codegen {
             va_fixed_fp: 0,
             cur_section: None,
             referenced_data_syms: std::collections::HashSet::new(),
+            sret_off: 0,
         }
     }
 
@@ -473,6 +487,13 @@ impl Codegen {
             }
         }
         None
+    }
+
+    fn peel_casts(mut e: &Expr) -> &Expr {
+        while let Expr::Cast { expr, .. } = e {
+            e = expr.as_ref();
+        }
+        e
     }
 
     fn contains_local(&self, name: &str) -> bool {
@@ -822,6 +843,22 @@ impl Codegen {
         (n + a - 1) & !(a - 1)
     }
 
+    fn get_layout(&self, name: &str) -> Option<&Layout> {
+        if let Some(lay) = self.layouts.get(name) {
+            if !lay.fields.is_empty() {
+                return Some(lay);
+            }
+        }
+        let base = name.split("__s").next().unwrap_or(name);
+        for (k, v) in &self.layouts {
+            let kbase = k.split("__s").next().unwrap_or(k);
+            if kbase == base && !v.fields.is_empty() {
+                return Some(v);
+            }
+        }
+        self.layouts.get(name)
+    }
+
     fn type_size(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 0,
@@ -836,8 +873,7 @@ impl Codegen {
             Type::Ptr(_) => 8,
             Type::Array(e, n) => self.type_size(e) * n,
             Type::Struct(n) | Type::Union(n) => self
-                .layouts
-                .get(n)
+                .get_layout(n)
                 .map(|l| l.size)
                 .unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).size,
@@ -1027,19 +1063,20 @@ impl Codegen {
             }
             Expr::Call { .. } => {
                 let ty = self.typeof_expr(e, typedefs);
+                let sz = self.type_size(&ty).max(8);
+                let tmp = {
+                    self.stack_size = Self::align_up(self.stack_size + sz, 8);
+                    -self.stack_size
+                };
                 if let Some(nr) = self.small_agg_nregs(&ty) {
-                    let sz = self.type_size(&ty).max(8);
-                    let tmp = {
-                        self.stack_size = Self::align_up(self.stack_size + sz, 8);
-                        -self.stack_size
-                    };
                     self.emit_expr_rval(e, 0, typedefs)?;
                     self.emit_fp_addr(tmp, 9);
                     self.store_small_agg_from_regs(9, nr, 0);
                     self.emit_fp_addr(tmp, reg);
                     Ok(ty)
                 } else {
-                    Err("large aggregate call return not materializable as copy src".into())
+                    self.emit_expr_rval(e, reg, typedefs)?;
+                    Ok(ty)
                 }
             }
             _ => Err("aggregate copy source is not addressable".into()),
@@ -1219,8 +1256,8 @@ impl Codegen {
                 let nested_opt = match &f.ty {
                     Type::AnonStruct(fs) => Some(self.layout_fields(fs, false, false)),
                     Type::AnonUnion(fs) => Some(self.layout_fields(fs, true, false)),
-                    Type::Struct(n) => self.layouts.get(n).cloned(),
-                    Type::Union(n) => self.layouts.get(n).cloned(),
+                    Type::Struct(n) => self.get_layout(n).cloned(),
+                    Type::Union(n) => self.get_layout(n).cloned(),
                     _ => None,
                 };
                 if let Some(nested) = nested_opt {
@@ -1423,7 +1460,7 @@ impl Codegen {
                             self.layouts.insert(name.clone(), lay);
                         }
                         Type::Struct(n) | Type::Union(n) => {
-                            if let Some(l) = self.layouts.get(n).cloned() {
+                            if let Some(l) = self.get_layout(n).cloned() {
                                 self.layouts.insert(name.clone(), l);
                             }
                         }
@@ -2056,8 +2093,11 @@ impl Codegen {
                 }
                 Expr::String(s) => {
                     // char arr[] = "..." is contents; char *p = "..." is pointer
-                    if matches!(g.ty, Type::Array(_, _)) {
-                        self.emit_var_section(g, "rodata");
+                    let unqual_ty = g.ty.unqual();
+                    if let Type::Array(elem, _) = unqual_ty {
+                        let is_const = g.ty.is_const() || elem.is_const();
+                        let sec = if is_const { "rodata" } else { "data" };
+                        self.emit_var_section(g, sec);
                         writeln!(self.out, "\t.p2align\t3").unwrap();
                         writeln!(self.out, "{sym}:").unwrap();
                         write!(self.out, "\t.asciz\t\"").unwrap();
@@ -2253,7 +2293,7 @@ impl Codegen {
                 }
             }
             Type::Struct(name) | Type::Union(name) => {
-                if let Some(lay) = self.layouts.get(name).cloned() {
+                if let Some(lay) = self.get_layout(name).cloned() {
                     self.emit_struct_init_data(&lay, fields_in)?;
                 } else {
                     // Unknown layout: emit zeros for a reasonable blob
@@ -2652,21 +2692,24 @@ impl Codegen {
                 writeln!(self.out, "\t.zero\t{}", self.type_size(ty).max(1)).unwrap();
             }
             Expr::String(s) => {
-                // char arr[N] = "lit" → embed bytes (NOT a pointer). Critical for
-                // SQLite aXformType.zName[7] and similar; emitting .quad caused
+                // char arr[N] = "lit" or struct/anon struct = "lit" → embed bytes (NOT a pointer).
+                // Critical for 00216.c struct/array initializers; emitting .quad caused
                 // unaligned ARM64_RELOC_UNSIGNED and ld "pointer not aligned".
-                if let Type::Array(elem, n) = ty {
-                    let is_byte_elem = matches!(elem.as_ref(), Type::Char | Type::SChar)
-                        || self.type_size(elem) == 1;
-                    if is_byte_elem {
-                        let nbytes = (*n as usize).max(0);
-                        let bytes = s.as_bytes();
-                        for i in 0..nbytes {
-                            let b = bytes.get(i).copied().unwrap_or(0);
-                            writeln!(self.out, "\t.byte\t{b}").unwrap();
-                        }
-                        return Ok(());
+                if matches!(
+                    ty,
+                    Type::Array(_, _)
+                        | Type::Struct(_)
+                        | Type::Union(_)
+                        | Type::AnonStruct(_)
+                        | Type::AnonUnion(_)
+                ) {
+                    let sz = self.type_size(ty).max(0) as usize;
+                    let bytes = s.as_bytes();
+                    for i in 0..sz {
+                        let b = bytes.get(i).copied().unwrap_or(0);
+                        writeln!(self.out, "\t.byte\t{b}").unwrap();
                     }
+                    return Ok(());
                 }
                 // char *p = "literal" → pointer to interned string
                 let id = self.intern_str(s);
@@ -3012,6 +3055,19 @@ impl Codegen {
         // (same pattern as x86_64 %rbx). Without this, `n += f()` stores through
         // the callee's clobbered x19 and the add is lost (SQLite MakeRecord nHdr).
         self.stack_size = 8;
+        self.sret_off = 0;
+
+        let ret_sz = self.type_size(&self.func_ret);
+        let is_large_ret = matches!(
+            self.func_ret,
+            Type::Struct(_) | Type::Union(_) | Type::AnonStruct(_) | Type::AnonUnion(_)
+        ) && ret_sz > 16;
+
+        if is_large_ret {
+            self.stack_size += 8;
+            self.sret_off = -self.stack_size;
+        }
+
         self.break_stack.clear();
         self.continue_stack.clear();
         self.goto_labels.clear();
@@ -3053,6 +3109,10 @@ impl Codegen {
         // Reset and emit for real (keep slot for saved x19)
         self.clear_locals();
         self.stack_size = 8;
+        if is_large_ret {
+            self.stack_size += 8;
+            self.sret_off = -self.stack_size;
+        }
 
         // Count fixed GPRs / FPRs consumed (small aggregates take 1–2 regs).
         let mut fixed_gp = 0usize;
@@ -3137,6 +3197,9 @@ impl Codegen {
         }
         // Preserve caller's x19 (callee-saved) before any body use.
         writeln!(self.out, "\tstr\tx19, [x29, #-8]").unwrap();
+        if is_large_ret {
+            writeln!(self.out, "\tstr\tx8, [x29, #{}]", self.sret_off).unwrap();
+        }
 
         // Allocate named params.
         // reg: 0..7 = GPR, 128+fpr = float, 255 = incoming stack slot.
@@ -3917,7 +3980,18 @@ impl Codegen {
             Stmt::Return(e) => {
                 if let Some(ex) = e {
                     let rty = self.func_ret.clone();
-                    if let Some(nr) = self.small_agg_nregs(&rty) {
+                    let rsz = self.type_size(&rty);
+                    if Self::is_struct_or_union_ty(&rty) && rsz > 16 && self.sret_off != 0 {
+                        if self.emit_agg_copy_src(ex, 0, typedefs).is_err() {
+                            let _ = self.emit_lvalue_addr(ex, 0, typedefs);
+                        }
+                        writeln!(self.out, "\tldr\tx1, [x29, #{}]", self.sret_off).unwrap();
+                        writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
+                        writeln!(self.out, "\tmov\tx0, x1").unwrap();
+                        writeln!(self.out, "\tldr\tx1, [sp], #16").unwrap();
+                        self.emit_imm(rsz, 2);
+                        writeln!(self.out, "\tbl\t{}", self.c_sym("memcpy")).unwrap();
+                    } else if let Some(nr) = self.small_agg_nregs(&rty) {
                         // AAPCS64: composite ≤16 bytes in x0[, x1].
                         if self.emit_lvalue_addr(ex, 9, typedefs).is_ok() {
                             self.load_small_agg_to_regs(9, nr, 0);
@@ -4072,21 +4146,23 @@ impl Codegen {
                 let saved_cases = std::mem::take(&mut self.pending_case_labs);
                 self.emit_expr_rval(cond, 0, typedefs)?;
                 writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
-                let mut cases: Vec<(Option<i64>, String)> = Vec::new();
+                let mut cases: Vec<SwitchCaseItem> = Vec::new();
                 self.collect_switch_cases(body, &mut cases);
                 self.pending_case_labs.clear();
                 let mut has_default = false;
                 let mut default_lab = l_default.clone();
-                for (val, lab) in &cases {
-                    if let Some(v) = val {
-                        self.pending_case_labs.push_back(lab.clone());
-                        writeln!(self.out, "\tldr\tx0, [sp]").unwrap();
-                        self.emit_imm(*v, 1);
-                        writeln!(self.out, "\tcmp\tx0, x1").unwrap();
-                        self.emit_bcond_long("eq", &lab);
-                    } else {
+                for item in &cases {
+                    if item.is_default {
                         has_default = true;
-                        default_lab = lab.clone();
+                        default_lab = item.lab.clone();
+                    } else {
+                        self.pending_case_labs.push_back(item.lab.clone());
+                        if let Some(v) = item.val {
+                            writeln!(self.out, "\tldr\tx0, [sp]").unwrap();
+                            self.emit_imm(v, 1);
+                            writeln!(self.out, "\tcmp\tx0, x1").unwrap();
+                            self.emit_bcond_long("eq", &item.lab);
+                        }
                     }
                 }
                 if has_default {
@@ -4102,9 +4178,9 @@ impl Codegen {
                 }
                 // Also define any case label that was referenced in the dispatch
                 // but never written as a definition (collect/emit walk mismatch).
-                for (val, lab) in &cases {
-                    if val.is_some() && !self.out.contains(&format!("{lab}:")) {
-                        writeln!(self.out, "{lab}:").unwrap();
+                for item in &cases {
+                    if !item.is_default && !self.out.contains(&format!("{}:", item.lab)) {
+                        writeln!(self.out, "{}:", item.lab).unwrap();
                     }
                 }
                 if has_default && !self.out.contains(&format!("{default_lab}:")) {
@@ -4125,7 +4201,7 @@ impl Codegen {
         }
     }
 
-    fn collect_switch_cases(&mut self, st: &Stmt, out: &mut Vec<(Option<i64>, String)>) {
+    fn collect_switch_cases(&mut self, st: &Stmt, out: &mut Vec<SwitchCaseItem>) {
         match st {
             Stmt::Block(ss) => {
                 for s in ss {
@@ -4138,12 +4214,12 @@ impl Codegen {
                 // Fold full constant expressions: `(6)|((1)<<4)` (Lua ttypetag)
                 // and enum constants (TK_IF, etc.) registered in const_globals.
                 let v = self.const_i64_env(value);
-                out.push((v, lab));
+                out.push(SwitchCaseItem { is_default: false, val: v, lab });
                 self.collect_switch_cases(body, out);
             }
             Stmt::Default(body) => {
                 let lab = self.lab("swdef");
-                out.push((None, lab));
+                out.push(SwitchCaseItem { is_default: true, val: None, lab });
                 self.collect_switch_cases(body, out);
             }
             Stmt::Label(_, inner) => self.collect_switch_cases(inner, out),
@@ -4487,13 +4563,26 @@ impl Codegen {
                 let start = base_off;
                 for i in 0..count {
                     let eoff = start + (i as i64) * esz;
-                    if let Some((_, e)) = fields_in.get(i) {
-                        // Nested brace init for element: recurse with element type.
-                        // Critical for `struct S a[] = { {ptr, 1, 2, 3}, … }` —
-                        // bare emit_expr_rval(InitList) used to treat the list as
-                        // char[64] (.byte ints) and store only an 8-byte pointer.
+                    if let Some((_, e_raw)) = fields_in.get(i) {
+                        let e = Self::peel_casts(e_raw);
                         if let Expr::InitList { fields } = e {
-                            self.emit_local_init_list(eoff, elem, fields, typedefs)?;
+                            self.emit_local_init_list(eoff, elem, fields.as_slice(), typedefs)?;
+                        } else if let Expr::String(s) = e {
+                            if matches!(elem.as_ref(), Type::Char | Type::UChar) || matches!(ty, Type::Array(_, _)) {
+                                let total_sz = self.type_size(elem) as usize * count;
+                                let bytes = s.as_bytes();
+                                for b_idx in 0..total_sz {
+                                    let b = bytes.get(b_idx).copied().unwrap_or(0);
+                                    let off = start + b_idx as i64;
+                                    writeln!(self.out, "\tmov\tw0, #{b}").unwrap();
+                                    self.emit_fp_addr(off, 9);
+                                    writeln!(self.out, "\tstrb\tw0, [x9]").unwrap();
+                                }
+                                break;
+                            } else {
+                                self.emit_expr_rval(e_raw, 0, typedefs)?;
+                                self.store_to_offset(eoff, elem, 0);
+                            }
                         } else if self.type_size(elem) > 8
                             && matches!(
                                 elem.as_ref(),
@@ -4505,18 +4594,18 @@ impl Codegen {
                             )
                         {
                             // Aggregate rvalue (e.g. other local struct): memcpy.
-                            if self.emit_lvalue_addr(e, 1, typedefs).is_ok() {
+                            if self.emit_lvalue_addr(e_raw, 1, typedefs).is_ok() {
                                 writeln!(self.out, "\tstr\tx1, [sp, #-16]!").unwrap();
                                 self.emit_fp_addr(eoff, 0);
                                 writeln!(self.out, "\tldr\tx1, [sp], #16").unwrap();
                                 self.emit_imm(self.type_size(elem), 2);
                                 writeln!(self.out, "\tbl\t{}", self.c_sym("memcpy")).unwrap();
                             } else {
-                                self.emit_expr_rval(e, 0, typedefs)?;
+                                self.emit_expr_rval(e_raw, 0, typedefs)?;
                                 self.store_to_offset(eoff, elem, 0);
                             }
                         } else {
-                            self.emit_expr_rval(e, 0, typedefs)?;
+                            self.emit_expr_rval(e_raw, 0, typedefs)?;
                             self.store_to_offset(eoff, elem, 0);
                         }
                     }
@@ -4525,7 +4614,7 @@ impl Codegen {
             Type::Struct(name) | Type::Union(name) => {
                 // Soft: incomplete/forward types (e.g. pin_cookie) may lack layout
                 // mid-TU — skip field stores rather than abort the whole kernel TU.
-                let Some(lay) = self.layouts.get(name).cloned() else {
+                let Some(lay) = self.get_layout(name).cloned() else {
                     return Ok(());
                 };
                 self.emit_local_struct_fields(base_off, &lay, fields_in, typedefs)?;
@@ -4594,20 +4683,36 @@ impl Codegen {
                     None
                 }
             };
-            if let Some(e) = e {
-                if let Expr::InitList { fields } = e {
+            if let Some(e_raw) = e {
+                let e_peeled = Self::peel_casts(e_raw);
+                if let Expr::InitList { fields } = e_peeled {
                     // Nested struct/array field: recurse (not char[64] blob path).
                     self.emit_local_init_list(
                         base_off + place.offset,
                         &place.ty,
-                        fields,
+                        fields.as_slice(),
                         typedefs,
                     )?;
+                } else if let Expr::String(s) = e_peeled {
+                    if matches!(place.ty, Type::Array(_, _)) {
+                        let total_sz = self.type_size(&place.ty) as usize;
+                        let bytes = s.as_bytes();
+                        for b_idx in 0..total_sz {
+                            let b = bytes.get(b_idx).copied().unwrap_or(0);
+                            let off = base_off + place.offset + b_idx as i64;
+                            writeln!(self.out, "\tmov\tw0, #{b}").unwrap();
+                            self.emit_fp_addr(off, 9);
+                            writeln!(self.out, "\tstrb\tw0, [x9]").unwrap();
+                        }
+                    } else {
+                        self.emit_expr_rval(e_raw, 0, typedefs)?;
+                        self.store_to_offset(base_off + place.offset, &place.ty, 0);
+                    }
                 } else if let Some((bo, bw)) = place.bit {
-                    self.emit_expr_rval(e, 0, typedefs)?;
+                    self.emit_expr_rval(e_raw, 0, typedefs)?;
                     self.store_bitfield(base_off + place.offset, &place.ty, bo, bw, 0)?;
                 } else {
-                    self.emit_expr_rval(e, 0, typedefs)?;
+                    self.emit_expr_rval(e_raw, 0, typedefs)?;
                     self.store_to_offset(base_off + place.offset, &place.ty, 0);
                 }
             }
@@ -4717,8 +4822,24 @@ impl Codegen {
                 // clobber the array/pointer address if left live across the index.
                 let bty = self.emit_expr_rval(base, 9, typedefs)?;
                 writeln!(self.out, "\tstr\tx9, [sp, #-16]!").unwrap();
-                self.emit_expr_rval(index, 10, typedefs)?;
+                let ity = self.emit_expr_rval(index, 10, typedefs)?;
                 writeln!(self.out, "\tldr\tx9, [sp], #16").unwrap();
+                match ity.unqual() {
+                    Type::Int => {
+                        writeln!(self.out, "\tsxtw\tx10, w10").unwrap();
+                    }
+                    Type::Short => {
+                        writeln!(self.out, "\tsxth\tx10, w10").unwrap();
+                    }
+                    Type::Char | Type::SChar => {
+                        writeln!(self.out, "\tsxtb\tx10, w10").unwrap();
+                    }
+                    _ => {
+                        if self.type_size(&ity) <= 4 && !matches!(ity.unqual(), Type::UInt | Type::ULong | Type::Ptr(_)) {
+                            writeln!(self.out, "\tsxtw\tx10, w10").unwrap();
+                        }
+                    }
+                }
                 let (elem, decayed) = match bty {
                     Type::Array(e, _) => (*e.clone(), true),
                     Type::Ptr(e) => (*e.clone(), true),
@@ -4762,7 +4883,10 @@ impl Codegen {
                         other => other,
                     }
                 } else {
-                    self.emit_lvalue_addr(base, reg, typedefs)?
+                    match self.emit_lvalue_addr(base, reg, typedefs) {
+                        Ok(ty) => ty,
+                        Err(_) => self.emit_expr_rval(base, reg, typedefs)?,
+                    }
                 };
                 let lay = match &base_ty {
                     Type::Struct(n) if n == "__opaque__" => {
@@ -4791,7 +4915,7 @@ impl Codegen {
                             }
                         })
                     }
-                    Type::Struct(n) | Type::Union(n) => self.layouts.get(n).cloned().unwrap_or_else(
+                    Type::Struct(n) | Type::Union(n) => self.get_layout(n).cloned().unwrap_or_else(
                         || {
                             // Soft: named struct without recorded layout (incomplete/soft skip).
                             let mut fields = HashMap::new();
@@ -6690,6 +6814,26 @@ impl Codegen {
                     .map(|f| f.params.iter().map(|(_, t)| t.clone()).collect())
                     .unwrap_or_default();
 
+                let call_ret_ty = self
+                    .funcs
+                    .get(name)
+                    .map(|f| f.ret.clone())
+                    .unwrap_or(Type::Int);
+                let call_ret_sz = self.type_size(&call_ret_ty);
+                let is_large_ret_call = matches!(
+                    call_ret_ty,
+                    Type::Struct(_) | Type::Union(_) | Type::AnonStruct(_) | Type::AnonUnion(_)
+                ) && call_ret_sz > 16;
+
+                let sret_bytes = if is_large_ret_call {
+                    Self::align_up(call_ret_sz, 16)
+                } else {
+                    0
+                };
+                if is_large_ret_call {
+                    writeln!(self.out, "\tsub\tsp, sp, #{sret_bytes}").unwrap();
+                }
+
                 // Our va_list is a char* walking the GP regsave only (x0..x7).
                 // Variadic callees compiled by acc therefore cannot see doubles in d0..d7.
                 // Pass float/double args in GPRs (IEEE bits) for those calls so
@@ -6877,12 +7021,23 @@ impl Codegen {
                         let off = stack_bytes + ((igpr - 1 - r) as i64) * 16;
                         writeln!(self.out, "\tldr\tx{r}, [sp, #{off}]").unwrap();
                     }
+                    if is_large_ret_call {
+                        let off = (igpr as i64) * 16 + stack_bytes;
+                        if off == 0 {
+                            writeln!(self.out, "\tmov\tx8, sp").unwrap();
+                        } else {
+                            writeln!(self.out, "\tadd\tx8, sp, #{off}").unwrap();
+                        }
+                    }
                     writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
                     let total = stack_bytes + (igpr as i64) * 16 + spill;
                     writeln!(self.out, "\tadd\tsp, sp, #{total}").unwrap();
                 } else {
                     if spill > 0 {
                         writeln!(self.out, "\tadd\tsp, sp, #{spill}").unwrap();
+                    }
+                    if is_large_ret_call {
+                        writeln!(self.out, "\tmov\tx8, sp").unwrap();
                     }
                     if self.funcs.contains_key(name)
                         || matches!(
@@ -6916,6 +7071,12 @@ impl Codegen {
                         // Undeclared / cross-TU function: direct bl; linker resolves.
                         writeln!(self.out, "\tbl\t{}", self.c_sym(name)).unwrap();
                     }
+                }
+                if is_large_ret_call {
+                    if dest != 0 {
+                        writeln!(self.out, "\tmov\tx{dest}, x0").unwrap();
+                    }
+                    return Ok(call_ret_ty);
                 }
                 // float return in d0
                 // Undeclared libm (pow/log/ceil/…) must still be Double: without
@@ -7597,11 +7758,8 @@ impl Codegen {
                         return l;
                     }
                 }
-                // Bitwise / shifts: preserve wider integer type (u64 masks in IsNaN).
-                if matches!(
-                    op,
-                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
-                ) {
+                // Bitwise: preserve wider integer type.
+                if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
                     if matches!(l, Type::ULong | Type::Long | Type::Ptr(_)) {
                         return l;
                     }
@@ -7614,6 +7772,16 @@ impl Codegen {
                     if matches!(r, Type::UInt | Type::UShort) {
                         return r;
                     }
+                }
+                // Shift operators: result type is promoted left operand only (C11 6.5.7).
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    if matches!(l, Type::ULong | Type::Long | Type::Ptr(_)) {
+                        return l;
+                    }
+                    if matches!(l, Type::UInt) {
+                        return l;
+                    }
+                    return Type::Int;
                 }
                 // Arithmetic: prefer long/ulong when either side is wide;
                 // unsigned int beats signed int (corruptI nOvfl wrap).
@@ -7798,9 +7966,6 @@ mod tests {
         assert!(asm.contains("2968"), "sizeof(PruneState) must fold to 2968");
     }
 
-                            /// Parameter named same as typedef must be Expr::Var in call args, not Int(0).
-    #[test]
-   
     #[test]
     fn test_bitfield_postinc() {
         let src = r#"

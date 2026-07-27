@@ -77,14 +77,12 @@ impl Parser {
         match e {
             Expr::Int(n) | Expr::Char(n) => Some(*n),
             Expr::Var(name) => self.enum_values.get(name).copied(),
-            Expr::Unary {
-                op: UnaryOp::Neg,
-                expr,
-            } => self.eval_enum_const(expr).map(|v| -v),
-            Expr::Unary {
-                op: UnaryOp::BitNot,
-                expr,
-            } => self.eval_enum_const(expr).map(|v| !v),
+            Expr::Unary { op, expr } => match op {
+                UnaryOp::Neg => self.eval_enum_const(expr).map(|v| -v),
+                UnaryOp::BitNot => self.eval_enum_const(expr).map(|v| !v),
+                UnaryOp::Not => self.eval_enum_const(expr).map(|v| if v == 0 { 1 } else { 0 }),
+                _ => None,
+            },
             Expr::Binary { op, left, right } => {
                 let l = self.eval_enum_const(left)?;
                 let r = self.eval_enum_const(right)?;
@@ -97,10 +95,26 @@ impl Parser {
                     BinOp::BitOr => l | r,
                     BinOp::BitAnd => l & r,
                     BinOp::BitXor => l ^ r,
-                    BinOp::Shl => l.wrapping_shl(r as u32),
-                    BinOp::Shr => l.wrapping_shr(r as u32),
+                    BinOp::Shl => l.wrapping_shl((r as u32) & 63),
+                    BinOp::Shr => l.wrapping_shr((r as u32) & 63),
+                    BinOp::Eq => (l == r) as i64,
+                    BinOp::Ne => (l != r) as i64,
+                    BinOp::Lt => (l < r) as i64,
+                    BinOp::Gt => (l > r) as i64,
+                    BinOp::Le => (l <= r) as i64,
+                    BinOp::Ge => (l >= r) as i64,
+                    BinOp::And => ((l != 0) && (r != 0)) as i64,
+                    BinOp::Or => ((l != 0) || (r != 0)) as i64,
                     _ => return None,
                 })
+            }
+            Expr::Cond { cond, then_e, else_e } => {
+                let c = self.eval_enum_const(cond)?;
+                if c != 0 {
+                    self.eval_enum_const(then_e)
+                } else {
+                    self.eval_enum_const(else_e)
+                }
             }
             Expr::Cast { expr, .. } => self.eval_enum_const(expr),
             // sizeof in enum constants — fall back to const_array_len
@@ -156,18 +170,26 @@ impl Parser {
         self.global_types.get(name)
     }
     fn resolve_tag(&mut self, tag: &str, define: bool) -> String {
-        if define {
+        if tag.is_empty() {
             self.tag_serial += 1;
-            let uniq = format!("{tag}__s{}", self.tag_serial);
-            if let Some(scope) = self.tag_scope.last_mut() {
-                scope.insert(tag.to_string(), uniq.clone());
-            }
-            return uniq;
+            return format!("__anon_struct_{}", self.tag_serial);
         }
         for scope in self.tag_scope.iter().rev() {
             if let Some(u) = scope.get(tag) {
                 return u.clone();
             }
+        }
+        if define {
+            let uniq = if self.tag_scope.len() > 1 {
+                self.tag_serial += 1;
+                format!("{tag}__s{}", self.tag_serial)
+            } else {
+                tag.to_string()
+            };
+            if let Some(scope) = self.tag_scope.last_mut() {
+                scope.insert(tag.to_string(), uniq.clone());
+            }
+            return uniq;
         }
         tag.to_string()
     }
@@ -286,7 +308,7 @@ impl Parser {
                     || s == "__gnuc_va_list"
                     || s.ends_with("_t")
                     || s.ends_with("_T")
-                    || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool")
+                    || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool" | "_Bool" | "HIST_ENTRY" | "HIST_STATE" | "HISTORY_STATE")
                     || self.typedefs.iter().any(|t| t == s)
             }
             TokenKind::Section(_) | TokenKind::Packed | TokenKind::Weak => true,
@@ -1290,13 +1312,29 @@ impl Parser {
             // types like malloc_zone_t). Register as opaque int typedef and continue.
             TokenKind::Ident(s) => {
                 self.bump();
-                if (s.ends_with("_t") || s.ends_with("_T") || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool"))
-                    && !self.typedefs.iter().any(|t| t == &s)
-                {
+                let ty = if s.ends_with("_t") || s.ends_with("_T") || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool" | "_Bool" | "HIST_ENTRY" | "HIST_STATE" | "HISTORY_STATE") {
+                    match s.as_str() {
+                        "bool" | "_Bool" | "__u8" | "u8" | "uint8_t" | "bool_t" => Type::UChar,
+                        "__s8" | "s8" | "int8_t" | "flex_int8_t" | "yytype_int8" => Type::SChar,
+                        "__u16" | "u16" | "uint16_t" => Type::UShort,
+                        "__s16" | "s16" | "int16_t" | "flex_int16_t" | "yytype_int16" => Type::Short,
+                        "__u64" | "u64" | "uint64_t" | "size_t" | "uintptr_t" | "uintmax_t" => Type::ULong,
+                        "__s64" | "s64" | "int64_t" | "intptr_t" | "off_t" | "ssize_t" | "ptrdiff_t" | "intmax_t" => Type::Long,
+                        _ if s.starts_with("uint") || s.ends_with("u8") => Type::UChar,
+                        _ if s.starts_with("int8") || s.ends_with("s8") => Type::SChar,
+                        _ if s.ends_with("8_t") || s.ends_with("8") => Type::UChar,
+                        _ if s.ends_with("16_t") || s.ends_with("16") => Type::UShort,
+                        _ if s.ends_with("64_t") || s.ends_with("64") || s.ends_with("ptr_t") || s.ends_with("size_t") => Type::ULong,
+                        _ => Type::Int,
+                    }
+                } else {
+                    Type::Int
+                };
+                if !self.typedefs.iter().any(|t| t == &s) {
                     self.typedefs.push(s.clone());
-                    self.typedef_map.insert(s, Type::Int);
+                    self.typedef_map.insert(s, ty.clone());
                 }
-                Type::Int
+                ty
             }
             _ => {
                 return Err(format!(
@@ -5294,6 +5332,33 @@ mod weak_tests {
         assert!(
             prog.items.iter().any(|i| matches!(i, Item::Func(f) if f.name == "f" && f.body.is_some())),
             "pointer-to-array cast with const expr bound must parse"
+        );
+    }
+
+    #[test]
+    fn test_forward_decl_does_not_zero_layout() {
+        let src = r#"
+            struct Plan;
+            struct Plan {
+                int type;
+                int a;
+                int b;
+                int c;
+            };
+            struct Container {
+                struct Plan plan;
+                int extra;
+            };
+            int get_extra_offset(void) {
+                return __builtin_offsetof(struct Container, extra);
+            }
+        "#;
+        let toks = Lexer::tokenize(src).unwrap();
+        let mut p = Parser::new(toks);
+        let prog = p.parse_program().unwrap();
+        assert!(
+            prog.items.iter().any(|i| matches!(i, Item::Func(f) if f.name == "get_extra_offset")),
+            "get_extra_offset must parse successfully"
         );
     }
 }

@@ -562,6 +562,10 @@ pub struct Codegen {
     va_regsave_off: i64,
     /// Number of fixed named GP args (va_start skips these slots).
     va_fixed_n: usize,
+    /// Pending block-scoped static variables (decl, func_name) to emit in .data/.bss at module scope.
+    pending_statics: Vec<(VarDecl, String)>,
+    /// Map of (func_name, var_name) -> mangled global symbol name for block-scoped statics.
+    func_local_statics: HashMap<(String, String), String>,
 }
 
 impl Codegen {
@@ -583,6 +587,8 @@ impl Codegen {
             pending_case_labs: VecDeque::new(),
             va_regsave_off: 0,
             va_fixed_n: 0,
+            pending_statics: Vec::new(),
+            func_local_statics: HashMap::new(),
         }
     }
 
@@ -609,7 +615,10 @@ impl Codegen {
         let peeled = Self::peel_casts(e);
         match peeled {
             Expr::Var(v) => {
-                if self.funcs.contains_key(v) || v == "main" {
+                if self.funcs.contains_key(v)
+                    || v == "main"
+                    || self.globals.contains_key(v)
+                {
                     return Some((sym(v), 0));
                 }
                 if let Some(s) = self.get_local(v) {
@@ -618,10 +627,10 @@ impl Codegen {
                     }
                     return None;
                 }
-                if self.globals.contains_key(v) || self.const_globals.contains_key(v) {
-                    return Some((sym(v), 0));
+                if let Some(gname) = self.func_local_statics.get(&(self.func_name.clone(), v.clone())) {
+                    return Some((sym(gname), 0));
                 }
-                None
+                Some((sym(v), 0))
             }
             Expr::Unary {
                 op: UnaryOp::Addr,
@@ -647,7 +656,7 @@ impl Codegen {
                     Type::Struct(n) | Type::Union(n) => n.as_str(),
                     _ => "",
                 };
-                let field_off = if let Some(lay) = self.layouts.get(struct_name) {
+                let field_off = if let Some(lay) = self.get_layout(struct_name) {
                     lay.fields.get(field).map(|(off, _)| *off).unwrap_or(0)
                 } else {
                     0
@@ -691,6 +700,22 @@ impl Codegen {
         (n + a - 1) & !(a - 1)
     }
 
+    fn get_layout(&self, name: &str) -> Option<&Layout> {
+        if let Some(lay) = self.layouts.get(name) {
+            if !lay.fields.is_empty() {
+                return Some(lay);
+            }
+        }
+        let base = name.split("__s").next().unwrap_or(name);
+        for (k, v) in &self.layouts {
+            let kbase = k.split("__s").next().unwrap_or(k);
+            if kbase == base && !v.fields.is_empty() {
+                return Some(v);
+            }
+        }
+        self.layouts.get(name)
+    }
+
     fn type_size(&self, ty: &Type) -> i64 {
         match ty {
             Type::Void => 0,
@@ -702,7 +727,7 @@ impl Codegen {
             Type::Double => 8,
             Type::Ptr(_) => 8,
             Type::Array(e, n) => self.type_size(e) * n,
-            Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.size).unwrap_or(8),
+            Type::Struct(n) | Type::Union(n) => self.get_layout(n).map(|l| l.size).unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).size,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).size,
             Type::Const(inner) => self.type_size(inner),
@@ -734,7 +759,7 @@ impl Codegen {
 
     fn is_struct_or_union_ty(ty: &Type) -> bool {
         matches!(
-            ty,
+            ty.unqual(),
             Type::Struct(_) | Type::Union(_) | Type::AnonStruct(_) | Type::AnonUnion(_)
         )
     }
@@ -744,25 +769,28 @@ impl Codegen {
     /// ops (postgres simplehash `sizeof*size >= SIZE_MAX/2` always true via
     /// signed setge against lim's low 32 bits 0xffffffff).
     fn usual_arith_conv(l: &Type, r: &Type) -> Type {
-        if matches!(l, Type::Float | Type::Double) || matches!(r, Type::Float | Type::Double) {
+        let l_unqual = l.unqual();
+        let r_unqual = r.unqual();
+        if matches!(l_unqual, Type::Float | Type::Double) || matches!(r_unqual, Type::Float | Type::Double) {
             return Type::Double;
         }
         let rank = |t: &Type| -> i32 {
-            match t {
+            match t.unqual() {
                 Type::Long | Type::ULong => 4,
                 Type::Int | Type::UInt => 3,
                 Type::Short | Type::UShort => 2,
-                Type::Char | Type::SChar => 1,
+                Type::Char | Type::SChar | Type::UChar => 1,
                 Type::Ptr(_) | Type::Array(_, _) => 4,
                 _ => 3,
             }
         };
         let unsigned = |t: &Type| -> bool {
             matches!(
-                t,
+                t.unqual(),
                 Type::ULong
                     | Type::UInt
                     | Type::UShort
+                    | Type::UChar
                     | Type::Char
                     | Type::Ptr(_)
                     | Type::Array(_, _)
@@ -785,38 +813,113 @@ impl Codegen {
         }
     }
 
-    /// SysV: aggregate ≤8 bytes in %rax; ≤16 bytes in %rax:%rdx.
+    /// SysV: aggregate ≤8 bytes in %rax; ≤16 bytes in %rax:%rdx; ≤32 bytes in %rax:%rdx:%rcx:%r8.
     fn small_agg_nregs(&self, ty: &Type) -> Option<u8> {
         if !Self::is_struct_or_union_ty(ty) {
             return None;
         }
-        match self.type_size(ty) {
-            1..=8 => Some(1),
-            9..=16 => Some(2),
-            _ => None,
+        let sz = self.type_size(ty);
+        if sz <= 0 || sz > 32 {
+            return None;
         }
+        Some(((sz + 7) / 8) as u8)
     }
 
     /// Multi-register INTEGER-class aggregate *arguments*.
-    ///
-    /// Callee spill uses `small_agg_nregs` (any ≤16B → 1–2 GPRs). Caller side
-    /// is narrower: enabling *all* 9..=16 desynchronized some RelCache call
-    /// sites (SEGV at InitPostgres). Keep RelFileNode (12) plus 16-byte pairs
-    /// (`XLogwrtRqst` / `XLogwrtResult`) so `XLogWrite` Flush is not fed `tli`.
     fn small_agg_arg_nregs(&self, ty: &Type) -> Option<u8> {
         if !Self::is_struct_or_union_ty(ty) {
             return None;
         }
-        match self.type_size(ty) {
-            1..=8 => Some(1),
-            9..=16 => Some(2),
-            _ => None,
+        let sz = self.type_size(ty);
+        if sz <= 0 || sz > 32 {
+            return None;
         }
+        Some(((sz + 7) / 8) as u8)
     }
 
     /// How many integer argument registers / 8-byte stack slots an arg consumes.
     fn sysv_int_arg_slots(&self, ty: &Type) -> usize {
         self.small_agg_arg_nregs(ty).map(|n| n as usize).unwrap_or(1)
+    }
+
+    fn emit_sysv_arg_setup(
+        &mut self,
+        args: &[Expr],
+        proto: &[Type],
+        typedefs: &HashMap<String, Type>,
+        extra_pushed_slots: usize,
+    ) -> Result<(usize, i64), String> {
+        let mut total_slots = 0usize;
+        for (i, a) in args.iter().enumerate() {
+            let aty = proto
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| self.typeof_expr(a, typedefs));
+            if let Some(nr) = self.small_agg_arg_nregs(&aty) {
+                total_slots += nr as usize;
+            } else {
+                total_slots += 1;
+            }
+        }
+
+        let total_items = extra_pushed_slots + total_slots;
+        let pad_bytes: i64 = if total_items % 2 != 0 { 8 } else { 0 };
+        let temp_bytes = pad_bytes + (total_slots as i64) * 8;
+
+        if temp_bytes > 0 {
+            writeln!(self.out, "\tsubq\t${temp_bytes}, %rsp").unwrap();
+        }
+
+        // Step 1: Evaluate all arguments forward and store in temporary stack slots
+        let mut curr_slot = total_slots;
+        for (i, a) in args.iter().enumerate() {
+            let aty = proto
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| self.typeof_expr(a, typedefs));
+            if let Some(nr) = self.small_agg_arg_nregs(&aty) {
+                self.emit_agg_arg_addr(a, typedefs)?;
+                for k in 0..(nr as usize) {
+                    let mem_off = (k as i64) * 8;
+                    curr_slot -= 1;
+                    let slot_off = (curr_slot as i64) * 8;
+                    writeln!(self.out, "\tmovq\t{mem_off}(%r10), %rax").unwrap();
+                    writeln!(self.out, "\tmovq\t%rax, {slot_off}(%rsp)").unwrap();
+                }
+            } else {
+                curr_slot -= 1;
+                let slot_off = (curr_slot as i64) * 8;
+                self.emit_expr_rval(a, 0, typedefs)?;
+                writeln!(self.out, "\tmovq\t%rax, {slot_off}(%rsp)").unwrap();
+            }
+        }
+
+        let nreg = total_slots.min(6);
+        let nstack = total_slots.saturating_sub(6);
+
+        // Step 2: Load register arguments from temporary stack slots
+        for i in 0..nreg {
+            let off = ((total_slots - 1 - i) as i64) * 8;
+            writeln!(self.out, "\tmovq\t{off}(%rsp), {}", ARG_REGS[i]).unwrap();
+        }
+
+        // Step 3: Setup stack argument frame if nstack > 0
+        let stack_bytes = if nstack > 0 {
+            let sb = ((nstack as i64) * 8 + 15) & !15;
+            writeln!(self.out, "\tsubq\t${sb}, %rsp").unwrap();
+            for k in 0..nstack {
+                let src_off = sb + ((nstack - 1 - k) as i64) * 8;
+                let dst_off = (k as i64) * 8;
+                writeln!(self.out, "\tmovq\t{src_off}(%rsp), %rax").unwrap();
+                writeln!(self.out, "\tmovq\t%rax, {dst_off}(%rsp)").unwrap();
+            }
+            sb
+        } else {
+            0
+        };
+
+        let cleanup_bytes = pad_bytes + (total_slots as i64) * 8 + stack_bytes;
+        Ok((nreg, cleanup_bytes))
     }
 
     fn expr_is_lvalue(e: &Expr) -> bool {
@@ -850,77 +953,24 @@ impl Codegen {
     /// (may be 6 for ItemPointerData — must not movq past the object).
     fn store_small_agg_from_regs_sized(&mut self, addr_reg: u8, nregs: u8, nbytes: usize) {
         let a = reg(addr_reg);
-        if nregs >= 2 {
-            // 9–16 bytes: first eightbyte always full; tail may be partial.
-            writeln!(self.out, "\tmovq\t%rax, ({a})").unwrap();
-            let rem = nbytes.saturating_sub(8);
-            match rem {
-                0 => {}
-                1 => {
-                    writeln!(self.out, "\tmovb\t%dl, 8({a})").unwrap();
+        let ret_regs = ["%rax", "%rdx", "%rcx", "%r8", "%r9", "%r11"];
+        for i in 0..(nregs as usize) {
+            let off = i * 8;
+            let rem = nbytes.saturating_sub(off);
+            let r = ret_regs[i];
+            if rem >= 8 {
+                writeln!(self.out, "\tmovq\t{r}, {off}({a})").unwrap();
+            } else if rem > 0 {
+                let r_d = match r { "%rax" => "%eax", "%rdx" => "%edx", "%rcx" => "%ecx", "%r8" => "%r8d", "%r9" => "%r9d", _ => "%eax" };
+                let r_w = match r { "%rax" => "%ax", "%rdx" => "%dx", "%rcx" => "%cx", "%r8" => "%r8w", "%r9" => "%r9w", _ => "%ax" };
+                let r_b = match r { "%rax" => "%al", "%rdx" => "%dl", "%rcx" => "%cl", "%r8" => "%r8b", "%r9" => "%r9b", _ => "%al" };
+                match rem {
+                    1 => writeln!(self.out, "\tmovb\t{r_b}, {off}({a})").unwrap(),
+                    2 => writeln!(self.out, "\tmovw\t{r_w}, {off}({a})").unwrap(),
+                    4 => writeln!(self.out, "\tmovl\t{r_d}, {off}({a})").unwrap(),
+                    _ => writeln!(self.out, "\tmovq\t{r}, {off}({a})").unwrap(),
                 }
-                2 => {
-                    writeln!(self.out, "\tmovw\t%dx, 8({a})").unwrap();
-                }
-                3 => {
-                    writeln!(self.out, "\tmovw\t%dx, 8({a})").unwrap();
-                    writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap();
-                    writeln!(self.out, "\tshrl\t$16, %ecx").unwrap();
-                    writeln!(self.out, "\tmovb\t%cl, 10({a})").unwrap();
-                }
-                4 => {
-                    writeln!(self.out, "\tmovl\t%edx, 8({a})").unwrap();
-                }
-                5..=7 => {
-                    writeln!(self.out, "\tmovl\t%edx, 8({a})").unwrap();
-                    writeln!(self.out, "\tmovq\t%rdx, %rcx").unwrap();
-                    writeln!(self.out, "\tshrq\t$32, %rcx").unwrap();
-                    if rem >= 6 {
-                        writeln!(self.out, "\tmovw\t%cx, 12({a})").unwrap();
-                        if rem == 7 {
-                            writeln!(self.out, "\tshrl\t$16, %ecx").unwrap();
-                            writeln!(self.out, "\tmovb\t%cl, 14({a})").unwrap();
-                        }
-                    } else {
-                        writeln!(self.out, "\tmovb\t%cl, 12({a})").unwrap();
-                    }
-                }
-                _ => writeln!(self.out, "\tmovq\t%rdx, 8({a})").unwrap(),
             }
-            return;
-        }
-        // Single eightbyte: store exactly nbytes.
-        match nbytes {
-            1 => writeln!(self.out, "\tmovb\t%al, ({a})").unwrap(),
-            2 => writeln!(self.out, "\tmovw\t%ax, ({a})").unwrap(),
-            3 => {
-                writeln!(self.out, "\tmovw\t%ax, ({a})").unwrap();
-                writeln!(self.out, "\tmovq\t%rax, %rcx").unwrap();
-                writeln!(self.out, "\tshrl\t$16, %ecx").unwrap();
-                writeln!(self.out, "\tmovb\t%cl, 2({a})").unwrap();
-            }
-            4 => writeln!(self.out, "\tmovl\t%eax, ({a})").unwrap(),
-            5 => {
-                writeln!(self.out, "\tmovl\t%eax, ({a})").unwrap();
-                writeln!(self.out, "\tmovq\t%rax, %rcx").unwrap();
-                writeln!(self.out, "\tshrq\t$32, %rcx").unwrap();
-                writeln!(self.out, "\tmovb\t%cl, 4({a})").unwrap();
-            }
-            6 => {
-                writeln!(self.out, "\tmovl\t%eax, ({a})").unwrap();
-                writeln!(self.out, "\tmovq\t%rax, %rcx").unwrap();
-                writeln!(self.out, "\tshrq\t$32, %rcx").unwrap();
-                writeln!(self.out, "\tmovw\t%cx, 4({a})").unwrap();
-            }
-            7 => {
-                writeln!(self.out, "\tmovl\t%eax, ({a})").unwrap();
-                writeln!(self.out, "\tmovq\t%rax, %rcx").unwrap();
-                writeln!(self.out, "\tshrq\t$32, %rcx").unwrap();
-                writeln!(self.out, "\tmovw\t%cx, 4({a})").unwrap();
-                writeln!(self.out, "\tshrl\t$16, %ecx").unwrap();
-                writeln!(self.out, "\tmovb\t%cl, 6({a})").unwrap();
-            }
-            _ => writeln!(self.out, "\tmovq\t%rax, ({a})").unwrap(),
         }
     }
 
@@ -1057,9 +1107,11 @@ impl Codegen {
         regn: u8,
         typedefs: &HashMap<String, Type>,
     ) -> Result<Type, String> {
-        let ty = self.typeof_expr(e, typedefs);
+        let raw_ty = self.typeof_expr(e, typedefs);
+        let ty = self.expand_ty(&raw_ty, typedefs);
         if !Self::is_struct_or_union_ty(&ty) {
-            return Err("not an aggregate".into());
+            let _ = self.emit_expr_rval(e, regn, typedefs)?;
+            return Ok(Type::Ptr(Box::new(Type::Void)));
         }
         let sz = self.type_size(&ty).max(8);
         let tmp = self.alloc_local("", &ty);
@@ -1112,7 +1164,7 @@ impl Codegen {
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
             Type::Array(e, _) => self.type_align(e),
-            Type::Struct(n) | Type::Union(n) => self.layouts.get(n).map(|l| l.align).unwrap_or(8),
+            Type::Struct(n) | Type::Union(n) => self.get_layout(n).map(|l| l.align).unwrap_or(8),
             Type::AnonStruct(fs) => self.layout_fields(fs, false, false).align,
             Type::AnonUnion(fs) => self.layout_fields(fs, true, false).align,
             Type::Const(inner) => self.type_align(inner),
@@ -1121,16 +1173,16 @@ impl Codegen {
 
     fn layout_fields(&self, fields: &[Field], is_union: bool, packed: bool) -> Layout {
         let mut map = HashMap::new();
-        let mut off = 0i64;
         let mut max_align = 1i64;
         let mut max_size = 0i64;
+        let mut offset_bits: u64 = 0;
         for f in fields {
-            if f.name.is_empty() {
+            if f.name.is_empty() && f.bit_width.is_none() {
                 let nested_opt = match &f.ty {
                     Type::AnonStruct(fs) => Some(self.layout_fields(fs, false, false)),
                     Type::AnonUnion(fs) => Some(self.layout_fields(fs, true, false)),
-                    Type::Struct(n) => self.layouts.get(n).cloned(),
-                    Type::Union(n) => self.layouts.get(n).cloned(),
+                    Type::Struct(n) => self.get_layout(n).cloned(),
+                    Type::Union(n) => self.get_layout(n).cloned(),
                     _ => None,
                 };
                 if let Some(nested) = nested_opt {
@@ -1143,15 +1195,56 @@ impl Codegen {
                         }
                         max_size = max_size.max(nested.size);
                     } else {
-                        off = Self::align_up(off, nalign);
+                        let mut byte_off = ((offset_bits + 7) / 8) as i64;
+                        byte_off = Self::align_up(byte_off, nalign);
                         for (fnm, (fo, fty)) in &nested.fields {
-                            map.insert(fnm.clone(), (off + fo, fty.clone()));
+                            map.insert(fnm.clone(), (byte_off + fo, fty.clone()));
                         }
-                        off += nested.size;
+                        offset_bits = ((byte_off + nested.size) as u64) * 8;
                     }
                     continue;
                 }
             }
+
+            if let Some(width) = f.bit_width {
+                let container_sz = self.type_size(&f.ty).max(1) as u64;
+                let container_bits = container_sz * 8;
+                let al = if packed { 1 } else { self.type_align(&f.ty) };
+                max_align = max_align.max(al);
+
+                if is_union {
+                    if !f.name.is_empty() && width > 0 {
+                        map.insert(f.name.clone(), (0, f.ty.clone()));
+                    }
+                    max_size = max_size.max(container_sz as i64);
+                    continue;
+                }
+
+                if width == 0 {
+                    let al_bits = (al as u64) * 8;
+                    if al_bits > 0 {
+                        offset_bits = ((offset_bits + al_bits - 1) / al_bits) * al_bits;
+                    }
+                    continue;
+                }
+
+                let w = width as u64;
+                if container_bits > 0 && (offset_bits % container_bits) + w > container_bits {
+                    offset_bits =
+                        ((offset_bits + container_bits - 1) / container_bits) * container_bits;
+                }
+                let bit_pos = offset_bits;
+                let cont_index = bit_pos / container_bits.max(1);
+                let unit_start = (cont_index * container_sz) as i64;
+                if !f.name.is_empty() {
+                    map.insert(f.name.clone(), (unit_start, f.ty.clone()));
+                }
+                offset_bits = bit_pos + w;
+                let end_byte = ((offset_bits + 7) / 8) as i64;
+                max_size = max_size.max(end_byte);
+                continue;
+            }
+
             let sz = self.type_size(&f.ty);
             let al = if packed { 1 } else { self.type_align(&f.ty) };
             max_align = max_align.max(al);
@@ -1161,14 +1254,16 @@ impl Codegen {
                 }
                 max_size = max_size.max(sz);
             } else {
-                off = Self::align_up(off, al);
+                let mut byte_off = ((offset_bits + 7) / 8) as i64;
+                byte_off = Self::align_up(byte_off, al);
                 if !f.name.is_empty() {
-                    map.insert(f.name.clone(), (off, f.ty.clone()));
+                    map.insert(f.name.clone(), (byte_off, f.ty.clone()));
                 }
-                off += sz;
+                offset_bits = ((byte_off + sz) as u64) * 8;
             }
         }
         let final_align = if packed { 1 } else { max_align.max(1) };
+        let off = ((offset_bits + 7) / 8) as i64;
         let size = if is_union {
             Self::align_up(max_size, final_align)
         } else {
@@ -1232,7 +1327,7 @@ impl Codegen {
                             self.layouts.insert(name.clone(), lay);
                         }
                         Type::Struct(n) | Type::Union(n) => {
-                            if let Some(l) = self.layouts.get(n).cloned() {
+                            if let Some(l) = self.get_layout(n).cloned() {
                                 self.layouts.insert(name.clone(), l);
                             }
                         }
@@ -1278,8 +1373,10 @@ impl Codegen {
                             | Type::ULong
                     )
                 {
-                    if let Some(Expr::Int(n) | Expr::Char(n)) = &g.init {
-                        self.const_globals.insert(g.name.clone(), *n);
+                    if let Some(init) = &g.init {
+                        if let Some(n) = self.const_i64(init) {
+                            self.const_globals.insert(g.name.clone(), n);
+                        }
                     }
                 }
             }
@@ -1333,6 +1430,16 @@ impl Codegen {
                         }
                     }
                 }
+        }
+
+        let pending = std::mem::take(&mut self.pending_statics);
+        for (g, func_name) in &pending {
+            if emitted_syms.insert(g.name.clone()) {
+                let saved_func = self.func_name.clone();
+                self.func_name = func_name.clone();
+                self.emit_global(g)?;
+                self.func_name = saved_func;
+            }
         }
 
         for item in &prog.items {
@@ -1485,8 +1592,9 @@ impl Codegen {
                     // `.quad l_str_N` made ScanKeywords.kw_string point at a
                     // pointer cell → GetScanKeyword returned garbage → every
                     // SQL keyword became IDENT (initdb "syntax error at REVOKE").
-                    if let Type::Array(elem, n) = &g.ty {
-                        let is_byte = matches!(elem.as_ref(), Type::Char | Type::SChar)
+                    let unqual_ty = g.ty.unqual();
+                    if let Type::Array(elem, n) = unqual_ty {
+                        let is_byte = matches!(elem.as_ref(), Type::Char | Type::SChar | Type::UChar)
                             || self.type_size(elem) == 1;
                         if is_byte {
                             let nbytes = if *n > 0 {
@@ -1494,14 +1602,19 @@ impl Codegen {
                             } else {
                                 st.len() + 1
                             };
-                            if cfg!(target_os = "macos") {
-                                writeln!(
-                                    self.out,
-                                    "\n\t.section\t__TEXT,__cstring,cstring_literals"
-                                )
-                                .unwrap();
+                            let is_const = g.ty.is_const() || elem.is_const();
+                            if is_const {
+                                if cfg!(target_os = "macos") {
+                                    writeln!(
+                                        self.out,
+                                        "\n\t.section\t__TEXT,__cstring,cstring_literals"
+                                    )
+                                    .unwrap();
+                                } else {
+                                    writeln!(self.out, "\n\t.section\t.rodata").unwrap();
+                                }
                             } else {
-                                writeln!(self.out, "\n\t.section\t.rodata").unwrap();
+                                self.data_section();
                             }
                             writeln!(self.out, "\t.p2align\t3").unwrap();
                             writeln!(self.out, "{s}:").unwrap();
@@ -1657,7 +1770,7 @@ impl Codegen {
                 }
             }
             Type::Struct(name) | Type::Union(name) => {
-                if let Some(lay) = self.layouts.get(name).cloned() {
+                if let Some(lay) = self.get_layout(name).cloned() {
                     self.emit_struct_init_data(&lay, fields_in)?;
                 } else {
                     // Opaque / incomplete (e.g. arch_spinlock_t) — soft zero.
@@ -1743,6 +1856,7 @@ impl Codegen {
     fn emit_scalar_data(&mut self, ty: &Type, e: &Expr) -> Result<(), String> {
         if matches!(ty, Type::Ptr(_)) {
             if let Some((vsym, off)) = self.static_lvalue_reloc(e) {
+                writeln!(self.out, "\t.p2align\t3").unwrap();
                 if off == 0 {
                     writeln!(self.out, "\t.quad\t{vsym}").unwrap();
                 } else {
@@ -1765,6 +1879,7 @@ impl Codegen {
                         } else if sz <= 4 {
                             writeln!(self.out, "\t.long\t{n}").unwrap();
                         } else {
+                            writeln!(self.out, "\t.p2align\t3").unwrap();
                             writeln!(self.out, "\t.quad\t{n}").unwrap();
                         }
                     }
@@ -1781,6 +1896,7 @@ impl Codegen {
                         } else if sz <= 4 {
                             writeln!(self.out, "\t.long\t{}", *f as i64).unwrap();
                         } else {
+                            writeln!(self.out, "\t.p2align\t3").unwrap();
                             writeln!(self.out, "\t.quad\t{}", *f as i64).unwrap();
                         }
                     }
@@ -1790,6 +1906,7 @@ impl Codegen {
                 op: UnaryOp::Addr,
                 expr,
             } => {
+                writeln!(self.out, "\t.p2align\t3").unwrap();
                 if let Some((vsym, off)) = self.static_lvalue_reloc(expr) {
                     if off == 0 {
                         writeln!(self.out, "\t.quad\t{vsym}").unwrap();
@@ -1801,6 +1918,7 @@ impl Codegen {
                 }
             }
             Expr::AddrOfLabel(label) => {
+                writeln!(self.out, "\t.p2align\t3").unwrap();
                 writeln!(
                     self.out,
                     "\t.quad\t{}",
@@ -1823,17 +1941,20 @@ impl Codegen {
                     } else if sz <= 4 {
                         writeln!(self.out, "\t.long\t{n}").unwrap();
                     } else {
+                        writeln!(self.out, "\t.p2align\t3").unwrap();
                         writeln!(self.out, "\t.quad\t{n}").unwrap();
                     }
                     return Ok(());
                 }
                 // Function designator → address.
                 if self.funcs.contains_key(v) || v == "main" {
+                    writeln!(self.out, "\t.p2align\t3").unwrap();
                     writeln!(self.out, "\t.quad\t{}", sym(v)).unwrap();
                     return Ok(());
                 }
                 // Pointer-typed field or known global object → address reloc.
                 if matches!(ty, Type::Ptr(_)) || self.globals.contains_key(v) {
+                    writeln!(self.out, "\t.p2align\t3").unwrap();
                     if let Some((vsym, off)) = self.static_lvalue_reloc(e) {
                         if off == 0 {
                             writeln!(self.out, "\t.quad\t{vsym}").unwrap();
@@ -1851,19 +1972,22 @@ impl Codegen {
                 writeln!(self.out, "\t.zero\t{}", self.type_size(ty).max(1)).unwrap();
             }
             Expr::String(s) => {
-                // char arr[N] = "lit" → embed; char *p = "lit" → pointer
-                if let Type::Array(elem, n) = ty {
-                    let is_byte = matches!(elem.as_ref(), Type::Char | Type::SChar)
-                        || self.type_size(elem) == 1;
-                    if is_byte {
-                        let nbytes = (*n as usize).max(0);
-                        let bytes = s.as_bytes();
-                        for i in 0..nbytes {
-                            let b = bytes.get(i).copied().unwrap_or(0);
-                            writeln!(self.out, "\t.byte\t{b}").unwrap();
-                        }
-                        return Ok(());
+                // char arr[N] = "lit" or struct/anon struct = "lit" → embed bytes.
+                if matches!(
+                    ty,
+                    Type::Array(_, _)
+                        | Type::Struct(_)
+                        | Type::Union(_)
+                        | Type::AnonStruct(_)
+                        | Type::AnonUnion(_)
+                ) {
+                    let sz = self.type_size(ty).max(0) as usize;
+                    let bytes = s.as_bytes();
+                    for i in 0..sz {
+                        let b = bytes.get(i).copied().unwrap_or(0);
+                        writeln!(self.out, "\t.byte\t{b}").unwrap();
                     }
+                    return Ok(());
                 }
                 let id = self.intern_str(s);
                 writeln!(self.out, "\t.quad\tl_str_{id}").unwrap();
@@ -1934,7 +2058,7 @@ impl Codegen {
         ty: &Type,
         stack: &mut i64,
     ) {
-        if Self::is_struct_or_union_ty(ty) && self.small_agg_nregs(ty).is_none() {
+        if Self::is_struct_or_union_ty(ty) {
             Self::bump_stack_for_ty(
                 stack,
                 ty,
@@ -2018,8 +2142,9 @@ impl Codegen {
         let mut measure_size = self.stack_size;
         self.measure_stmts(body, &mut measure, &mut measure_size, typedefs);
         // After `push %rbp` rsp is 16-byte aligned. Allocate a 16-byte-multiple
-        // frame (includes -8(%rbp) saved %rbx) so the body keeps rsp%16==0 for calls.
-        let frame = Self::align_up(measure_size.max(8), 16);
+        // frame (includes -8(%rbp) saved %rbx + 128B headroom for materialized temps)
+        // so the body keeps rsp%16==0 for calls and never writes outside frame.
+        let frame = Self::align_up(measure_size.max(8) + 128, 16);
 
         self.clear_locals();
         self.stack_size = 8;
@@ -2046,6 +2171,26 @@ impl Codegen {
         writeln!(self.out, "\tmovq\t%rsp, %rbp").unwrap();
         writeln!(self.out, "\tsubq\t${frame}, %rsp").unwrap();
         writeln!(self.out, "\tmovq\t%rbx, -8(%rbp)").unwrap();
+        // Zero-initialize stack frame to prevent uninitialized stack garbage
+        // in local variables/arrays (e.g. omittype in zic.c).
+        // Slots to zero are from -16(%rbp) down to -frame(%rbp). Slot -8(%rbp) is saved %rbx.
+        if frame >= 16 {
+            if frame <= 128 {
+                for off in (16..=frame).step_by(8) {
+                    writeln!(self.out, "\tmovq\t$0, -{off}(%rbp)").unwrap();
+                }
+            } else {
+                let loop_lbl = self.lab("zero_frame");
+                let count = (frame - 16) / 8 + 1;
+                writeln!(self.out, "\tleaq\t-{frame}(%rbp), %r10").unwrap();
+                writeln!(self.out, "\tmovq\t${count}, %r11").unwrap();
+                writeln!(self.out, "{loop_lbl}:").unwrap();
+                writeln!(self.out, "\tmovq\t$0, (%r10)").unwrap();
+                writeln!(self.out, "\taddq\t$8, %r10").unwrap();
+                writeln!(self.out, "\tsubq\t$1, %r11").unwrap();
+                writeln!(self.out, "\tjnz\t{loop_lbl}").unwrap();
+            }
+        }
 
         // SysV INTEGER arg index (not C param index): structs ≤16B use 1–2 regs.
         let mut ireg: usize = 0;
@@ -2140,7 +2285,7 @@ impl Codegen {
                     Type::SChar => {
                         writeln!(self.out, "\tmovsbq\t{arg_off}(%rbp), %rax").unwrap();
                     }
-                    Type::Char => {
+                    Type::Char | Type::UChar => {
                         writeln!(self.out, "\tmovzbq\t{arg_off}(%rbp), %rax").unwrap();
                     }
                     _ => {
@@ -2262,28 +2407,50 @@ impl Codegen {
                 locals.pop();
             }
             Stmt::If {
-                then_b, else_b, ..
+                cond,
+                then_b,
+                else_b,
             } => {
+                self.measure_expr(cond, locals, stack, typedefs);
                 self.measure_stmt(then_b, locals, stack, typedefs);
                 if let Some(e) = else_b {
                     self.measure_stmt(e, locals, stack, typedefs);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Label(_, body) => {
-                self.measure_stmt(body, locals, stack, typedefs)
+            Stmt::While { cond, body } => {
+                self.measure_expr(cond, locals, stack, typedefs);
+                self.measure_stmt(body, locals, stack, typedefs);
             }
-            Stmt::For { init, body, .. } => {
+            Stmt::DoWhile { cond, body } => {
+                self.measure_stmt(body, locals, stack, typedefs);
+                self.measure_expr(cond, locals, stack, typedefs);
+            }
+            Stmt::Label(_, body) => {
+                self.measure_stmt(body, locals, stack, typedefs);
+            }
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
                 locals.push(HashMap::new());
                 if let Some(i) = init {
                     self.measure_stmt(i, locals, stack, typedefs);
                 }
+                if let Some(c) = cond {
+                    self.measure_expr(c, locals, stack, typedefs);
+                }
+                if let Some(s) = step {
+                    self.measure_expr(s, locals, stack, typedefs);
+                }
                 self.measure_stmt(body, locals, stack, typedefs);
                 locals.pop();
             }
-            // Postgres InitializeOneGUCOption / SQLite VdbeExec: giant switch with
-            // case-local decls. Skipping under-counts the frame (e.g. 0x10) while
-            // emit uses -0x60/-0x70 → callee clobbers conf → bootstrap SEGV.
-            Stmt::Switch { body, .. } => self.measure_stmt(body, locals, stack, typedefs),
+            Stmt::Switch { cond, body } => {
+                self.measure_expr(cond, locals, stack, typedefs);
+                self.measure_stmt(body, locals, stack, typedefs);
+            }
             Stmt::Case { body, .. } | Stmt::Default(body) => {
                 self.measure_stmt(body, locals, stack, typedefs)
             }
@@ -2305,8 +2472,12 @@ impl Codegen {
                 self.measure_expr(final_expr, locals, stack, typedefs);
                 locals.pop();
             }
+            Expr::Cast { expr, ty } => {
+                self.measure_expr(expr, locals, stack, typedefs);
+                let cty = self.expand_ty(ty, typedefs);
+                self.measure_materialize_slot(&cty, stack);
+            }
             Expr::Unary { expr, .. }
-            | Expr::Cast { expr, .. }
             | Expr::PreInc(expr)
             | Expr::PreDec(expr)
             | Expr::PostInc(expr)
@@ -2322,6 +2493,8 @@ impl Codegen {
             Expr::Call { name, args, .. } => {
                 for a in args {
                     self.measure_expr(a, locals, stack, typedefs);
+                    let aty = self.typeof_expr(a, typedefs);
+                    self.measure_materialize_slot(&aty, stack);
                 }
                 if let Some(f) = self.funcs.get(name) {
                     self.measure_materialize_slot(&f.ret, stack);
@@ -2614,10 +2787,11 @@ impl Codegen {
                         let mut g = d.clone();
                         g.name = gname.clone();
                         g.is_static = true;
-                        self.emit_global(&g)?;
-                        self.text_section();
+                        self.pending_statics.push((g, self.func_name.clone()));
                         self.globals.insert(gname.clone(), ty.clone());
                     }
+                    self.func_local_statics
+                        .insert((self.func_name.clone(), d.name.clone()), gname.clone());
                     self.insert_local(
                         d.name.clone(),
                         Sym {
@@ -2625,7 +2799,7 @@ impl Codegen {
                             storage: Storage::Global { name: gname },
                         },
                     );
-                    // Static init already in .data; do not re-run each call.
+                    // Static init already queued for .data; do not re-run each call.
                     return Ok(());
                 }
                 let off = self.alloc_local(&d.name, &ty);
@@ -2698,7 +2872,22 @@ impl Codegen {
             }
             Stmt::Return(e) => {
                 if let Some(ex) = e {
-                    self.emit_expr_rval(ex, 0, typedefs)?;
+                    let ret_ty = self.expand_ty(&self.func_ret.clone(), typedefs);
+                    if let Some(nr) = self.small_agg_nregs(&ret_ty) {
+                        if nr > 1 {
+                            let _ = self.emit_lvalue_addr(ex, 9, typedefs)?;
+                            let ret_regs = ["%rax", "%rdx", "%rcx", "%r8", "%r9", "%r11"];
+                            for i in (0..(nr as usize)).rev() {
+                                let off = i * 8;
+                                let r = ret_regs[i];
+                                writeln!(self.out, "\tmovq\t{off}(%r10), {r}").unwrap();
+                            }
+                        } else {
+                            self.emit_expr_rval(ex, 0, typedefs)?;
+                        }
+                    } else {
+                        self.emit_expr_rval(ex, 0, typedefs)?;
+                    }
                 } else {
                     writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
                 }
@@ -2840,21 +3029,23 @@ impl Codegen {
                 // Spill switch value (expr eval clobbers %rax).
                 writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
                 writeln!(self.out, "\tmovq\t%rax, (%rsp)").unwrap();
-                let mut cases: Vec<(Option<i64>, String)> = Vec::new();
+                let mut cases: Vec<SwitchCaseItem> = Vec::new();
                 self.collect_switch_cases(body, &mut cases);
                 self.pending_case_labs.clear();
                 let mut has_default = false;
                 let mut default_lab = l_default.clone();
-                for (val, lab) in &cases {
-                    if let Some(v) = val {
-                        self.pending_case_labs.push_back(lab.clone());
-                        writeln!(self.out, "\tmovq\t(%rsp), %rax").unwrap();
-                        self.emit_imm(*v, 11);
-                        writeln!(self.out, "\tcmpq\t%rcx, %rax").unwrap();
-                        writeln!(self.out, "\tje\t{lab}").unwrap();
-                    } else {
+                for item in &cases {
+                    if item.is_default {
                         has_default = true;
-                        default_lab = lab.clone();
+                        default_lab = item.lab.clone();
+                    } else {
+                        self.pending_case_labs.push_back(item.lab.clone());
+                        if let Some(v) = item.val {
+                            writeln!(self.out, "\tmovq\t(%rsp), %rax").unwrap();
+                            self.emit_imm(v, 11);
+                            writeln!(self.out, "\tcmpq\t%rcx, %rax").unwrap();
+                            writeln!(self.out, "\tje\t{}", item.lab).unwrap();
+                        }
                     }
                 }
                 if has_default {
@@ -2866,9 +3057,9 @@ impl Codegen {
                 while let Some(lab) = self.pending_case_labs.pop_front() {
                     writeln!(self.out, "{lab}:").unwrap();
                 }
-                for (val, lab) in &cases {
-                    if val.is_some() && !self.out.contains(&format!("{lab}:")) {
-                        writeln!(self.out, "{lab}:").unwrap();
+                for item in &cases {
+                    if !item.is_default && !self.out.contains(&format!("{}:", item.lab)) {
+                        writeln!(self.out, "{}:", item.lab).unwrap();
                     }
                 }
                 if has_default && !self.out.contains(&format!("{default_lab}:")) {
@@ -3084,7 +3275,7 @@ impl Codegen {
         }
     }
 
-    fn collect_switch_cases(&mut self, st: &Stmt, out: &mut Vec<(Option<i64>, String)>) {
+    fn collect_switch_cases(&mut self, st: &Stmt, out: &mut Vec<SwitchCaseItem>) {
         match st {
             Stmt::Block(ss) => {
                 for s in ss {
@@ -3097,12 +3288,13 @@ impl Codegen {
                 // Fold enum/static-const case labels via const_globals (case A / TK_IF).
                 // const_i64_simple alone treats enum idents as non-const → false "default"
                 // and drops cmp/je (canonicalize_path / postgres path.c → path becomes "/").
-                out.push((self.const_i64(value), lab));
+                let v = self.const_i64(value);
+                out.push(SwitchCaseItem { is_default: false, val: v, lab });
                 self.collect_switch_cases(body, out);
             }
             Stmt::Default(body) => {
                 let lab = self.lab("swdef");
-                out.push((None, lab));
+                out.push(SwitchCaseItem { is_default: true, val: None, lab });
                 self.collect_switch_cases(body, out);
             }
             Stmt::Label(_, inner) => self.collect_switch_cases(inner, out),
@@ -3266,7 +3458,7 @@ impl Codegen {
         // narrower incoming args undefined. Always load only the C width and
         // sign/zero-extend — movq of an `int` param was `0x7fff8000002f`
         // for maxSemas=47 → mul_size overflow in postgres PGSemaphoreShmemSize.
-        match ty {
+        match ty.unqual() {
             Type::Long | Type::ULong | Type::Ptr(_) | Type::Double => {
                 writeln!(self.out, "\tmovq\t{}(%rbp), {}", off, reg(regn)).unwrap();
             }
@@ -3289,7 +3481,7 @@ impl Codegen {
             Type::SChar => {
                 writeln!(self.out, "\tmovsbq\t{}(%rbp), {}", off, reg(regn)).unwrap();
             }
-            Type::Char => {
+            Type::Char | Type::UChar => {
                 writeln!(self.out, "\tmovzbq\t{}(%rbp), {}", off, reg(regn)).unwrap();
             }
             _ => match self.type_size(ty) {
@@ -3320,7 +3512,7 @@ impl Codegen {
             }
             Type::Struct(name) | Type::Union(name) => {
                 // Soft: incomplete type mid-TU — skip rather than fail the TU.
-                let Some(lay) = self.layouts.get(name).cloned() else {
+                let Some(lay) = self.get_layout(name).cloned() else {
                     return Ok(());
                 };
                 let mut by_name: HashMap<String, &Expr> = HashMap::new();
@@ -3381,7 +3573,7 @@ impl Codegen {
                 }
             }
             Type::Struct(name) | Type::Union(name) => {
-                let Some(lay) = self.layouts.get(name).cloned() else {
+                let Some(lay) = self.get_layout(name).cloned() else {
                     // No layout: treat as single scalar store of first field.
                     if let Some((_, e)) = fields_in.first() {
                         self.emit_expr_rval(e, 0, typedefs)?;
@@ -3608,12 +3800,38 @@ impl Codegen {
                 let bty = self.emit_expr_rval(base, 9, typedefs)?;
                 writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
                 writeln!(self.out, "\tmovq\t%r10, (%rsp)").unwrap();
-                self.emit_expr_rval(index, 10, typedefs)?;
+                let ity = self.emit_expr_rval(index, 10, typedefs)?;
                 writeln!(self.out, "\tmovq\t(%rsp), %r10").unwrap();
                 writeln!(self.out, "\taddq\t$16, %rsp").unwrap();
-                let elem = match bty {
-                    Type::Array(e, _) => *e,
-                    Type::Ptr(e) => *e,
+                let ity_expanded = self.expand_ty(&ity, typedefs);
+                match ity_expanded.unqual() {
+                    Type::Int => {
+                        writeln!(self.out, "\tmovslq\t%r11d, %r11").unwrap();
+                    }
+                    Type::Short | Type::SChar => {
+                        writeln!(self.out, "\tmovswq\t%r11w, %r11").unwrap();
+                    }
+                    Type::Char => {
+                        writeln!(self.out, "\tmovsbq\t%r11b, %r11").unwrap();
+                    }
+                    Type::UInt | Type::ULong => {
+                        writeln!(self.out, "\tmovl\t%r11d, %r11d").unwrap();
+                    }
+                    Type::UShort => {
+                        writeln!(self.out, "\tmovzwq\t%r11w, %r11").unwrap();
+                    }
+                    Type::UChar => {
+                        writeln!(self.out, "\tmovzbq\t%r11b, %r11").unwrap();
+                    }
+                    _ => {
+                        if self.type_size(&ity_expanded) <= 4 && !matches!(ity_expanded.unqual(), Type::UInt | Type::ULong | Type::UShort | Type::UChar | Type::Ptr(_)) {
+                            writeln!(self.out, "\tmovslq\t%r11d, %r11").unwrap();
+                        }
+                    }
+                }
+                let elem = match bty.unqual() {
+                    Type::Array(e, _) => (*e).unqual().clone(),
+                    Type::Ptr(e) => (*e).unqual().clone(),
                     // Incomplete typing: treat integer/void as opaque byte pointer.
                     Type::Int
                     | Type::UInt
@@ -3678,7 +3896,7 @@ impl Codegen {
                             }
                         })
                     }
-                    Type::Struct(n) | Type::Union(n) => self.layouts.get(n).cloned().unwrap_or_else(
+                    Type::Struct(n) | Type::Union(n) => self.get_layout(n).cloned().unwrap_or_else(
                         || {
                             // Soft: named struct without recorded layout.
                             let mut fields = HashMap::new();
@@ -3755,7 +3973,7 @@ impl Codegen {
             // pointer — EXCEPT for struct/union, where the scalar rvalue is the
             // object bits, not its address (`f().field` → SEGV).
             other => {
-                let ty = self.typeof_expr(other, typedefs);
+                let ty = self.expand_ty(&self.typeof_expr(other, typedefs), typedefs);
                 if Self::is_struct_or_union_ty(&ty) {
                     return self.emit_materialize_agg_addr(other, regn, typedefs);
                 }
@@ -3766,11 +3984,14 @@ impl Codegen {
     }
 
     fn load_ty(&mut self, ty: &Type, addr_reg: u8, dest: u8) {
-        match ty {
-            Type::SChar => {
+        match ty.unqual() {
+            Type::Long | Type::ULong | Type::Ptr(_) | Type::Double => {
+                writeln!(self.out, "\tmovq\t({}), {}", reg(addr_reg), reg(dest)).unwrap();
+            }
+            Type::SChar | Type::Char => {
                 writeln!(self.out, "\tmovsbq\t({}), {}", reg(addr_reg), reg(dest)).unwrap();
             }
-            Type::Char => {
+            Type::UChar => {
                 writeln!(self.out, "\tmovzbq\t({}), {}", reg(addr_reg), reg(dest)).unwrap();
             }
             // flex_int16_t / short: never movq — adjacent yy_base/yy_chk entries
@@ -3813,7 +4034,7 @@ impl Codegen {
     /// SysV: int/short returns live in %eax; high bits of %rax may be zero-
     /// extended or garbage. Sign-extend so 64-bit ops see a true negative.
     fn emit_extend_call_return(&mut self, dest: u8, ret_ty: &Type) {
-        match ret_ty {
+        match ret_ty.unqual() {
             Type::Double => {
                 // Floating returns live in %xmm0.
                 if dest == 0 {
@@ -3829,27 +4050,32 @@ impl Codegen {
                     writeln!(self.out, "\tmovd\t%xmm0, {}", reg_d(dest)).unwrap();
                 }
             }
-            Type::Int | Type::Short | Type::SChar => {
-                // cltq = movslq %eax, %rax when dest==0; else movslq %eax, dest
+            Type::Int => {
                 if dest == 0 {
                     writeln!(self.out, "\tmovslq\t%eax, %rax").unwrap();
                 } else {
                     writeln!(self.out, "\tmovslq\t%eax, {}", reg(dest)).unwrap();
                 }
             }
-            Type::UInt => {
-                // movl zero-extends into the full register.
+            Type::Short => {
                 if dest == 0 {
-                    writeln!(self.out, "\tmovl\t%eax, %eax").unwrap();
+                    writeln!(self.out, "\tmovswq\t%ax, %rax").unwrap();
                 } else {
-                    writeln!(self.out, "\tmovl\t%eax, {}", reg_d(dest)).unwrap();
+                    writeln!(self.out, "\tmovswq\t%ax, {}", reg(dest)).unwrap();
                 }
             }
-            Type::UShort | Type::Char => {
+            Type::SChar => {
                 if dest == 0 {
-                    writeln!(self.out, "\tmovzwq\t%ax, %rax").unwrap();
+                    writeln!(self.out, "\tmovsbq\t%al, %rax").unwrap();
                 } else {
-                    writeln!(self.out, "\tmovzwq\t%ax, {}", reg(dest)).unwrap();
+                    writeln!(self.out, "\tmovsbq\t%al, {}", reg(dest)).unwrap();
+                }
+            }
+            Type::Char | Type::UChar => {
+                if dest == 0 {
+                    writeln!(self.out, "\tmovzbq\t%al, %rax").unwrap();
+                } else {
+                    writeln!(self.out, "\tmovzbq\t%al, {}", reg(dest)).unwrap();
                 }
             }
             _ => {
@@ -4143,21 +4369,22 @@ impl Codegen {
         if args.len() < 5 {
             return Err("__get_cpuid needs 5 args".into());
         }
+        writeln!(self.out, "\tsubq\t$48, %rsp").unwrap();
         for (i, a) in args.iter().skip(1).take(4).enumerate() {
             self.emit_expr_rval(a, 0, typedefs)?;
-            writeln!(self.out, "\tpushq\t%rax").unwrap();
-            let _ = i;
+            let off = (i as i32) * 8;
+            writeln!(self.out, "\tmovq\t%rax, {off}(%rsp)").unwrap();
         }
         self.emit_expr_rval(&args[0], 0, typedefs)?;
         writeln!(self.out, "\tmovl\t%eax, %eax").unwrap();
-        writeln!(self.out, "\tpushq\t%rbx").unwrap();
+        writeln!(self.out, "\tmovq\t%rbx, 32(%rsp)").unwrap();
         writeln!(self.out, "\tcpuid").unwrap();
-        for (off, reg_out) in [(32i32, "%eax"), (24, "%ebx"), (16, "%ecx"), (8, "%edx")] {
+        for (off, reg_out) in [(0i32, "%eax"), (8, "%ebx"), (16, "%ecx"), (24, "%edx")] {
             writeln!(self.out, "\tmovq\t{off}(%rsp), %r10").unwrap();
             writeln!(self.out, "\tmovl\t{reg_out}, (%r10)").unwrap();
         }
-        writeln!(self.out, "\tpopq\t%rbx").unwrap();
-        writeln!(self.out, "\taddq\t$32, %rsp").unwrap();
+        writeln!(self.out, "\tmovq\t32(%rsp), %rbx").unwrap();
+        writeln!(self.out, "\taddq\t$48, %rsp").unwrap();
         writeln!(self.out, "\tmovl\t$1, %eax").unwrap();
         if dest != 0 {
             writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
@@ -4546,10 +4773,16 @@ impl Codegen {
                         Ok(Self::usual_arith_conv(&lty, &rty))
                     }
                     BinOp::Sub => {
-                        if let Type::Ptr(inner) = &lty {
+                        let l_is_ptr = matches!(lty, Type::Ptr(_) | Type::Array(_, _));
+                        if l_is_ptr {
+                            let inner = match &lty {
+                                Type::Ptr(i) => i.as_ref(),
+                                Type::Array(i, _) => i.as_ref(),
+                                _ => &Type::Void,
+                            };
                             let esz = self.type_size(inner).max(1);
                             let rty = self.typeof_expr(right, typedefs);
-                            if matches!(rty, Type::Ptr(_)) {
+                            if matches!(rty, Type::Ptr(_) | Type::Array(_, _)) {
                                 writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
                                 writeln!(self.out, "\tsubq\t%r11, %rax").unwrap();
                                 writeln!(self.out, "\tcqto").unwrap();
@@ -4558,7 +4791,7 @@ impl Codegen {
                                 if dest != 0 {
                                     writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                                 }
-                                return Ok(Type::Int);
+                                return Ok(Type::Long);
                             }
                             writeln!(self.out, "\timulq\t${esz}, %r11").unwrap();
                             // Compute via %rax so dest cannot clobber %r11 (right).
@@ -4589,13 +4822,13 @@ impl Codegen {
                     BinOp::Div => {
                         let res_ty = Self::usual_arith_conv(&lty, &rty);
                         let unsigned = matches!(
-                            res_ty,
-                            Type::ULong | Type::UInt | Type::UShort | Type::Char
+                            res_ty.unqual(),
+                            Type::ULong | Type::UInt | Type::UShort | Type::Char | Type::UChar
                         ) || matches!(
-                            lty,
+                            lty.unqual(),
                             Type::ULong | Type::UInt | Type::Ptr(_)
                         ) || matches!(
-                            rty,
+                            rty.unqual(),
                             Type::ULong | Type::UInt | Type::Ptr(_)
                         );
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
@@ -4614,13 +4847,13 @@ impl Codegen {
                     BinOp::Mod => {
                         let res_ty = Self::usual_arith_conv(&lty, &rty);
                         let unsigned = matches!(
-                            res_ty,
-                            Type::ULong | Type::UInt | Type::UShort | Type::Char
+                            res_ty.unqual(),
+                            Type::ULong | Type::UInt | Type::UShort | Type::Char | Type::UChar
                         ) || matches!(
-                            lty,
+                            lty.unqual(),
                             Type::ULong | Type::UInt | Type::Ptr(_)
                         ) || matches!(
-                            rty,
+                            rty.unqual(),
                             Type::ULong | Type::UInt | Type::Ptr(_)
                         );
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
@@ -4642,6 +4875,8 @@ impl Codegen {
                         // cmpq never matches → getopt while(c!=-1) spins forever.
                         // Wide (long/ptr): cmpq. Matches aarch64 cmp w vs cmp x.
                         let rty = self.typeof_expr(right, typedefs);
+                        let lty_u = lty.unqual();
+                        let rty_u = rty.unqual();
                         // C integer promotions: char/short/uchar/ushort → int
                         // before relational ops. Mixing promoted uchar with
                         // signed int must use signed setcc — treating Char as
@@ -4649,14 +4884,14 @@ impl Codegen {
                         // into unsigned `0<=0xffffffff` (DecodeXLogRecord hang).
                         // Only UInt/ULong/pointers force unsigned compares.
                         let unsignedish = matches!(
-                            lty,
+                            lty_u,
                             Type::UInt | Type::ULong | Type::Ptr(_) | Type::Array(_, _)
                         ) || matches!(
-                            rty,
+                            rty_u,
                             Type::UInt | Type::ULong | Type::Ptr(_) | Type::Array(_, _)
                         );
                         let wide = matches!(
-                            lty,
+                            lty_u,
                             Type::Long
                                 | Type::ULong
                                 | Type::Ptr(_)
@@ -4664,7 +4899,7 @@ impl Codegen {
                                 | Type::Float
                                 | Type::Double
                         ) || matches!(
-                            rty,
+                            rty_u,
                             Type::Long
                                 | Type::ULong
                                 | Type::Ptr(_)
@@ -4733,9 +4968,17 @@ impl Codegen {
                         Ok(Type::Int)
                     }
                     BinOp::Shr => {
+                        let unsigned = matches!(
+                            lty.unqual(),
+                            Type::ULong | Type::UInt | Type::UShort | Type::UChar
+                        );
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                        if unsigned {
+                            writeln!(self.out, "\tshrq\t%cl, %rax").unwrap();
+                        } else {
+                            writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                        }
                         if dest != 0 {
                             writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                         }
@@ -4772,13 +5015,7 @@ impl Codegen {
                 let rty = self.emit_expr_rval(right, 0, typedefs)?;
                 writeln!(self.out, "\tpopq\t%r10").unwrap();
                 self.coerce_rax_to_ty(&rty, &lty);
-                if matches!(left.as_ref(), Expr::Var(_))
-                    && matches!(lty, Type::Char | Type::Int | Type::Long | Type::Ptr(_))
-                {
-                    writeln!(self.out, "\tmovq\t%rax, (%r10)").unwrap();
-                } else {
-                    self.store_ty(&lty, 9, 0);
-                }
+                self.store_ty(&lty, 9, 0);
                 if dest != 0 {
                     writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                 }
@@ -4816,14 +5053,32 @@ impl Codegen {
                         writeln!(self.out, "\timulq\t%r11, %rax").unwrap();
                     }
                     BinOp::Div => {
+                        let unsigned = matches!(
+                            lty.unqual(),
+                            Type::ULong | Type::UInt | Type::UShort | Type::UChar
+                        );
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        writeln!(self.out, "\tcqto").unwrap();
-                        writeln!(self.out, "\tidivq\t%r11").unwrap();
+                        if unsigned {
+                            writeln!(self.out, "\txorq\t%rdx, %rdx").unwrap();
+                            writeln!(self.out, "\tdivq\t%r11").unwrap();
+                        } else {
+                            writeln!(self.out, "\tcqto").unwrap();
+                            writeln!(self.out, "\tidivq\t%r11").unwrap();
+                        }
                     }
                     BinOp::Mod => {
+                        let unsigned = matches!(
+                            lty.unqual(),
+                            Type::ULong | Type::UInt | Type::UShort | Type::UChar
+                        );
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        writeln!(self.out, "\tcqto").unwrap();
-                        writeln!(self.out, "\tidivq\t%r11").unwrap();
+                        if unsigned {
+                            writeln!(self.out, "\txorq\t%rdx, %rdx").unwrap();
+                            writeln!(self.out, "\tdivq\t%r11").unwrap();
+                        } else {
+                            writeln!(self.out, "\tcqto").unwrap();
+                            writeln!(self.out, "\tidivq\t%r11").unwrap();
+                        }
                         writeln!(self.out, "\tmovq\t%rdx, %rax").unwrap();
                     }
                     BinOp::BitAnd => {
@@ -4845,9 +5100,17 @@ impl Codegen {
                         writeln!(self.out, "\tshlq\t%cl, %rax").unwrap();
                     }
                     BinOp::Shr => {
+                        let unsigned = matches!(
+                            lty.unqual(),
+                            Type::ULong | Type::UInt | Type::UShort | Type::UChar
+                        );
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                        if unsigned {
+                            writeln!(self.out, "\tshrq\t%cl, %rax").unwrap();
+                        } else {
+                            writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                        }
                     }
                     _ => return Err("bad compound assign".into()),
                 }
@@ -4933,8 +5196,82 @@ impl Codegen {
                         name_buf = "strlen".to_string();
                         &name_buf
                     }
+                    "__builtin_vsnprintf" => {
+                        name_buf = "vsnprintf".to_string();
+                        &name_buf
+                    }
+                    "__builtin_vfprintf" => {
+                        name_buf = "vfprintf".to_string();
+                        &name_buf
+                    }
+                    "__builtin_vprintf" => {
+                        name_buf = "vprintf".to_string();
+                        &name_buf
+                    }
+                    "__builtin_vsprintf" => {
+                        name_buf = "vsprintf".to_string();
+                        &name_buf
+                    }
                     _ => name,
                 };
+                if matches!(
+                    name.as_str(),
+                    "vprintf"
+                        | "vfprintf"
+                        | "vsprintf"
+                        | "vsnprintf"
+                        | "vdprintf"
+                        | "vscanf"
+                        | "vfscanf"
+                        | "vsscanf"
+                ) && args.len() >= 2
+                    && !self.contains_local(name)
+                    && !self.globals.contains_key(name)
+                    && !self.funcs.get(name).map_or(false, |f| f.body.is_some())
+                {
+                    let n = args.len();
+                    // SysV x86-64 va_list shim: construct a 24-byte va_list struct on stack:
+                    // 0(%rsp): gp_offset = 0 (u32)
+                    // 4(%rsp): fp_offset = 48 (u32)
+                    // 8(%rsp): overflow_arg_area = pointer to self.va_regsave_off + 48(%rbp)
+                    // 16(%rsp): reg_save_area = pointer to self.va_regsave_off(%rbp) (or ap)
+                    // 24(%rsp)..47(%rsp): saved fixed args 0..n-2
+                    writeln!(self.out, "\tsubq\t$48, %rsp").unwrap();
+                    for i in 0..(n - 1) {
+                        self.emit_expr_rval(&args[i], 0, typedefs)?;
+                        let off = 24 + (i as i64) * 8;
+                        writeln!(self.out, "\tmovq\t%rax, {off}(%rsp)").unwrap();
+                    }
+                    self.emit_expr_rval(&args[n - 1], 0, typedefs)?;
+                    writeln!(self.out, "\tmovl\t$0, (%rsp)").unwrap();
+                    writeln!(self.out, "\tmovl\t$48, 4(%rsp)").unwrap();
+                    let ovf_off = if self.va_regsave_off != 0 {
+                        self.va_regsave_off + 48
+                    } else {
+                        16
+                    };
+                    writeln!(self.out, "\tleaq\t{ovf_off}(%rbp), %r10").unwrap();
+                    writeln!(self.out, "\tmovq\t%r10, 8(%rsp)").unwrap();
+                    writeln!(self.out, "\tmovq\t%rax, 16(%rsp)").unwrap();
+                    for i in 0..(n - 1) {
+                        let off = 24 + (i as i64) * 8;
+                        writeln!(self.out, "\tmovq\t{off}(%rsp), {}", ARG_REGS[i]).unwrap();
+                    }
+                    let ap_reg = ARG_REGS[n - 1];
+                    writeln!(self.out, "\tmovq\t%rsp, {ap_reg}").unwrap();
+                    writeln!(self.out, "\txorb\t%al, %al").unwrap();
+                    let s = sym(name);
+                    if cfg!(target_os = "macos") {
+                        writeln!(self.out, "\tcallq\t{s}").unwrap();
+                    } else {
+                        writeln!(self.out, "\tcallq\t{s}@PLT").unwrap();
+                    }
+                    writeln!(self.out, "\taddq\t$48, %rsp").unwrap();
+                    if dest != 0 {
+                        writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
+                    }
+                    return Ok(Type::Int);
+                }
                 // Fold GCC constant builtins left as runtime calls after parse.
                 // Without this, compressed/usercopy paths leave `U __builtin_constant_p`.
                 if name == "__builtin_constant_p" {
@@ -4968,11 +5305,26 @@ impl Codegen {
                     if args.len() < 2 {
                         return Err(format!("{name} needs (crc, data)"));
                     }
-                    self.emit_expr_rval(&args[0], 0, typedefs)?; // crc → %rax
-                    writeln!(self.out, "\tpushq\t%rax").unwrap();
-                    self.emit_expr_rval(&args[1], 0, typedefs)?; // data → %rax
+                    // 1. Evaluate args[0] (crc) -> %rax
+                    self.emit_expr_rval(&args[0], 0, typedefs)?;
+                    // 2. Zero-extend 32-bit crc to 64-bit %rax for 8/32-bit variants (movl clears upper 32 bits of %rax)
+                    if name != "_mm_crc32_u64" {
+                        writeln!(self.out, "\tmovl\t%eax, %eax").unwrap();
+                    }
+
+                    // 3. Save crc on 16-byte aligned stack frame
+                    writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
+                    writeln!(self.out, "\tmovq\t%rax, (%rsp)").unwrap();
+
+                    // 4. Evaluate args[1] (data) -> %rax, then copy to %rsi
+                    self.emit_expr_rval(&args[1], 0, typedefs)?;
                     writeln!(self.out, "\tmovq\t%rax, %rsi").unwrap();
-                    writeln!(self.out, "\tpopq\t%rax").unwrap();
+
+                    // 5. Restore crc -> %rax from stack
+                    writeln!(self.out, "\tmovq\t(%rsp), %rax").unwrap();
+                    writeln!(self.out, "\taddq\t$16, %rsp").unwrap();
+
+                    // 6. Emit hardware CRC32 instruction
                     match name.as_str() {
                         "_mm_crc32_u8" => {
                             writeln!(self.out, "\tcrc32b\t%sil, %eax").unwrap();
@@ -5161,15 +5513,12 @@ impl Codegen {
                         return Ok(Type::ULong);
                     }
                 }
+
                 if name == "__indirect__" {
                     if args.is_empty() {
                         return Err("indirect call missing callee".into());
                     }
                     let (callee, real_args) = args.split_first().unwrap();
-                    // (*fp)(args): C function designators from *fp do not load
-                    // through the function address — just use the pointer value.
-                    // Without this peel, soft emits `mov (%fp),%r9; call *%r9`
-                    // and SEGV (postgres OidFunctionCall0 / fmgr).
                     let callee = match callee {
                         Expr::Unary {
                             op: UnaryOp::Deref,
@@ -5177,66 +5526,16 @@ impl Codegen {
                         } => expr.as_ref(),
                         other => other,
                     };
-                    // SysV: first 6 integer *eightbytes*; aggregates ≤16B → 1–2 slots.
-                    let mut n = 0usize;
-                    for a in real_args.iter() {
-                        n += self.sysv_int_arg_slots(&self.typeof_expr(a, typedefs));
-                    }
-                    let nreg = n.min(6);
-                    let nstack = n.saturating_sub(6);
-                    let spill = (n as i64) * 8;
-                    let spill_aligned = (spill + 15) & !15;
-                    if spill_aligned > 0 {
-                        writeln!(self.out, "\tsubq\t${spill_aligned}, %rsp").unwrap();
-                    }
-                    let mut slot = 0usize;
-                    for a in real_args.iter() {
-                        let aty = self.typeof_expr(a, typedefs);
-                        if let Some(nr) = self.small_agg_nregs(&aty) {
-                            self.emit_agg_arg_addr(a, typedefs)?;
-                            for k in 0..nr {
-                                let mem_off = (k as i64) * 8;
-                                writeln!(self.out, "\tmovq\t{mem_off}(%r10), %rax").unwrap();
-                                let off = spill_aligned - spill + (slot as i64) * 8;
-                                writeln!(self.out, "\tmovq\t%rax, {off}(%rsp)").unwrap();
-                                slot += 1;
-                            }
-                        } else {
-                            self.emit_expr_rval(a, 0, typedefs)?;
-                            let off = spill_aligned - spill + (slot as i64) * 8;
-                            writeln!(self.out, "\tmovq\t%rax, {off}(%rsp)").unwrap();
-                            slot += 1;
-                        }
-                    }
-                    // Callee must not live in %r9: SysV arg5 is %r9, so loading
-                    // 6 integer args would clobber it (postgres
-                    // relation->rd_tableam->scan_begin(..., flags) called the
-                    // flags value as a function pointer → SEGV).
-                    // Spill callee below the arg frame, load ARG_REGS, call *%rax.
                     self.emit_expr_rval(callee, 0, typedefs)?;
                     writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
                     writeln!(self.out, "\tmovq\t%rax, (%rsp)").unwrap();
-                    for i in 0..nreg {
-                        let off = 16 + spill_aligned - spill + (i as i64) * 8;
-                        writeln!(self.out, "\tmovq\t{off}(%rsp), {}", ARG_REGS[i]).unwrap();
-                    }
-                    writeln!(self.out, "\tmovq\t(%rsp), %rax").unwrap();
-                    if nstack > 0 {
-                        // Raise rsp so arg6 sits at 0(%rsp); keep callee in %rax.
-                        let arg6_off = 16 + spill_aligned - spill + 6 * 8;
-                        if arg6_off > 0 {
-                            writeln!(self.out, "\taddq\t${arg6_off}, %rsp").unwrap();
-                        }
-                        writeln!(self.out, "\tcallq\t*%rax").unwrap();
-                        let stack_bytes = ((nstack as i64) * 8 + 15) & !15;
-                        writeln!(self.out, "\taddq\t${stack_bytes}, %rsp").unwrap();
-                    } else {
-                        let drop = 16 + spill_aligned;
-                        if drop > 0 {
-                            writeln!(self.out, "\taddq\t${drop}, %rsp").unwrap();
-                        }
-                        writeln!(self.out, "\tcallq\t*%rax").unwrap();
-                    }
+                    let (_nreg, nstack_bytes) = self.emit_sysv_arg_setup(real_args, &[], typedefs, 2)?;
+                    let callee_off = nstack_bytes;
+                    writeln!(self.out, "\tmovq\t{callee_off}(%rsp), %r10").unwrap();
+                    writeln!(self.out, "\txorb\t%al, %al").unwrap();
+                    writeln!(self.out, "\tcallq\t*%r10").unwrap();
+                    let total_cleanup = nstack_bytes + 16;
+                    writeln!(self.out, "\taddq\t${total_cleanup}, %rsp").unwrap();
                     if dest != 0 {
                         writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                     }
@@ -5316,104 +5615,32 @@ impl Codegen {
                             .collect()
                     })
                     .unwrap_or_default();
-                let mut n = 0usize;
-                for (i, a) in args.iter().enumerate() {
-                    let aty = proto.get(i).cloned().unwrap_or_else(|| self.typeof_expr(a, typedefs));
-                    n += self.sysv_int_arg_slots(&aty);
-                }
-                let nreg = n.min(6);
-                let nstack = n.saturating_sub(6);
-                // Evaluate left-to-right into 8-byte slots.
-                let spill = (n as i64) * 8;
-                let spill_aligned = (spill + 15) & !15; // 16-byte align before call
-                if spill_aligned > 0 {
-                    writeln!(self.out, "\tsubq\t${spill_aligned}, %rsp").unwrap();
-                }
-                let mut slot = 0usize;
-                for (i, a) in args.iter().enumerate() {
-                    let aty = proto.get(i).cloned().unwrap_or_else(|| self.typeof_expr(a, typedefs));
-                    if let Some(nr) = self.small_agg_arg_nregs(&aty) {
-                        self.emit_agg_arg_addr(a, typedefs)?;
-                        for k in 0..nr {
-                            let mem_off = (k as i64) * 8;
-                            writeln!(self.out, "\tmovq\t{mem_off}(%r10), %rax").unwrap();
-                            let off = spill_aligned - spill + (slot as i64) * 8;
-                            writeln!(self.out, "\tmovq\t%rax, {off}(%rsp)").unwrap();
-                            slot += 1;
-                        }
-                    } else {
-                        self.emit_expr_rval(a, 0, typedefs)?;
-                        let off = spill_aligned - spill + (slot as i64) * 8;
-                        writeln!(self.out, "\tmovq\t%rax, {off}(%rsp)").unwrap();
-                        slot += 1;
-                    }
-                }
-                // Load reg args
-                for i in 0..nreg {
-                    let off = spill_aligned - spill + (i as i64) * 8;
-                    writeln!(self.out, "\tmovq\t{off}(%rsp), {}", ARG_REGS[i]).unwrap();
-                }
-                // Stack args must be at 0(%rsp)=arg6, 8(%rsp)=arg7, ...
-                // Compact them to the *high* end of the spill frame, then raise
-                // rsp so those slots become 0(%rsp). Compacting to the low end
-                // then addq'd away the low end (postgres fmtint 9th arg target
-                // became NULL → SEGV in dopr_outch).
-                if nstack > 0 {
-                    let stack_bytes = ((nstack as i64) * 8 + 15) & !15;
-                    for i in 0..nstack {
-                        let src = spill_aligned - spill + ((6 + i) as i64) * 8;
-                        let dst = spill_aligned - stack_bytes + (i as i64) * 8;
-                        if src != dst {
-                            writeln!(self.out, "\tmovq\t{src}(%rsp), %rax").unwrap();
-                            writeln!(self.out, "\tmovq\t%rax, {dst}(%rsp)").unwrap();
-                        }
-                    }
-                    let drop = spill_aligned - stack_bytes;
-                    if drop > 0 {
-                        writeln!(self.out, "\taddq\t${drop}, %rsp").unwrap();
-                    }
-                } else if spill_aligned > 0 {
-                    // No stack args: free the whole spill before call (regs hold values).
-                    writeln!(self.out, "\taddq\t${spill_aligned}, %rsp").unwrap();
-                }
-
-                let s = sym(name);
-                let is_varargs = matches!(
-                    name.as_str(),
-                    "printf" | "sprintf" | "snprintf" | "fprintf" | "scanf" | "sscanf"
-                );
-                if self.contains_local(name) || self.globals.contains_key(name) {
-                    // Function-pointer local/global. Do NOT leave the callee in
-                    // %r9: SysV arg5 is %r9, and push/pop of ARG_REGS restores
-                    // arg5 over a callee loaded into %r9 → `call *%r9` jumps to
-                    // callback_state (postgres heapam_index_build_range_scan).
-                    // Keep callee in %r10 (not an integer arg register).
-                    for i in 0..nreg {
-                        writeln!(self.out, "\tpushq\t{}", ARG_REGS[i]).unwrap();
-                    }
+                let is_fn_ptr_var = self.contains_local(name)
+                    || (self.globals.contains_key(name) && !self.funcs.contains_key(name));
+                let nstack_bytes = if is_fn_ptr_var {
                     self.emit_expr_rval(&Expr::Var(name.clone()), 0, typedefs)?;
-                    writeln!(self.out, "\tmovq\t%rax, %r10").unwrap();
-                    for i in (0..nreg).rev() {
-                        writeln!(self.out, "\tpopq\t{}", ARG_REGS[i]).unwrap();
-                    }
+                    writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
+                    writeln!(self.out, "\tmovq\t%rax, (%rsp)").unwrap();
+                    let (_nreg, nsb) = self.emit_sysv_arg_setup(args, &proto, typedefs, 2)?;
+                    let callee_off = nsb;
+                    writeln!(self.out, "\tmovq\t{callee_off}(%rsp), %r10").unwrap();
+                    writeln!(self.out, "\txorb\t%al, %al").unwrap();
                     writeln!(self.out, "\tcallq\t*%r10").unwrap();
+                    nsb + 16
                 } else {
-                    if is_varargs {
-                        writeln!(self.out, "\txorb\t%al, %al").unwrap();
-                    }
-                    // Linux ELF shared objects / PIE need PLT relocs for undef
-                    // symbols (postgres dict_snowball.so → lowerstr). Bare
-                    // `callq foo` is R_X86_64_PC32 and fails shlib link.
+                    let (_nreg, nsb) = self.emit_sysv_arg_setup(args, &proto, typedefs, 0)?;
+                    let s = sym(name);
+                    writeln!(self.out, "\txorb\t%al, %al").unwrap();
                     if cfg!(target_os = "macos") {
                         writeln!(self.out, "\tcallq\t{s}").unwrap();
                     } else {
                         writeln!(self.out, "\tcallq\t{s}@PLT").unwrap();
                     }
-                }
-                // Pop stack args after call
-                if nstack > 0 {
-                    let stack_bytes = ((nstack as i64) * 8 + 15) & !15;
-                    writeln!(self.out, "\taddq\t${stack_bytes}, %rsp").unwrap();
+                    nsb
+                };
+                // Pop stack args / pushed callee after call
+                if nstack_bytes > 0 {
+                    writeln!(self.out, "\taddq\t${nstack_bytes}, %rsp").unwrap();
                 }
                 // Narrow ints from *known* prototypes get extended so 64-bit
                 // cmp against -1 works; undeclared libc defaults look like Int
@@ -5453,11 +5680,10 @@ impl Codegen {
                     let sz = self.type_size(&to).max(1);
                     let slot = Self::align_up(sz, 16);
                     writeln!(self.out, "\tsubq\t${slot}, %rsp").unwrap();
-                    // Zero slot so omitted fields stay 0.
-                    writeln!(self.out, "\tmovq\t%rsp, %rdi").unwrap();
-                    writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
-                    writeln!(self.out, "\tmovq\t${sz}, %rcx").unwrap();
-                    writeln!(self.out, "\trep\tstosb").unwrap();
+                    // Zero slot so omitted fields stay 0 (must not clobber %rdi/%rcx parameter registers).
+                    for off in (0..slot).step_by(8) {
+                        writeln!(self.out, "\tmovq\t$0, {off}(%rsp)").unwrap();
+                    }
                     self.emit_init_list_at_rsp(0, &to, fields, typedefs)?;
                     writeln!(self.out, "\tmovq\t%rsp, %r10").unwrap();
                     self.load_ty(&to, 9, dest);
@@ -5506,8 +5732,8 @@ impl Codegen {
                     // `firstfree != (uint16)-1` is always true and postgres DSA
                     // takes the freelist path with firstfree=0xffff
                     // (8192+65535*56 → bogus span → SEGV in init_span).
-                    match &to {
-                        Type::UShort | Type::Char => {
+                    match to.unqual() {
+                        Type::UShort | Type::Char | Type::UChar => {
                             writeln!(
                                 self.out,
                                 "\tmovzwq\t{}, {}",
@@ -5723,6 +5949,19 @@ impl Codegen {
                     Type::Double
                 } else {
                     Self::usual_arith_conv(&l, &r)
+                }
+            }
+            Expr::Binary {
+                op: BinOp::Shl | BinOp::Shr,
+                left,
+                ..
+            } => {
+                let l = self.typeof_expr(left, typedefs);
+                match l {
+                    Type::ULong => Type::ULong,
+                    Type::Long => Type::Long,
+                    Type::UInt => Type::UInt,
+                    _ => Type::Int,
                 }
             }
             Expr::Member { base, field, arrow } => {
