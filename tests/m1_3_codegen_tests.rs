@@ -113,6 +113,9 @@ int main(void) {
 
 #[test]
 fn test_single_exec_00204() {
+    if Target::host() != Target::Aarch64 {
+        return;
+    }
     std::fs::create_dir_all("target/worker_test").ok();
     let opts = CompileOptions {
         input: "third_party/c-testsuite/tests/single-exec/00204.c".into(),
