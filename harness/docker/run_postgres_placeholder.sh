@@ -22,6 +22,7 @@ WRAP="$ROOT/harness/docker/acc_cc_wrapper.sh"
 POSTGRES_VER="${POSTGRES_VER:-15.7}"
 
 mkdir -p "$SCRATCH"
+rm -f "$SCRATCH/c2_postgres_237_summary.txt"
 : >"$LOG"
 log() { echo "$@" | tee -a "$LOG"; }
 
@@ -170,6 +171,9 @@ docker run --rm -i --platform linux/amd64 \
 
     log "=== postgres make (world + check prep) ==="
     set +e
+    make -C src/backend generated-headers
+    make -C src/port CC="$WRAP" all all-shared
+    make -C src/common CC="$WRAP" all all-shared
     make CC="$WRAP" 2>&1 \
       | tee /scratch/c2_postgres_make.log | tee -a "$LOG" | tail -60
     make_ec=${PIPESTATUS[0]}
@@ -221,16 +225,17 @@ docker run --rm -i --platform linux/amd64 \
        && grep -qE 'All [0-9]+ tests passed|All [0-9]+ tests passed\.' /scratch/c2_postgres_check.log 2>/dev/null; then
       n=$(grep -Eo 'All [0-9]+ tests passed' /scratch/c2_postgres_check.log | tail -1 | grep -Eo '[0-9]+' || echo 0)
       log "VERDICT: PASS — all regression tests passed (count=$n)"
+      rm -f /scratch/c2_postgres_237_summary.txt 2>/dev/null || true
       echo "All $n tests passed (237/237)" > /scratch/c2_postgres_237_summary.txt
       exit 0
     fi
 
     if [[ -n "$passed" && "$passed" -gt 0 ]]; then
-      log "VERDICT: PARTIAL — passed=$passed failed=${failed:-?} (CCC bar: all 237)"
+      log "VERDICT: PARTIAL — passed=$passed failed=${failed:-?} CCC bar: all 237"
       exit 3
     fi
 
-    log "VERDICT: FAIL — make check ec=$check_ec (no passing tests recorded)"
+    log "VERDICT: FAIL — make check ec=$check_ec - no passing tests recorded"
     exit 1
 PG_DOCKER_SCRIPT
 ec=$?

@@ -311,7 +311,7 @@ mod tests {
             output: bin_path.clone(),
             keep_asm: false,
             emit_asm_only: false,
-            target: Target::Aarch64,
+            target: Target::host(),
             target_os: TargetOs::host(),
             linker: None,
             include_dirs: Vec::new(),
@@ -340,8 +340,7 @@ mod tests {
             d
         };
         let src_path = dir.join("shadow.c");
-        let bin_path_arm = dir.join("shadow_arm");
-        let bin_path_x86 = dir.join("shadow_x86");
+        let bin_path_host = dir.join("shadow_host");
         let code = r#"
         int main(void) {
             int x = 10;
@@ -361,36 +360,44 @@ mod tests {
 
         compile(&CompileOptions {
             input: src_path.clone(),
-            output: bin_path_arm.clone(),
+            output: bin_path_host.clone(),
             keep_asm: false,
             emit_asm_only: false,
-            target: Target::Aarch64,
+            target: Target::host(),
             target_os: TargetOs::host(),
             linker: None,
             include_dirs: Vec::new(),
             defines: Vec::new(),
             force_includes: Vec::new(),
         })
-        .expect("compile aarch64");
-        let out_arm = Command::new(&bin_path_arm).output().expect("run arm");
-        assert_eq!(out_arm.status.code(), Some(0));
+        .expect("compile host");
+        let out_host = Command::new(&bin_path_host).output().expect("run host");
+        assert_eq!(out_host.status.code(), Some(0));
 
-        compile(&CompileOptions {
-            input: src_path,
-            output: bin_path_x86.clone(),
-            keep_asm: false,
-            emit_asm_only: false,
-            target: Target::X86_64,
-            target_os: TargetOs::host(),
-            linker: None,
-            include_dirs: Vec::new(),
-            defines: Vec::new(),
-            force_includes: Vec::new(),
-        })
-        .expect("compile x86_64");
+        let is_x86_host = Target::host() == Target::X86_64;
+        let can_run_x86 = is_x86_host || Command::new("arch").arg("-x86_64").arg("true").output().map(|o| o.status.success()).unwrap_or(false);
 
-        if Command::new("arch").arg("-x86_64").arg("true").output().map(|o| o.status.success()).unwrap_or(false) {
-            let out_x86 = Command::new("arch").arg("-x86_64").arg(&bin_path_x86).output().expect("run x86");
+        if can_run_x86 {
+            let bin_path_x86 = dir.join("shadow_x86");
+            compile(&CompileOptions {
+                input: src_path,
+                output: bin_path_x86.clone(),
+                keep_asm: false,
+                emit_asm_only: false,
+                target: Target::X86_64,
+                target_os: TargetOs::host(),
+                linker: None,
+                include_dirs: Vec::new(),
+                defines: Vec::new(),
+                force_includes: Vec::new(),
+            })
+            .expect("compile x86_64");
+
+            let out_x86 = if is_x86_host {
+                Command::new(&bin_path_x86).output().expect("run x86")
+            } else {
+                Command::new("arch").arg("-x86_64").arg(&bin_path_x86).output().expect("run x86")
+            };
             assert_eq!(out_x86.status.code(), Some(0));
         }
     }

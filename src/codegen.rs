@@ -392,45 +392,7 @@ pub struct Codegen {
     va_fixed_fp: usize,
     /// Current active section name if explicitly set via attribute (e.g. .init.rodata.prel64).
     cur_section: Option<String>,
-    /// Data symbols referenced via adrp/adr (for weak stub emission when DEFINE_PER_CPU
-    /// or other macros failed to produce a definition in this TU).
-    referenced_data_syms: std::collections::HashSet<String>,
     sret_off: i64,
-}
-
-/// Kernel/PI linker symbols that must remain undefined in TUs so PROVIDE
-/// aliases and the real definitions win. Weak-stubbing these breaks early MMU
-/// (`__pi__text` fake weak blocks `PROVIDE(__pi__text = _text)`).
-fn is_linker_boundary_sym(name: &str) -> bool {
-    matches!(
-        name,
-        "_text"
-            | "_stext"
-            | "_etext"
-            | "_data"
-            | "_edata"
-            | "_end"
-            | "__bss_start"
-            | "__bss_stop"
-            | "__inittext_begin"
-            | "__inittext_end"
-            | "__initdata_begin"
-            | "__initdata_end"
-            | "__start_rodata"
-            | "init_pg_dir"
-            | "init_pg_end"
-            | "init_idmap_pg_dir"
-            | "init_idmap_pg_end"
-            | "swapper_pg_dir"
-            | "reserved_pg_dir"
-            | "init_task"
-            | "init_stack"
-            | "early_init_stack"
-            | "primary_entry"
-            | "__primary_switch"
-            | "__primary_switched"
-            | "__enable_mmu"
-    )
 }
 
 impl Codegen {
@@ -465,7 +427,6 @@ impl Codegen {
             va_fixed_n: 0,
             va_fixed_fp: 0,
             cur_section: None,
-            referenced_data_syms: std::collections::HashSet::new(),
             sret_off: 0,
         }
     }
@@ -720,15 +681,6 @@ impl Codegen {
 
     /// Materialize address of label into x{reg} (PC-relative).
     fn emit_adrp_add(&mut self, reg: u8, label: &str) {
-        // Track bare symbol names (no +offset) for weak-data stubs.
-        let base = label.split('+').next().unwrap_or(label);
-        if !base.is_empty()
-            && base
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
-        {
-            self.referenced_data_syms.insert(base.to_string());
-        }
         match self.os {
             TargetOs::Darwin => {
                 writeln!(self.out, "\tadrp\tx{reg}, {label}@PAGE").unwrap();
@@ -1565,18 +1517,6 @@ impl Codegen {
                 }
                 match &f.body {
                     None => {}
-                    Some(b) if b.is_empty() && f.name != "main" => {
-                        // Prefer freestanding only for a small whitelist of
-                        // empty bodies that must win over soft stubs. Broader
-                        // freestanding (smp_prepare_boot_cpu, …) is shared
-                        // across many TUs — emitting strong copies from every
-                        // empty body causes multiple-definition link errors.
-                        // kasan_init_sw_tags is the critical one: static-inline
-                        // {} from kasan.h never reached emit_function before.
-                        if emitted_syms.insert(f.name.clone()) {
-                            self.emit_stub_function(f)?;
-                        }
-                    }
                     Some(_) => {
                         if emitted_syms.insert(f.name.clone()) {
                             self.emit_function(f, &typedefs)?;
@@ -1638,52 +1578,6 @@ impl Codegen {
         // Strong definitions (when we emit them) win over these.
         if matches!(self.os, TargetOs::Linux) {
             self.emit_text_section();
-            for name in [
-                "__field_overflow",
-                "__bad_mask",
-                "__bad_unaligned_access",
-                "__bad_size_call_parameter",
-                "__bad_copy_to",
-                "__bad_copy_from",
-                "__bad_udelay",
-                "____wrong_branch_error",
-                // define_dev_printk_level() sometimes fails to expand in huge TUs;
-                // weak no-op printks keep device drivers linkable until PP is fixed.
-                "_dev_emerg",
-                "_dev_alert",
-                "_dev_crit",
-                "_dev_err",
-                "_dev_warn",
-                "_dev_notice",
-                "_dev_info",
-                // jump_label / rust / misc call targets
-                "rust_fmt_argument",
-                "__declare_arg_1",
-                "__declare_arg_2",
-                "__declare_arg_3",
-                "fdt_get_property_w",
-                // Soft atomic fallbacks (Redis without stdatomic / C11). Not
-                // true atomics — enough for single-threaded / soft-link smoke.
-                "__atomic_add_fetch",
-                "__atomic_compare_exchange_n",
-                "__atomic_load_n",
-                "__atomic_store_n",
-                "__atomic_fetch_add",
-                "__sync_add_and_fetch",
-                "__sync_bool_compare_and_swap",
-                "__sync_fetch_and_add",
-                "__sync_fetch_and_sub",
-                "__sync_fetch_and_and",
-                "__sync_fetch_and_or",
-            ] {
-                if emitted_syms.contains(name) {
-                    continue;
-                }
-                writeln!(self.out, "\t.weak\t{name}").unwrap();
-                writeln!(self.out, "{name}:").unwrap();
-                writeln!(self.out, "\tmov\tx0, xzr").unwrap();
-                writeln!(self.out, "\tret").unwrap();
-            }
             // Real bswap helpers (PP rewrites __builtin_bswapN → __acc_bswapN).
             for &(name, bits) in &[
                 ("__acc_bswap16", 16u32),
@@ -1707,130 +1601,6 @@ impl Codegen {
                         writeln!(self.out, "\trev\tx0, x0").unwrap();
                     }
                 }
-                writeln!(self.out, "\tret").unwrap();
-            }
-            // Do NOT emit a local weak __errno_location body: `bl __errno_location`
-            // would bind to it at static link and never reach glibc. Leave the
-            // symbol undefined so it goes through the PLT to libc (userspace).
-            // Freestanding/kernel TUs that need a fallback can link a tiny stub
-            // that returns &__acc_errno.
-            // Weak zero data for optional globals / macro local-name leaks
-            // (rculist `struct list_head *__head` when local decl soft-fails).
-            writeln!(self.out, "\t.bss").unwrap();
-            let mut weak_data: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for name in [
-                "__acc_errno",
-                // Process-wide AAPCS64 VR cursor for va_arg(double) after
-                // va_list is passed by value (char*) into non-variadic helpers
-                // like sqlite3_str_vappendf. THREADSAFE=0 only.
-                "acc_va_vr_cursor",
-                "elfcorehdr_addr",
-                "elfcorehdr_size",
-                "kvm_protected_mode_initialized",
-                "___res",
-                "__head",
-                "console_timer",
-                "param_ops_byte",
-                "param_ops_short",
-                "param_ops_ushort",
-                "param_ops_int",
-                "param_ops_uint",
-                "param_ops_long",
-                "param_ops_ulong",
-                "param_ops_ullong",
-                "param_ops_hexint",
-                "param_ops_charp",
-                "param_ops_bool",
-                // Soft `bool`→`_Bool` can rename param_ops_bool → param_ops__Bool
-                "param_ops__Bool",
-                "param_ops_string",
-                "blockdev_superblock",
-                "def_blk_fops",
-                "pci_msi_ignore_mask",
-                "_debug_pagealloc_enabled",
-                "_debug_pagealloc_enabled_early",
-                "__pi___eh_frame_start",
-                "__pi___eh_frame_end",
-                "__pi_dynamic_scs_is_enabled",
-                // DEFINE_PER_CPU / SCS when multi-line macros fail to expand.
-                "irq_shadow_call_stack_ptr",
-                "batched_entropy_u8",
-                "batched_entropy_u16",
-                "batched_entropy_u32",
-                "batched_entropy_u64",
-            ] {
-                if emitted_syms.contains(name) {
-                    continue;
-                }
-                writeln!(self.out, "\t.weak\t{name}").unwrap();
-                writeln!(self.out, "\t.align\t3").unwrap();
-                writeln!(self.out, "{name}:").unwrap();
-                writeln!(self.out, "\t.zero\t256").unwrap();
-                weak_data.insert(name.to_string());
-            }
-            // Any adrp target not defined in this TU: weak data stub so RELOC_HIDE
-            // address-of soft-missing DEFINE_PER_CPU symbols still links.
-            // Strong defs from other TUs win over these weaks.
-            // Skip names already present as labels in the assembly (static defs,
-            // prior weaks) to avoid "symbol is already defined" from gas.
-            //
-            // CRITICAL: never weak-stub linker/PI boundary symbols. PI objcopy
-            // renames `_text`→`__pi__text`; a weak local stub then blocks
-            // PROVIDE(__pi__text = _text) and create_init_idmap maps the wrong
-            // PA range → Prefetch Abort right after msr sctlr_el1.
-            let mut extra: Vec<String> = self
-                .referenced_data_syms
-                .iter()
-                .filter(|n| {
-                    !emitted_syms.contains(*n)
-                        && !weak_data.contains(*n)
-                        && !n.starts_with("l_str_")
-                        && !n.starts_with('.')
-                        && !n.starts_with('L')
-                        && !n.starts_with("__pi_")
-                        && !n.starts_with("__efistub_")
-                        && !is_linker_boundary_sym(n)
-                        // Never weak-stub cross-TU test/harness counters: a same-file
-                        // weak def binds locally and hides the strong def from main.o
-                        // (Redis testhelp __test_num / __failed_tests; SQLite
-                        // sqlite3_search_count linked via Tcl_LinkVar in test1.c).
-                        && *n != "__test_num"
-                        && *n != "__failed_tests"
-                        && !n.starts_with("sqlite3_search_count")
-                        && !n.starts_with("sqlite3_sort_count")
-                        && !n.starts_with("sqlite3_found_count")
-                        && !n.starts_with("sqlite3_like_count")
-                        && !n.starts_with("sqlite3_interrupt_count")
-                        && !n.starts_with("sqlite3_open_file_count")
-                        && !n.starts_with("sqlite3_fullsync_count")
-                        && !n.starts_with("sqlite3_pager_")
-                        && !n.starts_with("sqlite3_io_error")
-                        && !n.starts_with("sqlite3_diskfull")
-                        && !n.starts_with("sqlite3_opentemp_count")
-                        && !n.starts_with("sqlite3_max_blobsize")
-                        && !n.starts_with("sqlite3_current_time")
-                        && !Self::is_extern_libc(n)
-                        && !self.out.contains(&format!("\n{n}:"))
-                        && !self.out.contains(&format!("\n\t{n}:"))
-                })
-                .cloned()
-                .collect();
-            extra.sort();
-            for name in extra {
-                writeln!(self.out, "\t.weak\t{name}").unwrap();
-                writeln!(self.out, "\t.align\t3").unwrap();
-                writeln!(self.out, "{name}:").unwrap();
-                writeln!(self.out, "\t.zero\t256").unwrap();
-            }
-            // Soft function stubs for asm symbols sometimes missing mid-build.
-            for name in ["cpu_resume"] {
-                if emitted_syms.contains(name) {
-                    continue;
-                }
-                writeln!(self.out, "\t.text").unwrap();
-                writeln!(self.out, "\t.weak\t{name}").unwrap();
-                writeln!(self.out, "{name}:").unwrap();
-                writeln!(self.out, "\tmov\tx0, xzr").unwrap();
                 writeln!(self.out, "\tret").unwrap();
             }
         }
@@ -1947,14 +1717,10 @@ impl Codegen {
                     // Explicit __weak always .weak.
                     // Soft placeholders: when this name is also a function
                     // prototype in the TU (parser emitted a bogus BSS for a
-                    // declaration like `fs_param_is_bool`). Do **not** emit a
-                    // local BSS def — that multi-defines against the real
-                    // function body in another .o (init/main.o vs fs/fs_parser.o).
-                    // Real pointer globals like Redis `rax *Users` stay strong BSS.
-                    // Function prototypes mis-parsed as 8-byte BSS (e.g. kernel
-                    // `fs_param_is_bool` after soft parse of headers in main.c).
-                    // Emitting a strong BSS multi-defines against the real .text
-                    // in fs/fs_parser.o. Skip the bogus data def entirely.
+                    // function declaration). Do **not** emit a local BSS def.
+                    // Real pointer globals stay strong BSS.
+                    // Emitting a strong BSS multi-defines against the real .text.
+                    // Skip the bogus data def entirely.
                     let soft_fn_placeholder = g.init.is_none()
                         && !g.is_weak
                         && size <= 8
@@ -1966,11 +1732,7 @@ impl Codegen {
                                 | Type::AnonStruct(_)
                                 | Type::AnonUnion(_)
                         )
-                        && (self.funcs.contains_key(&g.name)
-                            || g.name.starts_with("fs_param_is_")
-                            || g.name.starts_with("param_ops_")
-                            || g.name.starts_with("param_array_ops")
-                            || g.name.starts_with("param_sysfs_"));
+                        && self.funcs.contains_key(&g.name);
                     if soft_fn_placeholder {
                         self.globals.insert(g.name.clone(), g.ty.clone());
                         return Ok(());
@@ -3013,32 +2775,6 @@ impl Codegen {
         }
         let _ = &self.defined_data_globals;
         false
-    }
-
-    /// Soft stub: empty definition so kernel soft-skip still produces linkable symbols.
-    fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
-        let sym = self.c_sym(&f.name);
-        if f.is_static {
-            writeln!(self.out, "").unwrap();
-        } else {
-            match self.os {
-                TargetOs::Darwin => {
-                    writeln!(self.out, "
-	.weak_definition	{sym}").unwrap();
-                }
-                TargetOs::Linux => {
-                    writeln!(self.out, "
-	.weak	{sym}").unwrap();
-                }
-            }
-            writeln!(self.out, "\t.globl\t{sym}").unwrap();
-        }
-        writeln!(self.out, "\t.p2align\t2").unwrap();
-        writeln!(self.out, "{sym}:").unwrap();
-        // return 0
-        writeln!(self.out, "\tmov\tx0, xzr").unwrap();
-        writeln!(self.out, "\tret").unwrap();
-        Ok(())
     }
 
     fn emit_function(
@@ -5537,7 +5273,6 @@ impl Codegen {
                             if let Expr::Call { name, args: _ } = call.as_ref() {
                                 if name == "__acc_va_arg" || name == "__acc_va_arg_fp" {
                                     let cur = self.c_sym("acc_va_vr_cursor");
-                                    self.referenced_data_syms.insert(cur.clone());
                                     // OS-correct page relocs (Darwin rejects Linux #:lo12:).
                                     match self.os {
                                         TargetOs::Darwin => {
@@ -6528,7 +6263,6 @@ impl Codegen {
                             self.va_fpsave_off + (self.va_fixed_fp as i64) * 8;
                         self.emit_fp_addr(vr_off, 10);
                         let cur = self.c_sym("acc_va_vr_cursor");
-                        self.referenced_data_syms.insert(cur.clone());
                         match self.os {
                             TargetOs::Darwin => {
                                 writeln!(self.out, "\tadrp\tx11, {cur}@PAGE").unwrap();
@@ -6843,15 +6577,7 @@ impl Codegen {
                     .funcs
                     .get(name)
                     .map(|f| f.variadic)
-                    .unwrap_or(false)
-                    || {
-                        let n = name.as_str();
-                        n.starts_with("sqlite3_")
-                            && (n.contains("printf")
-                                || n.contains("snprintf")
-                                || n.contains("vsnprintf")
-                                || n.ends_with("Printf"))
-                    };
+                    .unwrap_or(false);
 
                 // AAPCS64: small aggregates (≤16B) occupy 1–2 consecutive GPRs.
                 // Larger aggregates (>16B, e.g. va_list) are passed by reference.
@@ -7913,7 +7639,7 @@ mod tests {
         let p = parser::parse(src).unwrap();
         let asm = emit_assembly(&p).unwrap();
         assert!(asm.contains("Hello, world!"));
-        assert!(asm.contains("bl\t_printf"));
+        assert!(asm.contains("bl\t_printf") || asm.contains("bl\tprintf"));
     }
 
     #[test]

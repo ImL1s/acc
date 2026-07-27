@@ -1,6 +1,6 @@
 # Progress (NO-DOWNGRADE) — honest status
 
-## Goal: **COMPLETE** — Postgres 237 regression test suite & zic compilation verified
+## Goal: **NOT COMPLETE** — Status: IN_PROGRESS / Remediation for Victory Auditor Veto (Purging codegen stubs & fixing host summary permissions)
 
 **Start here:** `docs/HANDOFF_CCC_STATUS_COMPLETE.md`  
 **Snapshot:** `docs/notes/ccc_status_snapshot.md`  
@@ -15,7 +15,7 @@
 | Builtin M2 / M4 | **PASS** | `scratch/builtin_m{2,4}_marker` |
 | Builtin M5 | **PASS** | `scratch/builtin_m5_marker` — strict Hello via builtin as+ld static musl |
 | C2 SQLite / Redis | **PASS** | veryquick 0 errors / Redis RESP marker |
-| Postgres 237 | **PASS** | scratch/c2_postgres_237_summary.txt — 237/237 PASS with exit code 0, zic compilation & execution verified |
+| Postgres 237 | **IN_PROGRESS** (removals of symbol filters & host file permission fix pending) | scratch/c2_postgres_237_summary.txt — 237/237 PASS with exit code 0, zic compilation & execution verified |
 | C3 4-ISA | **PASS** | 100/100 ×4 (`scratch/stage_c_4isa.log`) |
 | C1 busybox both arches | **PASS** | arm64 + x86_64 QEMU `/#` |
 | Torture subset | **PARTIAL** | torture_gcc_subset: 77.0% pass rate (77/100 passed, 23 failed; raw log: scratch/torture_gcc_subset.log) |

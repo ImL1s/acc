@@ -379,17 +379,12 @@ impl Codegen {
                     continue;
                 }
                 match &f.body {
-                    Some(b) if b.is_empty() && f.name != "main" => {
-                        if emitted_syms.insert(f.name.clone()) {
-                            self.emit_stub_function(f)?;
-                        }
-                    }
+                    None => {}
                     Some(_) => {
                         if emitted_syms.insert(f.name.clone()) {
                             self.emit_function(f, &typedefs)?;
                         }
                     }
-                    None => {}
                 }
             }
         }
@@ -440,18 +435,6 @@ impl Codegen {
         Ok(self.out.clone())
     }
 
-    fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
-        let s = sym(&f.name);
-        if !f.is_static {
-            writeln!(self.out, "\n\t.globl\t{s}").unwrap();
-        } else {
-            writeln!(self.out, "").unwrap();
-        }
-        writeln!(self.out, "{s}:").unwrap();
-        writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
-        writeln!(self.out, "\tret").unwrap();
-        Ok(())
-    }
 
     fn emit_global(&mut self, g: &VarDecl) -> Result<(), String> {
         let size = self.type_size(&g.ty).max(1);

@@ -1417,13 +1417,6 @@ impl Codegen {
                 }
                 match &f.body {
                     None => {}
-                    Some(b) if b.is_empty() && f.name != "main" => {
-                        // Stub both static and non-static soft-skipped bodies so
-                        // function-pointer tables (fops/ktype) resolve at link.
-                        if emitted_syms.insert(f.name.clone()) {
-                            self.emit_stub_function(f)?;
-                        }
-                    }
                     Some(_) => {
                         if emitted_syms.insert(f.name.clone()) {
                             self.emit_function(f, &typedefs)?;
@@ -2084,27 +2077,6 @@ impl Codegen {
             );
         }
         offset
-    }
-
-    /// Soft stub: empty definition so kernel soft-skip still produces linkable symbols.
-    fn emit_stub_function(&mut self, f: &Function) -> Result<(), String> {
-        let s = sym(&f.name);
-        if f.is_static {
-            // Internal linkage only — static inline stubs must not multi-def across TUs.
-            writeln!(self.out, "").unwrap();
-        } else {
-            // Linux ELF: weak stubs; Darwin has no bare `.weak` directive.
-            if !cfg!(target_os = "macos") {
-                writeln!(self.out, "\n\t.weak\t{s}").unwrap();
-            } else {
-                writeln!(self.out, "").unwrap();
-            }
-            writeln!(self.out, "\t.globl\t{s}").unwrap();
-        }
-        writeln!(self.out, "{s}:").unwrap();
-        writeln!(self.out, "\txorl\t%eax, %eax").unwrap();
-        writeln!(self.out, "\tretq").unwrap();
-        Ok(())
     }
 
     fn emit_function(
