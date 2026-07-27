@@ -84,6 +84,7 @@ pub enum Type {
     Union(String),
     AnonStruct(Vec<Field>),
     AnonUnion(Vec<Field>),
+    #[allow(dead_code)]
     Const(Box<Type>),
 }
 
@@ -98,6 +99,13 @@ impl Type {
             t = inner;
         }
         t
+    }
+
+    pub fn is_unsigned(&self) -> bool {
+        matches!(
+            self.unqual(),
+            Type::UInt | Type::ULong | Type::UShort | Type::UChar | Type::Ptr(_)
+        )
     }
 }
 

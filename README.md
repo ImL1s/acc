@@ -26,7 +26,7 @@ System `as` / `ld` / `cc` are used **only** to assemble and link textual assembl
 
 ## 🚦 Verification & Compatibility Matrix
 
-> Goal: **NOT COMPLETE** — Postgres 237 initdb SEGV under remediation
+> Goal: **NOT COMPLETE** — Status: **IN_PROGRESS**
 
 > **Start here:** [`docs/HANDOFF_CCC_STATUS_COMPLETE.md`](docs/HANDOFF_CCC_STATUS_COMPLETE.md) · living stamp: [`harness/progress.md`](harness/progress.md).  
 > Parity Gates status: Builtin M2/M4/M5 (PASS), C2 SQLite/Redis (PASS), C3 4-ISA (PASS), C1 BusyBox dual-arch QEMU (PASS), Postgres 237 (BLOCKED), Torture subset (77.0% pass rate, 77/100 passed, 23 failed; raw log: scratch/torture_gcc_subset.log).

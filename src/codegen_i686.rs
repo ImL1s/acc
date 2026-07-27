@@ -18,6 +18,7 @@ use std::fmt::Write as _;
 /// Pointer / register width in bytes (ILP32).
 pub const PTR_SIZE: i64 = 4;
 /// Stack slot alignment (bytes) before `call`.
+#[allow(dead_code)]
 pub const STACK_ALIGN: i64 = 16;
 
 /// SysV i386: integer/pointer return register.
@@ -1175,11 +1176,6 @@ impl Codegen {
             }
             Stmt::Case { body, .. } => self.emit_stmt(body, typedefs),
             Stmt::Default(body) => self.emit_stmt(body, typedefs),
-            _ => Err(format!(
-                "i686 backend: unsupported statement in '{}': {:?}",
-                self.func_name,
-                std::mem::discriminant(st)
-            )),
         }
     }
 

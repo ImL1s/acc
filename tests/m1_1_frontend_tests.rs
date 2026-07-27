@@ -6,7 +6,6 @@ use acc::lexer::Lexer;
 use acc::parser::parse;
 use acc::preprocess::preprocess_with_options;
 use acc::token::TokenKind;
-use std::collections::HashMap;
 
 #[test]
 fn test_00104_hex_literal_typing() {

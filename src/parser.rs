@@ -22,6 +22,7 @@ pub struct Parser {
     enum_values: std::collections::HashMap<String, i64>,
     /// Nesting depth of GNU statement expressions `({...})`. Deep nesting from
     /// kernel do/while(0) macros can thrash the recursive parser; soft-skip.
+    #[allow(dead_code)]
     stmt_expr_depth: u32,
     pub last_section: Option<String>,
     /// Names declared `__weak` without initializer in this TU — later
@@ -163,6 +164,7 @@ impl Parser {
         }
         None
     }
+    #[allow(dead_code)]
     fn lookup_var_type(&self, name: &str) -> Option<&Type> {
         if let Some(t) = self.lookup_local_type(name) {
             return Some(t);
@@ -2524,7 +2526,7 @@ impl Parser {
         // with type keywords; re-check is unnecessary for body-skip heuristics.
         // Could be: type name(...) { }  or type name, name2;
         // Function params are part of the declarator (including multi-suffix forms).
-        let (name, mut ty, func_params) = self.parse_declarator(base.clone())?;
+        let (name, ty, func_params) = self.parse_declarator(base.clone())?;
         sec_attr = self.last_section.take().or(sec_attr);
         if let TokenKind::Section(sec) = self.peek_kind().clone() {
             sec_attr = Some(sec);
@@ -3589,6 +3591,7 @@ impl Parser {
         }
     }
 
+    #[allow(dead_code)]
     fn skip_asm_operand_list(&mut self) -> Result<(), String> {
         // empty or [name] "cstr" (expr) [, ...]  (+ / = constraint prefixes inside string)
         if self.at(&TokenKind::Colon) || self.at(&TokenKind::RParen) {
@@ -3612,6 +3615,7 @@ impl Parser {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn parse_asm_input_immediates(&mut self) -> Result<Vec<Option<i64>>, String> {
         let mut vals = Vec::new();
         if self.at(&TokenKind::Colon) || self.at(&TokenKind::RParen) {
@@ -4983,6 +4987,7 @@ impl Parser {
     }
 }
 
+#[allow(dead_code)]
 enum Postfix {
     Array(i64),
     Func,

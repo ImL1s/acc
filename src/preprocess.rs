@@ -9,10 +9,12 @@ enum MacroBody {
     Function { params: Vec<String>, body: String, variadic: bool },
 }
 
+#[allow(dead_code)]
 pub fn preprocess(src: &str) -> Result<String, String> {
     preprocess_with_dir(src, None)
 }
 
+#[allow(dead_code)]
 pub fn preprocess_with_dir(src: &str, include_dir: Option<&std::path::Path>) -> Result<String, String> {
     preprocess_with_options(src, include_dir, &[], /*for_linux*/ false, "<input>")
 }

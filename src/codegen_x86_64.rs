@@ -449,7 +449,7 @@ fn soften_x86_asm_line(line: &str) -> Option<String> {
         .split(|c: char| c == ' ' || c == '\t')
         .next()
         .unwrap_or("");
-    let mut body = resize_regs_for_mnemonic(t, mnem);
+    let body = resize_regs_for_mnemonic(t, mnem);
 
     let t = body.as_str();
     let lower = t.to_ascii_lowercase();
@@ -530,6 +530,7 @@ struct Layout {
 enum Storage {
     Local { offset: i64 },
     Global { name: String },
+    #[allow(dead_code)]
     RegAddr { reg: u8 },
 }
 
@@ -974,6 +975,7 @@ impl Codegen {
         }
     }
 
+    #[allow(dead_code)]
     fn store_small_agg_from_regs(&mut self, addr_reg: u8, nregs: u8) {
         // Legacy: assume full eightbytes (safe for size 8/16 slots).
         self.store_small_agg_from_regs_sized(addr_reg, nregs, if nregs >= 2 { 16 } else { 8 });
@@ -1714,6 +1716,7 @@ impl Codegen {
         }
     }
 
+    #[allow(dead_code)]
     fn text_section(&mut self) {
         writeln!(self.out, "\t.text").unwrap();
     }
@@ -4578,9 +4581,21 @@ impl Codegen {
             }
             Expr::Unary { op, expr } => match op {
                 UnaryOp::Neg => {
-                    self.emit_expr_rval(expr, dest, typedefs)?;
-                    writeln!(self.out, "\tnegq\t{}", reg(dest)).unwrap();
-                    Ok(Type::Int)
+                    let ty = self.emit_expr_rval(expr, dest, typedefs)?;
+                    let ety = Self::usual_arith_conv(&ty, &Type::Int);
+                    let is_64 = matches!(ety.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
+                    if is_64 {
+                        writeln!(self.out, "\tnegq\t{}", reg(dest)).unwrap();
+                    } else {
+                        let rd = reg_d(dest);
+                        writeln!(self.out, "\tnegl\t{rd}").unwrap();
+                        if ety.is_unsigned() {
+                            writeln!(self.out, "\tmovl\t{rd}, {rd}").unwrap();
+                        } else {
+                            writeln!(self.out, "\tmovslq\t{rd}, {}", reg(dest)).unwrap();
+                        }
+                    }
+                    Ok(ety)
                 }
                 UnaryOp::Not => {
                     self.emit_expr_rval(expr, dest, typedefs)?;
@@ -4590,9 +4605,21 @@ impl Codegen {
                     Ok(Type::Int)
                 }
                 UnaryOp::BitNot => {
-                    self.emit_expr_rval(expr, dest, typedefs)?;
-                    writeln!(self.out, "\tnotq\t{}", reg(dest)).unwrap();
-                    Ok(Type::Int)
+                    let ty = self.emit_expr_rval(expr, dest, typedefs)?;
+                    let ety = Self::usual_arith_conv(&ty, &Type::Int);
+                    let is_64 = matches!(ety.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
+                    if is_64 {
+                        writeln!(self.out, "\tnotq\t{}", reg(dest)).unwrap();
+                    } else {
+                        let rd = reg_d(dest);
+                        writeln!(self.out, "\tnotl\t{rd}").unwrap();
+                        if ety.is_unsigned() {
+                            writeln!(self.out, "\tmovl\t{rd}, {rd}").unwrap();
+                        } else {
+                            writeln!(self.out, "\tmovslq\t{rd}, {}", reg(dest)).unwrap();
+                        }
+                    }
+                    Ok(ety)
                 }
                 UnaryOp::Addr => {
                     if let Expr::Var(n) = expr.as_ref() {
@@ -4930,31 +4957,53 @@ impl Codegen {
                         Ok(Type::Int)
                     }
                     BinOp::Shl => {
+                        let res_ty = Self::usual_arith_conv(&lty, &Type::Int);
+                        let is_64 = matches!(res_ty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
                         // Save count to %cl first: dest may be %r11 (holds count) or %rcx.
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        writeln!(self.out, "\tshlq\t%cl, %rax").unwrap();
+                        if is_64 {
+                            writeln!(self.out, "\tsalq\t%cl, %rax").unwrap();
+                        } else {
+                            writeln!(self.out, "\tandb\t$31, %cl").unwrap();
+                            writeln!(self.out, "\tsall\t%cl, %eax").unwrap();
+                            if res_ty.is_unsigned() {
+                                writeln!(self.out, "\tmovl\t%eax, %eax").unwrap();
+                            } else {
+                                writeln!(self.out, "\tmovslq\t%eax, %rax").unwrap();
+                            }
+                        }
                         if dest != 0 {
                             writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                         }
-                        Ok(Type::Int)
+                        Ok(res_ty)
                     }
                     BinOp::Shr => {
-                        let unsigned = matches!(
-                            lty.unqual(),
-                            Type::ULong | Type::UInt | Type::UShort | Type::UChar
-                        );
+                        let res_ty = Self::usual_arith_conv(&lty, &Type::Int);
+                        let unsigned = res_ty.is_unsigned() || lty.is_unsigned();
+                        let is_64 = matches!(res_ty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        if unsigned {
-                            writeln!(self.out, "\tshrq\t%cl, %rax").unwrap();
+                        if is_64 {
+                            if unsigned {
+                                writeln!(self.out, "\tshrq\t%cl, %rax").unwrap();
+                            } else {
+                                writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                            }
                         } else {
-                            writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                            writeln!(self.out, "\tandb\t$31, %cl").unwrap();
+                            if unsigned {
+                                writeln!(self.out, "\tshrl\t%cl, %eax").unwrap();
+                                writeln!(self.out, "\tmovl\t%eax, %eax").unwrap();
+                            } else {
+                                writeln!(self.out, "\tsarl\t%cl, %eax").unwrap();
+                                writeln!(self.out, "\tmovslq\t%eax, %rax").unwrap();
+                            }
                         }
                         if dest != 0 {
                             writeln!(self.out, "\tmovq\t%rax, {}", reg(dest)).unwrap();
                         }
-                        Ok(Type::Int)
+                        Ok(res_ty)
                     }
                     BinOp::Comma => {
                         writeln!(self.out, "\tmovq\t%r11, {}", reg(dest)).unwrap();
@@ -5066,22 +5115,42 @@ impl Codegen {
                         writeln!(self.out, "\txorq\t%r11, %rax").unwrap();
                     }
                     BinOp::Shl => {
+                        let is_64 = matches!(lty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
                         // Same dest/%r11 hazard as non-compound Shl.
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        writeln!(self.out, "\tshlq\t%cl, %rax").unwrap();
+                        if is_64 {
+                            writeln!(self.out, "\tsalq\t%cl, %rax").unwrap();
+                        } else {
+                            writeln!(self.out, "\tandb\t$31, %cl").unwrap();
+                            writeln!(self.out, "\tsall\t%cl, %eax").unwrap();
+                            if lty.is_unsigned() {
+                                writeln!(self.out, "\tmovl\t%eax, %eax").unwrap();
+                            } else {
+                                writeln!(self.out, "\tmovslq\t%eax, %rax").unwrap();
+                            }
+                        }
                     }
                     BinOp::Shr => {
-                        let unsigned = matches!(
-                            lty.unqual(),
-                            Type::ULong | Type::UInt | Type::UShort | Type::UChar
-                        );
+                        let unsigned = lty.is_unsigned();
+                        let is_64 = matches!(lty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
-                        if unsigned {
-                            writeln!(self.out, "\tshrq\t%cl, %rax").unwrap();
+                        if is_64 {
+                            if unsigned {
+                                writeln!(self.out, "\tshrq\t%cl, %rax").unwrap();
+                            } else {
+                                writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                            }
                         } else {
-                            writeln!(self.out, "\tsarq\t%cl, %rax").unwrap();
+                            writeln!(self.out, "\tandb\t$31, %cl").unwrap();
+                            if unsigned {
+                                writeln!(self.out, "\tshrl\t%cl, %eax").unwrap();
+                                writeln!(self.out, "\tmovl\t%eax, %eax").unwrap();
+                            } else {
+                                writeln!(self.out, "\tsarl\t%cl, %eax").unwrap();
+                                writeln!(self.out, "\tmovslq\t%eax, %rax").unwrap();
+                            }
                         }
                     }
                     _ => return Err("bad compound assign".into()),
@@ -5858,6 +5927,13 @@ impl Codegen {
                 Type::Int
             }
             Expr::Unary {
+                op: UnaryOp::Neg | UnaryOp::BitNot,
+                expr,
+            } => {
+                let t = self.typeof_expr(expr, typedefs);
+                Self::usual_arith_conv(&t, &Type::Int)
+            }
+            Expr::Unary {
                 op: UnaryOp::Addr,
                 expr,
             } => Type::Ptr(Box::new(self.typeof_expr(expr, typedefs))),
@@ -5929,12 +6005,7 @@ impl Codegen {
                 ..
             } => {
                 let l = self.typeof_expr(left, typedefs);
-                match l {
-                    Type::ULong => Type::ULong,
-                    Type::Long => Type::Long,
-                    Type::UInt => Type::UInt,
-                    _ => Type::Int,
-                }
+                Self::usual_arith_conv(&l, &Type::Int)
             }
             Expr::Member { base, field, arrow } => {
                 let bt = if *arrow {

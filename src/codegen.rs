@@ -258,10 +258,11 @@ pub enum Target {
 }
 
 impl Target {
+    #[allow(dead_code)]
     pub fn host() -> Self {
         if cfg!(target_arch = "x86_64") {
             Self::X86_64
-        } else if cfg!(target_arch = "i686") {
+        } else if cfg!(target_arch = "x86") {
             Self::I686
         } else if cfg!(target_arch = "riscv64") {
             Self::Riscv64
@@ -342,6 +343,7 @@ enum Storage {
     Local { offset: i64 }, // from x29, negative
     Global { name: String },
     /// address already in register (temp)
+    #[allow(dead_code)]
     RegAddr { reg: u8 },
 }
 
@@ -355,6 +357,7 @@ pub struct Codegen {
     out: String,
     strings: Vec<String>,
     layouts: HashMap<String, Layout>,
+    #[allow(dead_code)]
     anon_layouts: Vec<Layout>,
     globals: HashMap<String, Type>,
     /// Globals for which this TU emits a real data definition (.data/.bss/.comm),
@@ -396,6 +399,7 @@ pub struct Codegen {
 }
 
 impl Codegen {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::with_os(TargetOs::host())
     }
@@ -457,6 +461,7 @@ impl Codegen {
         e
     }
 
+    #[allow(dead_code)]
     fn contains_local(&self, name: &str) -> bool {
         self.scopes.iter().rev().any(|scope| scope.contains_key(name))
     }
@@ -1424,6 +1429,7 @@ impl Codegen {
         }
     }
 
+    #[allow(dead_code)]
     fn resolve_typedef_type<'a>(&'a self, ty: &'a Type, typedefs: &HashMap<String, Type>) -> Type {
         // flatten one level of name aliases stored as Struct(typedefname) sometimes
         match ty {
@@ -5221,8 +5227,19 @@ impl Codegen {
                         writeln!(self.out, "\tfmov\tx{dest}, d0").unwrap();
                         Ok(Type::Double)
                     } else {
-                        writeln!(self.out, "\tneg\tx{dest}, x{dest}").unwrap();
-                        Ok(Type::Int)
+                        let ety = Self::usual_arith_conv(&ty, &Type::Int);
+                        let is_64 = matches!(ety.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
+                        if is_64 {
+                            writeln!(self.out, "\tneg\tx{dest}, x{dest}").unwrap();
+                        } else {
+                            writeln!(self.out, "\tneg\tw{dest}, w{dest}").unwrap();
+                            if ety.is_unsigned() {
+                                writeln!(self.out, "\tmov\tw{dest}, w{dest}").unwrap();
+                            } else {
+                                writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                            }
+                        }
+                        Ok(ety)
                     }
                 }
                 UnaryOp::Not => {
@@ -5232,9 +5249,20 @@ impl Codegen {
                     Ok(Type::Int)
                 }
                 UnaryOp::BitNot => {
-                    self.emit_expr_rval(expr, dest, typedefs)?;
-                    writeln!(self.out, "\tmvn\tx{dest}, x{dest}").unwrap();
-                    Ok(Type::Int)
+                    let ty = self.emit_expr_rval(expr, dest, typedefs)?;
+                    let ety = Self::usual_arith_conv(&ty, &Type::Int);
+                    let is_64 = matches!(ety.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
+                    if is_64 {
+                        writeln!(self.out, "\tmvn\tx{dest}, x{dest}").unwrap();
+                    } else {
+                        writeln!(self.out, "\tmvn\tw{dest}, w{dest}").unwrap();
+                        if ety.is_unsigned() {
+                            writeln!(self.out, "\tmov\tw{dest}, w{dest}").unwrap();
+                        } else {
+                            writeln!(self.out, "\tsxtw\tx{dest}, w{dest}").unwrap();
+                        }
+                    }
+                    Ok(ety)
                 }
                 UnaryOp::Addr => {
                     // &function
@@ -5849,7 +5877,7 @@ impl Codegen {
                     }
                 }
                 // Spill RHS to stack: PostInc/PostDec also use x12 as a temp.
-                let rty = self.emit_expr_rval(right, 0, typedefs)?;
+                let _rty = self.emit_expr_rval(right, 0, typedefs)?;
                 writeln!(self.out, "\tstr\tx0, [sp, #-16]!").unwrap();
                 let lty = self.emit_lvalue_addr(left, 9, typedefs)?;
                 writeln!(self.out, "\tldr\tx0, [sp], #16").unwrap();
@@ -7309,6 +7337,7 @@ impl Codegen {
         }
     }
 
+    #[allow(dead_code)]
     fn emit_type_of(&self, _e: &Expr, _typedefs: &HashMap<String, Type>) -> Type {
         Type::Int
     }
@@ -7586,11 +7615,13 @@ impl Codegen {
 }
 
 /// Emit assembly for the default target (aarch64).
+#[allow(dead_code)]
 pub fn emit_assembly(prog: &Program) -> Result<String, String> {
     emit_assembly_for(prog, Target::Aarch64)
 }
 
 /// Emit assembly for the selected ISA backend (host OS dialect).
+#[allow(dead_code)]
 pub fn emit_assembly_for(prog: &Program, target: Target) -> Result<String, String> {
     emit_assembly_for_os(prog, target, TargetOs::host())
 }
@@ -8006,7 +8037,7 @@ mod tests {
             "must use GOT for stdout:\n{log}"
         );
         // After GOT load into x9, must load the FILE* value (not pass GOT result as FILE*).
-        let has_double = log.lines().any(|l| {
+        let _has_double = log.lines().any(|l| {
             let t = l.trim();
             t.starts_with("ldr\tx") && (t.contains("[x9]") || t.contains("[x0]"))
         });

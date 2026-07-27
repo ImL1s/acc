@@ -156,6 +156,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Skip `__attribute__((...))` balanced paren group after the keyword was consumed.
+    #[allow(dead_code)]
     fn skip_gnu_attribute_suffix(&mut self) {
         let _ = self.scan_gnu_attribute_suffix("");
     }
