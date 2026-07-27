@@ -14,7 +14,7 @@ mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
 "$CC" -S -o "$WORKDIR/sqlite3.s" "$SQL/sqlite3.c" -I"$SQL"
 "$CC" -S -o "$WORKDIR/smoke.s" smoke.c -I"$SQL"
-cc -o "$HERE/sqlite_bin" "$WORKDIR/sqlite3.s" "$WORKDIR/smoke.s"
+cc -o "$HERE/sqlite_bin" "$WORKDIR/sqlite3.s" "$WORKDIR/smoke.s" -lm
 case "${1:-test}" in
   test)
     out="$("$HERE/sqlite_bin")"
