@@ -51,7 +51,7 @@ fn main() {
     let mut emit_asm_only = false;
     let mut preprocess_only = false;
     let mut keep_asm = false;
-    let mut target = Target::Aarch64;
+    let mut target = Target::host();
     let mut target_os = TargetOs::host();
     let mut input: Option<PathBuf> = None;
     let mut include_dirs: Vec<PathBuf> = Vec::new();
