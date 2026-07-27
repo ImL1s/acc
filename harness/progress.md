@@ -8,6 +8,7 @@
 
 > Stale soft claims (acc-init-only boot, `sqlite_reg`, SDS, forged 237 summary, prior unverified COMPLETE) are void.
 > Parity contracts: `harness/CCC_PARITY_CONTRACTS.md`. Ledger: `harness/ccc_parity_ledger.md`.
+> **Goal Assessment**: see [`GOAL_ASSESSMENT.md`](../GOAL_ASSESSMENT.md) for goal achievement assessment.
 > Do **not** replace this file with Phase-0 baseline PASS tables — that is not CCC-Status COMPLETE.
 
 | Gate | Honest status | Notes |
