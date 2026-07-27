@@ -46,7 +46,18 @@ run_one() {
     fi
   else
     "$BIN" -m aarch64 -o "$out" "$src" || return 1
-    "$out" >/dev/null 2>&1 || return 1
+    if [[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "x86-64" ]]; then
+      if command -v qemu-aarch64 >/dev/null 2>&1; then
+        qemu-aarch64 -L /usr/aarch64-linux-gnu "$out" >/dev/null 2>&1 || qemu-aarch64 "$out" >/dev/null 2>&1 || return 1
+      elif command -v qemu-aarch64-static >/dev/null 2>&1; then
+        qemu-aarch64-static "$out" >/dev/null 2>&1 || return 1
+      else
+        echo "WARN $id aarch64: binary produced, run skipped (no qemu-aarch64)"
+        return 0
+      fi
+    else
+      "$out" >/dev/null 2>&1 || return 1
+    fi
   fi
   return 0
 }
