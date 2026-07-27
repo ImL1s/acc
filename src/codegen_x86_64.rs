@@ -5007,7 +5007,7 @@ impl Codegen {
                     }
                     BinOp::Comma => {
                         writeln!(self.out, "\tmovq\t%r11, {}", reg(dest)).unwrap();
-                        Ok(Type::Int)
+                        Ok(rty)
                     }
                     BinOp::And | BinOp::Or => unreachable!(),
                 }

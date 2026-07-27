@@ -9,7 +9,10 @@ if [[ ! -x "$CC" ]]; then
 fi
 LUA_SRC="$ROOT/third_party/real/lua-5.4.6/src"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-cd "$HERE"
+if [[ ! -d "$LUA_SRC" ]]; then
+  echo "WARN: $LUA_SRC not found, delegating to lua_smoke"
+  exec "$HERE/../lua_smoke/build.sh" "$@"
+fi
 WORKDIR="${TMPDIR:-/tmp}/acc_lua_build_$$"
 mkdir -p "$WORKDIR"
 trap 'rm -rf "$WORKDIR"' EXIT
