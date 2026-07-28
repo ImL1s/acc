@@ -25,9 +25,7 @@ fn compile_and_run(c_code: &str, test_name: &str) -> (i32, String, String) {
 
     compile(&opts).expect("in-process compilation failed");
 
-    let output = Command::new(&bin_path)
-        .output()
-        .expect("execution failed");
+    let output = Command::new(&bin_path).output().expect("execution failed");
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -214,4 +212,3 @@ int main(void) {
     let (code, _stdout, stderr) = compile_and_run(src, "test_shift_unary_stress");
     assert_eq!(code, 0, "Shift and unary stress test failed with exit code {code}, stdout: {_stdout}, stderr: {stderr}");
 }
-

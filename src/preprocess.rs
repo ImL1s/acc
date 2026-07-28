@@ -6,7 +6,11 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 enum MacroBody {
     Object(String),
-    Function { params: Vec<String>, body: String, variadic: bool },
+    Function {
+        params: Vec<String>,
+        body: String,
+        variadic: bool,
+    },
 }
 
 #[allow(dead_code)]
@@ -15,7 +19,10 @@ pub fn preprocess(src: &str) -> Result<String, String> {
 }
 
 #[allow(dead_code)]
-pub fn preprocess_with_dir(src: &str, include_dir: Option<&std::path::Path>) -> Result<String, String> {
+pub fn preprocess_with_dir(
+    src: &str,
+    include_dir: Option<&std::path::Path>,
+) -> Result<String, String> {
     preprocess_with_options(src, include_dir, &[], /*for_linux*/ false, "<input>")
 }
 
@@ -30,7 +37,14 @@ pub fn preprocess_with_options(
     for_linux: bool,
     source_name: &str,
 ) -> Result<String, String> {
-    preprocess_with_options_arch(src, include_dir, extra_includes, for_linux, source_name, "aarch64")
+    preprocess_with_options_arch(
+        src,
+        include_dir,
+        extra_includes,
+        for_linux,
+        source_name,
+        "aarch64",
+    )
 }
 
 pub fn preprocess_with_options_arch(
@@ -79,7 +93,10 @@ pub fn preprocess_with_options_arch(
     // sysconf / pathconf names (numeric values approximate Linux)
     macros.insert("_SC_PAGESIZE".into(), MacroBody::Object("30".into()));
     macros.insert("_SC_PAGE_SIZE".into(), MacroBody::Object("30".into()));
-    macros.insert("_SC_NPROCESSORS_ONLN".into(), MacroBody::Object("84".into()));
+    macros.insert(
+        "_SC_NPROCESSORS_ONLN".into(),
+        MacroBody::Object("84".into()),
+    );
     macros.insert("_SC_CLK_TCK".into(), MacroBody::Object("2".into()));
     macros.insert("_PC_PATH_MAX".into(), MacroBody::Object("4".into()));
     macros.insert("_PC_NAME_MAX".into(), MacroBody::Object("3".into()));
@@ -111,7 +128,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("EPOLLHUP".into(), MacroBody::Object("0x010".into()));
     macros.insert("EPOLLRDHUP".into(), MacroBody::Object("0x2000".into()));
     macros.insert("EPOLLET".into(), MacroBody::Object("0x80000000".into()));
-    macros.insert("EPOLLONESHOT".into(), MacroBody::Object("0x40000000".into()));
+    macros.insert(
+        "EPOLLONESHOT".into(),
+        MacroBody::Object("0x40000000".into()),
+    );
     macros.insert("EPOLL_CTL_ADD".into(), MacroBody::Object("1".into()));
     macros.insert("EPOLL_CTL_DEL".into(), MacroBody::Object("2".into()));
     macros.insert("EPOLL_CTL_MOD".into(), MacroBody::Object("3".into()));
@@ -163,7 +183,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("SHUT_WR".into(), MacroBody::Object("1".into()));
     macros.insert("SHUT_RDWR".into(), MacroBody::Object("2".into()));
     macros.insert("INADDR_ANY".into(), MacroBody::Object("0".into()));
-    macros.insert("INADDR_LOOPBACK".into(), MacroBody::Object("0x7f000001".into()));
+    macros.insert(
+        "INADDR_LOOPBACK".into(),
+        MacroBody::Object("0x7f000001".into()),
+    );
     // signal / fcntl extras
     macros.insert("SIG_SETMASK".into(), MacroBody::Object("2".into()));
     macros.insert("SIG_BLOCK".into(), MacroBody::Object("0".into()));
@@ -177,7 +200,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("F_BARRIERFSYNC".into(), MacroBody::Object("85".into()));
     macros.insert("O_NONBLOCK".into(), MacroBody::Object("0x800".into()));
     macros.insert("AT_FDCWD".into(), MacroBody::Object("(-100)".into()));
-    macros.insert("AT_SYMLINK_NOFOLLOW".into(), MacroBody::Object("256".into()));
+    macros.insert(
+        "AT_SYMLINK_NOFOLLOW".into(),
+        MacroBody::Object("256".into()),
+    );
     // POSIX SHM / open flags already partially set
     macros.insert("O_NOINHERIT".into(), MacroBody::Object("0".into()));
     macros.insert("O_SHORT_LIVED".into(), MacroBody::Object("0".into()));
@@ -196,7 +222,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("UINT8_MAX".into(), MacroBody::Object("255".into()));
     macros.insert("UINT16_MAX".into(), MacroBody::Object("65535".into()));
     macros.insert("UINT32_MAX".into(), MacroBody::Object("4294967295U".into()));
-    macros.insert("UINT64_MAX".into(), MacroBody::Object("18446744073709551615ULL".into()));
+    macros.insert(
+        "UINT64_MAX".into(),
+        MacroBody::Object("18446744073709551615ULL".into()),
+    );
     // LP64: uintptr_t is 64-bit (Redis quicklist QL_FILL_BITS via UINTPTR_MAX)
     macros.insert(
         "UINTPTR_MAX".into(),
@@ -208,12 +237,27 @@ pub fn preprocess_with_options_arch(
     );
     macros.insert("INT16_MIN".into(), MacroBody::Object("(-32768)".into()));
     macros.insert("INT16_MAX".into(), MacroBody::Object("32767".into()));
-    macros.insert("INT32_MIN".into(), MacroBody::Object("(-2147483647-1)".into()));
+    macros.insert(
+        "INT32_MIN".into(),
+        MacroBody::Object("(-2147483647-1)".into()),
+    );
     macros.insert("INT32_MAX".into(), MacroBody::Object("2147483647".into()));
-    macros.insert("INT64_MIN".into(), MacroBody::Object("(-9223372036854775807LL-1)".into()));
-    macros.insert("INT64_MAX".into(), MacroBody::Object("9223372036854775807LL".into()));
-    macros.insert("SIZE_MAX".into(), MacroBody::Object("18446744073709551615ULL".into()));
-    macros.insert("PTRDIFF_MAX".into(), MacroBody::Object("9223372036854775807LL".into()));
+    macros.insert(
+        "INT64_MIN".into(),
+        MacroBody::Object("(-9223372036854775807LL-1)".into()),
+    );
+    macros.insert(
+        "INT64_MAX".into(),
+        MacroBody::Object("9223372036854775807LL".into()),
+    );
+    macros.insert(
+        "SIZE_MAX".into(),
+        MacroBody::Object("18446744073709551615ULL".into()),
+    );
+    macros.insert(
+        "PTRDIFF_MAX".into(),
+        MacroBody::Object("9223372036854775807LL".into()),
+    );
     macros.insert("IOV_MAX".into(), MacroBody::Object("1024".into()));
     // ISO C: UINT64_C(c) / INT64_C(c) → integer constants
     macros.insert(
@@ -363,10 +407,22 @@ pub fn preprocess_with_options_arch(
     macros.insert("SA_ONSTACK".into(), MacroBody::Object("0x08000000".into()));
     macros.insert("SI_USER".into(), MacroBody::Object("0".into()));
     macros.insert("TIOCGWINSZ".into(), MacroBody::Object("0x5413".into()));
-    macros.insert("PTHREAD_CANCEL_ENABLE".into(), MacroBody::Object("0".into()));
-    macros.insert("PTHREAD_CANCEL_DISABLE".into(), MacroBody::Object("1".into()));
-    macros.insert("PTHREAD_CANCEL_ASYNCHRONOUS".into(), MacroBody::Object("1".into()));
-    macros.insert("PTHREAD_CANCEL_DEFERRED".into(), MacroBody::Object("0".into()));
+    macros.insert(
+        "PTHREAD_CANCEL_ENABLE".into(),
+        MacroBody::Object("0".into()),
+    );
+    macros.insert(
+        "PTHREAD_CANCEL_DISABLE".into(),
+        MacroBody::Object("1".into()),
+    );
+    macros.insert(
+        "PTHREAD_CANCEL_ASYNCHRONOUS".into(),
+        MacroBody::Object("1".into()),
+    );
+    macros.insert(
+        "PTHREAD_CANCEL_DEFERRED".into(),
+        MacroBody::Object("0".into()),
+    );
     macros.insert("STDIN_FILENO".into(), MacroBody::Object("0".into()));
     macros.insert("STDOUT_FILENO".into(), MacroBody::Object("1".into()));
     macros.insert("STDERR_FILENO".into(), MacroBody::Object("2".into()));
@@ -392,7 +448,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("SIGTSTP".into(), MacroBody::Object("20".into()));
     macros.insert("SA_RESTART".into(), MacroBody::Object("0x10000000".into()));
     macros.insert("SA_NODEFER".into(), MacroBody::Object("0x40000000".into()));
-    macros.insert("SA_RESETHAND".into(), MacroBody::Object("0x80000000".into()));
+    macros.insert(
+        "SA_RESETHAND".into(),
+        MacroBody::Object("0x80000000".into()),
+    );
     macros.insert("SA_SIGINFO".into(), MacroBody::Object("4".into()));
     macros.insert("AF_LOCAL".into(), MacroBody::Object("1".into()));
     macros.insert("EDOM".into(), MacroBody::Object("33".into()));
@@ -404,14 +463,20 @@ pub fn preprocess_with_options_arch(
     macros.insert("EPIPE".into(), MacroBody::Object("32".into()));
     macros.insert("RUSAGE_SELF".into(), MacroBody::Object("0".into()));
     macros.insert("RLIMIT_NOFILE".into(), MacroBody::Object("7".into()));
-    macros.insert("M_PI".into(), MacroBody::Object("3.14159265358979323846".into()));
+    macros.insert(
+        "M_PI".into(),
+        MacroBody::Object("3.14159265358979323846".into()),
+    );
     macros.insert("FP_ZERO".into(), MacroBody::Object("2".into()));
     macros.insert("FP_NORMAL".into(), MacroBody::Object("4".into()));
     macros.insert("RTLD_LAZY".into(), MacroBody::Object("1".into()));
     macros.insert("RTLD_NOW".into(), MacroBody::Object("2".into()));
     macros.insert("RTLD_GLOBAL".into(), MacroBody::Object("256".into()));
     macros.insert("RTLD_LOCAL".into(), MacroBody::Object("0".into()));
-    macros.insert("RTLD_DEFAULT".into(), MacroBody::Object("((void*)0)".into()));
+    macros.insert(
+        "RTLD_DEFAULT".into(),
+        MacroBody::Object("((void*)0)".into()),
+    );
     macros.insert("RTLD_NEXT".into(), MacroBody::Object("((void*)-1)".into()));
     macros.insert("PRIO_PROCESS".into(), MacroBody::Object("0".into()));
     macros.insert("PRIO_PGRP".into(), MacroBody::Object("1".into()));
@@ -424,7 +489,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("IPV6_V6ONLY".into(), MacroBody::Object("26".into()));
     macros.insert("POSIX_FADV_NORMAL".into(), MacroBody::Object("0".into()));
     macros.insert("POSIX_FADV_RANDOM".into(), MacroBody::Object("1".into()));
-    macros.insert("POSIX_FADV_SEQUENTIAL".into(), MacroBody::Object("2".into()));
+    macros.insert(
+        "POSIX_FADV_SEQUENTIAL".into(),
+        MacroBody::Object("2".into()),
+    );
     macros.insert("POSIX_FADV_WILLNEED".into(), MacroBody::Object("3".into()));
     macros.insert("POSIX_FADV_DONTNEED".into(), MacroBody::Object("4".into()));
     macros.insert("POSIX_FADV_NOREUSE".into(), MacroBody::Object("5".into()));
@@ -440,7 +508,7 @@ pub fn preprocess_with_options_arch(
     macros.insert("LOCK_NB".into(), MacroBody::Object("4".into()));
     macros.insert("LOCK_UN".into(), MacroBody::Object("8".into()));
     macros.insert("F_OK".into(), MacroBody::Object("0".into())); // idempotent if already set
-    // syslog
+                                                                 // syslog
     macros.insert("LOG_PID".into(), MacroBody::Object("1".into()));
     macros.insert("LOG_USER".into(), MacroBody::Object("8".into()));
     macros.insert("LOG_ERR".into(), MacroBody::Object("3".into()));
@@ -450,9 +518,18 @@ pub fn preprocess_with_options_arch(
     macros.insert("POLLERR".into(), MacroBody::Object("8".into()));
     macros.insert("POLLHUP".into(), MacroBody::Object("16".into()));
     // fsync flags
-    macros.insert("SYNC_FILE_RANGE_WAIT_BEFORE".into(), MacroBody::Object("1".into()));
-    macros.insert("SYNC_FILE_RANGE_WRITE".into(), MacroBody::Object("2".into()));
-    macros.insert("SYNC_FILE_RANGE_WAIT_AFTER".into(), MacroBody::Object("4".into()));
+    macros.insert(
+        "SYNC_FILE_RANGE_WAIT_BEFORE".into(),
+        MacroBody::Object("1".into()),
+    );
+    macros.insert(
+        "SYNC_FILE_RANGE_WRITE".into(),
+        MacroBody::Object("2".into()),
+    );
+    macros.insert(
+        "SYNC_FILE_RANGE_WAIT_AFTER".into(),
+        MacroBody::Object("4".into()),
+    );
     macros.insert("F_GETFL".into(), MacroBody::Object("3".into()));
     macros.insert("F_SETFL".into(), MacroBody::Object("4".into()));
     macros.insert("F_GETLK".into(), MacroBody::Object("5".into()));
@@ -486,7 +563,7 @@ pub fn preprocess_with_options_arch(
     macros.insert("S_IWOTH".into(), MacroBody::Object("2".into()));
     macros.insert("S_IXOTH".into(), MacroBody::Object("1".into()));
     macros.insert("S_IRWXO".into(), MacroBody::Object("7".into())); // 0007
-    // mode test macros (function-like)
+                                                                    // mode test macros (function-like)
     macros.insert(
         "S_ISDIR".into(),
         MacroBody::Function {
@@ -551,10 +628,7 @@ pub fn preprocess_with_options_arch(
         "PTHREAD_COND_INITIALIZER".into(),
         MacroBody::Object("{0}".into()),
     );
-    macros.insert(
-        "PTHREAD_ONCE_INIT".into(),
-        MacroBody::Object("0".into()),
-    );
+    macros.insert("PTHREAD_ONCE_INIT".into(), MacroBody::Object("0".into()));
     macros.insert("DT_UNKNOWN".into(), MacroBody::Object("0".into()));
     macros.insert("DT_FIFO".into(), MacroBody::Object("1".into()));
     macros.insert("DT_CHR".into(), MacroBody::Object("2".into()));
@@ -662,12 +736,24 @@ pub fn preprocess_with_options_arch(
     // True unsigned maxima via cast so soft's IntLit path cannot lose the U
     // suffix and signed-idiv SIZE_MAX/2 to 0 (redis) or cmpl-lie (postgres).
     macros.insert("SIZE_MAX".into(), MacroBody::Object("((size_t)-1)".into()));
-    macros.insert("UINT64_MAX".into(), MacroBody::Object("((unsigned long long)-1)".into()));
+    macros.insert(
+        "UINT64_MAX".into(),
+        MacroBody::Object("((unsigned long long)-1)".into()),
+    );
     macros.insert("UINT32_MAX".into(), MacroBody::Object("4294967295U".into()));
-    macros.insert("INT64_MAX".into(), MacroBody::Object("9223372036854775807LL".into()));
+    macros.insert(
+        "INT64_MAX".into(),
+        MacroBody::Object("9223372036854775807LL".into()),
+    );
     macros.insert("INT32_MAX".into(), MacroBody::Object("2147483647".into()));
-    macros.insert("PTRDIFF_MAX".into(), MacroBody::Object("9223372036854775807L".into()));
-    macros.insert("SSIZE_MAX".into(), MacroBody::Object("9223372036854775807L".into()));
+    macros.insert(
+        "PTRDIFF_MAX".into(),
+        MacroBody::Object("9223372036854775807L".into()),
+    );
+    macros.insert(
+        "SSIZE_MAX".into(),
+        MacroBody::Object("9223372036854775807L".into()),
+    );
     // limits.h-style (Lua luaconf selects long long via defined(LLONG_MAX)).
     macros.insert("CHAR_BIT".into(), MacroBody::Object("8".into()));
     macros.insert("SCHAR_MIN".into(), MacroBody::Object("(-128)".into()));
@@ -678,16 +764,37 @@ pub fn preprocess_with_options_arch(
     macros.insert("SHRT_MIN".into(), MacroBody::Object("(-32768)".into()));
     macros.insert("SHRT_MAX".into(), MacroBody::Object("32767".into()));
     macros.insert("USHRT_MAX".into(), MacroBody::Object("65535".into()));
-    macros.insert("INT_MIN".into(), MacroBody::Object("(-2147483647-1)".into()));
+    macros.insert(
+        "INT_MIN".into(),
+        MacroBody::Object("(-2147483647-1)".into()),
+    );
     macros.insert("INT_MAX".into(), MacroBody::Object("2147483647".into()));
     // Critical for Lua L_INTHASBITS / MAXARG_Bx (else OFFSET_sBx becomes INT_MAX/2).
     macros.insert("UINT_MAX".into(), MacroBody::Object("4294967295U".into()));
-    macros.insert("LONG_MIN".into(), MacroBody::Object("(-9223372036854775807L-1)".into()));
-    macros.insert("LONG_MAX".into(), MacroBody::Object("9223372036854775807L".into()));
-    macros.insert("ULONG_MAX".into(), MacroBody::Object("18446744073709551615UL".into()));
-    macros.insert("LLONG_MIN".into(), MacroBody::Object("(-9223372036854775807LL-1)".into()));
-    macros.insert("LLONG_MAX".into(), MacroBody::Object("9223372036854775807LL".into()));
-    macros.insert("ULLONG_MAX".into(), MacroBody::Object("18446744073709551615ULL".into()));
+    macros.insert(
+        "LONG_MIN".into(),
+        MacroBody::Object("(-9223372036854775807L-1)".into()),
+    );
+    macros.insert(
+        "LONG_MAX".into(),
+        MacroBody::Object("9223372036854775807L".into()),
+    );
+    macros.insert(
+        "ULONG_MAX".into(),
+        MacroBody::Object("18446744073709551615UL".into()),
+    );
+    macros.insert(
+        "LLONG_MIN".into(),
+        MacroBody::Object("(-9223372036854775807LL-1)".into()),
+    );
+    macros.insert(
+        "LLONG_MAX".into(),
+        MacroBody::Object("9223372036854775807LL".into()),
+    );
+    macros.insert(
+        "ULLONG_MAX".into(),
+        MacroBody::Object("18446744073709551615ULL".into()),
+    );
     // float.h / math.h / stdlib / time / locale — needed when system headers are
     // not fully ingested (Lua loslib/lmathlib/lstrlib/lua.c).
     macros.insert("FLT_RADIX".into(), MacroBody::Object("2".into()));
@@ -704,12 +811,30 @@ pub fn preprocess_with_options_arch(
     macros.insert("DBL_MIN_10_EXP".into(), MacroBody::Object("(-307)".into()));
     macros.insert("FLT_MAX_10_EXP".into(), MacroBody::Object("38".into()));
     macros.insert("DBL_MAX_10_EXP".into(), MacroBody::Object("308".into()));
-    macros.insert("FLT_MAX".into(), MacroBody::Object("3.402823466e+38".into()));
-    macros.insert("DBL_MAX".into(), MacroBody::Object("1.7976931348623157e+308".into()));
-    macros.insert("FLT_MIN".into(), MacroBody::Object("1.175494351e-38".into()));
-    macros.insert("DBL_MIN".into(), MacroBody::Object("2.2250738585072014e-308".into()));
-    macros.insert("FLT_EPSILON".into(), MacroBody::Object("1.192092896e-07".into()));
-    macros.insert("DBL_EPSILON".into(), MacroBody::Object("2.2204460492503131e-16".into()));
+    macros.insert(
+        "FLT_MAX".into(),
+        MacroBody::Object("3.402823466e+38".into()),
+    );
+    macros.insert(
+        "DBL_MAX".into(),
+        MacroBody::Object("1.7976931348623157e+308".into()),
+    );
+    macros.insert(
+        "FLT_MIN".into(),
+        MacroBody::Object("1.175494351e-38".into()),
+    );
+    macros.insert(
+        "DBL_MIN".into(),
+        MacroBody::Object("2.2250738585072014e-308".into()),
+    );
+    macros.insert(
+        "FLT_EPSILON".into(),
+        MacroBody::Object("1.192092896e-07".into()),
+    );
+    macros.insert(
+        "DBL_EPSILON".into(),
+        MacroBody::Object("2.2204460492503131e-16".into()),
+    );
     // Soft numeric stand-ins (no libm sentinel symbols required at link).
     macros.insert("HUGE_VAL".into(), MacroBody::Object("1.0e300".into()));
     macros.insert("HUGE_VALF".into(), MacroBody::Object("1.0e38".into()));
@@ -733,8 +858,14 @@ pub fn preprocess_with_options_arch(
     macros.insert("_IOLBF".into(), MacroBody::Object("1".into()));
     macros.insert("_IONBF".into(), MacroBody::Object("2".into()));
     macros.insert("SIGINT".into(), MacroBody::Object("2".into()));
-    macros.insert("SIG_DFL".into(), MacroBody::Object("((void (*)(int))0)".into()));
-    macros.insert("SIG_IGN".into(), MacroBody::Object("((void (*)(int))1)".into()));
+    macros.insert(
+        "SIG_DFL".into(),
+        MacroBody::Object("((void (*)(int))0)".into()),
+    );
+    macros.insert(
+        "SIG_IGN".into(),
+        MacroBody::Object("((void (*)(int))1)".into()),
+    );
     // BSD/Darwin ioctl helpers (sqlite afpSetLock) — soft to 0 when headers missing.
     macros.insert(
         "_IOWR".into(),
@@ -849,7 +980,10 @@ pub fn preprocess_with_options_arch(
     // ISO C required static predefined macros (__LINE__/__FILE__ are dynamic specials).
     macros.insert("__STDC__".into(), MacroBody::Object("1".into()));
     macros.insert("__STDC_HOSTED__".into(), MacroBody::Object("1".into()));
-    macros.insert("__STDC_VERSION__".into(), MacroBody::Object("201112L".into()));
+    macros.insert(
+        "__STDC_VERSION__".into(),
+        MacroBody::Object("201112L".into()),
+    );
     // Pretend GCC enough for Linux/kernel header guards (Kconfig already saw real gcc -E).
     macros.insert("__GNUC__".into(), MacroBody::Object("13".into()));
     macros.insert("__GNUC_MINOR__".into(), MacroBody::Object("0".into()));
@@ -915,10 +1049,7 @@ pub fn preprocess_with_options_arch(
         // Exception: `__weak` must survive (COND_SYSCALL stubs). Map it to a
         // sticky marker the lexer turns into TokenKind::Weak — if we leave
         // `__weak` → `__attribute__((__weak__))` it would be erased below.
-        macros.insert(
-            "__weak".into(),
-            MacroBody::Object("__acc_weak_attr".into()),
-        );
+        macros.insert("__weak".into(), MacroBody::Object("__acc_weak_attr".into()));
         macros.insert(
             "__attribute__".into(),
             MacroBody::Function {
@@ -978,10 +1109,7 @@ pub fn preprocess_with_options_arch(
             macros.insert(q.into(), MacroBody::Object("".into()));
         }
         // Preserve inline semantics for linkage (see native_save_fl multi-def).
-        macros.insert(
-            "__always_inline".into(),
-            MacroBody::Object("inline".into()),
-        );
+        macros.insert("__always_inline".into(), MacroBody::Object("inline".into()));
         // EXPORT_SYMBOL* expand to multi-line asm/section soup that our asm
         // parser cannot consume; kbuild linking does not need them for .o
         // generation under Stage C fail-drive (symbols stay global via .globl).
@@ -1070,10 +1198,7 @@ pub fn preprocess_with_options_arch(
         "PTHREAD_MUTEX_RECURSIVE".into(),
         MacroBody::Object("1".into()),
     );
-    macros.insert(
-        "PTHREAD_MUTEX_NORMAL".into(),
-        MacroBody::Object("0".into()),
-    );
+    macros.insert("PTHREAD_MUTEX_NORMAL".into(), MacroBody::Object("0".into()));
     macros.insert(
         "PTHREAD_MUTEX_ERRORCHECK".into(),
         MacroBody::Object("2".into()),
@@ -1188,7 +1313,10 @@ pub fn preprocess_with_options_arch(
     macros.insert("Z_DEFLATED".into(), MacroBody::Object("8".into()));
     macros.insert("Z_DEFAULT_STRATEGY".into(), MacroBody::Object("0".into()));
     // zlib default compression level (−1); postgres compression.c / basebackup.
-    macros.insert("Z_DEFAULT_COMPRESSION".into(), MacroBody::Object("(-1)".into()));
+    macros.insert(
+        "Z_DEFAULT_COMPRESSION".into(),
+        MacroBody::Object("(-1)".into()),
+    );
     macros.insert("Z_NULL".into(), MacroBody::Object("0".into()));
     // SysV IPC (sys/ipc.h) — postgres shmem/dsm without system cpp.
     macros.insert("IPC_RMID".into(), MacroBody::Object("0".into()));
@@ -1229,13 +1357,15 @@ pub fn preprocess_with_options_arch(
     macros.insert("TCSANOW".into(), MacroBody::Object("0".into()));
     macros.insert("TCSADRAIN".into(), MacroBody::Object("1".into()));
     macros.insert("TCSAFLUSH".into(), MacroBody::Object("2".into()));
-    macros.insert("ZLIB_VERSION".into(), MacroBody::Object("\"1.2.11\"".into()));
+    macros.insert(
+        "ZLIB_VERSION".into(),
+        MacroBody::Object("\"1.2.11\"".into()),
+    );
     macros.insert(
         "inflateInit2".into(),
         MacroBody::Function {
             params: vec!["strm".into(), "windowBits".into()],
-            body: "inflateInit2_((strm), (windowBits), ZLIB_VERSION, (int)sizeof(z_stream))"
-                .into(),
+            body: "inflateInit2_((strm), (windowBits), ZLIB_VERSION, (int)sizeof(z_stream))".into(),
             variadic: false,
         },
     );
@@ -1267,8 +1397,9 @@ pub fn preprocess_with_options_arch(
         "deflateInit".into(),
         MacroBody::Function {
             params: vec!["strm".into(), "level".into()],
-            body: "deflateInit2_((strm), (level), 8, 15, 8, 0, ZLIB_VERSION, (int)sizeof(z_stream))"
-                .into(),
+            body:
+                "deflateInit2_((strm), (level), 8, 15, 8, 0, ZLIB_VERSION, (int)sizeof(z_stream))"
+                    .into(),
             variadic: false,
         },
     );
@@ -2002,10 +2133,7 @@ fn soften_kernel_pp_residue(src: &str) -> String {
                             .replace("__force", "");
                         params.push(format!("{} _a{j}", ty.trim()));
                     }
-                    out.push_str(&format!(
-                        "long {prefix}{sys_name}({}) ",
-                        params.join(", ")
-                    ));
+                    out.push_str(&format!("long {prefix}{sys_name}({}) ", params.join(", ")));
                     continue;
                 }
             }
@@ -2150,8 +2278,7 @@ fn soften_kernel_builtins(src: &str) -> String {
                         let args_start = i + 1;
                         let after = skip_balanced_parens(bytes, i);
                         let args_end = after.saturating_sub(1);
-                        let args =
-                            std::str::from_utf8(&bytes[args_start..args_end]).unwrap_or("");
+                        let args = std::str::from_utf8(&bytes[args_start..args_end]).unwrap_or("");
                         let parts = split_top_level_commas(args);
                         let pick = if parts.len() >= 2 {
                             parts[1].trim()
@@ -2171,8 +2298,7 @@ fn soften_kernel_builtins(src: &str) -> String {
                         let args_start = i + 1;
                         let after = skip_balanced_parens(bytes, i);
                         let args_end = after.saturating_sub(1);
-                        let args =
-                            std::str::from_utf8(&bytes[args_start..args_end]).unwrap_or("");
+                        let args = std::str::from_utf8(&bytes[args_start..args_end]).unwrap_or("");
                         let parts = split_top_level_commas(args);
                         let pick = parts.first().map(|s| s.trim()).unwrap_or("0");
                         out.push('(');
@@ -2335,7 +2461,8 @@ fn preprocess_into(
                         }
                         return Err(format!("#include \"{path}\" not found"));
                     }
-                } else if let Some(path) = rest.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+                } else if let Some(path) = rest.strip_prefix('<').and_then(|s| s.strip_suffix('>'))
+                {
                     // <angle> include: -I paths first, then input dir, then CWD
                     for dir in extra_includes {
                         let full = dir.join(path);
@@ -2485,16 +2612,18 @@ fn preprocess_into(
                 }
                 let rest = dir["pragma".len()..].trim();
                 if let Some(arg) = rest.strip_prefix("push_macro").map(|s| s.trim()) {
-                    let macro_name = arg
-                        .trim_matches(|c| c == '(' || c == ')' || c == '"' || c == '\'' || c == ' ');
+                    let macro_name = arg.trim_matches(|c| {
+                        c == '(' || c == ')' || c == '"' || c == '\'' || c == ' '
+                    });
                     let current_def = macros.get(macro_name).cloned();
                     macro_stacks
                         .entry(macro_name.to_string())
                         .or_default()
                         .push(current_def);
                 } else if let Some(arg) = rest.strip_prefix("pop_macro").map(|s| s.trim()) {
-                    let macro_name = arg
-                        .trim_matches(|c| c == '(' || c == ')' || c == '"' || c == '\'' || c == ' ');
+                    let macro_name = arg.trim_matches(|c| {
+                        c == '(' || c == ')' || c == '"' || c == '\'' || c == ' '
+                    });
                     if let Some(stack) = macro_stacks.get_mut(macro_name) {
                         if let Some(prev_def) = stack.pop() {
                             match prev_def {
@@ -2960,7 +3089,7 @@ fn stringify_escape(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
-            '\r' => {},
+            '\r' => {}
             _ => out.push(c),
         }
     }
@@ -3205,7 +3334,11 @@ fn rewrite_defined(s: &str, macros: &HashMap<String, MacroBody>) -> String {
                 i = j;
                 s[start..j].to_string()
             };
-            out.push(if macro_is_defined(&name, macros) { '1' } else { '0' });
+            out.push(if macro_is_defined(&name, macros) {
+                '1'
+            } else {
+                '0'
+            });
             continue;
         }
         out.push(bytes[i] as char);
@@ -3221,7 +3354,14 @@ fn expand_pp_tokens(
     line_no: usize,
     source_name: &str,
 ) -> Result<String, String> {
-    expand_pp_tokens_disabled(s, macros, depth, line_no, source_name, &std::collections::HashSet::new())
+    expand_pp_tokens_disabled(
+        s,
+        macros,
+        depth,
+        line_no,
+        source_name,
+        &std::collections::HashSet::new(),
+    )
 }
 
 fn expand_pp_tokens_disabled(
@@ -3719,10 +3859,7 @@ fn expand_macros_in_text(
                                     .bytes()
                                     .all(|c| c.is_ascii_alphanumeric() || c == b'_');
                             if is_simple_id {
-                                if matches!(
-                                    macros.get(exp_id),
-                                    Some(MacroBody::Function { .. })
-                                ) {
+                                if matches!(macros.get(exp_id), Some(MacroBody::Function { .. })) {
                                     let mut j = i;
                                     while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                                         j += 1;
@@ -3852,10 +3989,7 @@ fn expand_macros_in_text(
                                 .bytes()
                                 .all(|c| c.is_ascii_alphanumeric() || c == b'_');
                         if is_simple_id
-                            && matches!(
-                                macros.get(exp_id),
-                                Some(MacroBody::Function { .. })
-                            )
+                            && matches!(macros.get(exp_id), Some(MacroBody::Function { .. }))
                         {
                             let mut j = i;
                             while j < bytes.len() && bytes[j].is_ascii_whitespace() {
@@ -4030,12 +4164,7 @@ fn substitute_macro(
         }
         // stringify #param — uses unexpanded argument. Must NOT fire on '#'
         // inside character/string literals (SQLite base85: `(dn) + '#'`).
-        if !in_str
-            && !in_char
-            && bytes[i] == b'#'
-            && i + 1 < bytes.len()
-            && bytes[i + 1] != b'#'
-        {
+        if !in_str && !in_char && bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] != b'#' {
             after_paste = false;
             paste_rhs_empty = false;
             i += 1;
@@ -4055,12 +4184,7 @@ fn substitute_macro(
             continue;
         }
         // token paste a ## b — operands use unexpanded args
-        if !in_str
-            && !in_char
-            && i + 1 < bytes.len()
-            && bytes[i] == b'#'
-            && bytes[i + 1] == b'#'
-        {
+        if !in_str && !in_char && i + 1 < bytes.len() && bytes[i] == b'#' && bytes[i + 1] == b'#' {
             i += 2;
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
                 i += 1;
@@ -4266,10 +4390,7 @@ void *krealloc_array(void *p, int n, int sz) __alloc_size__(2, 3);\n";
             n_attr <= 2,
             "recursive __alloc_size__ expansion exploded attrs={n_attr}: {o}"
         );
-        assert!(
-            o.contains("krealloc_array"),
-            "lost function name: {o}"
-        );
+        assert!(o.contains("krealloc_array"), "lost function name: {o}");
         assert!(
             o.contains("__alloc_size__(2, 3)") || o.contains("__alloc_size__(2,3)"),
             "inner painted name missing: {o}"
@@ -4310,22 +4431,35 @@ void *krealloc_array(void *p, int n, int sz) __alloc_size__(2, 3);\n";
             !o.contains("__LINE__"),
             "raw __LINE__ leaked into output: {o}"
         );
-        assert!(!o.contains("__FILE__"), "raw __FILE__ leaked into output: {o}");
+        assert!(
+            !o.contains("__FILE__"),
+            "raw __FILE__ leaked into output: {o}"
+        );
     }
 
     #[test]
     fn line_defined_in_if() {
-        let s = "#if defined(__LINE__)\nint ok;\n#endif\n#if !defined(__FILE__)\nint bad;\n#endif\n";
+        let s =
+            "#if defined(__LINE__)\nint ok;\n#endif\n#if !defined(__FILE__)\nint bad;\n#endif\n";
         let o = preprocess_with_options(s, None, &[], false, "t.c").unwrap();
-        assert!(o.contains("int ok"), "defined(__LINE__) should be true: {o}");
-        assert!(!o.contains("int bad"), "defined(__FILE__) should be true: {o}");
+        assert!(
+            o.contains("int ok"),
+            "defined(__LINE__) should be true: {o}"
+        );
+        assert!(
+            !o.contains("int bad"),
+            "defined(__FILE__) should be true: {o}"
+        );
     }
 
     #[test]
     fn stringify_escaped_macro_arg() {
         let s = "#define S(X) #X\nchar *s = S(asm(\".section \\\"sec\\\"\"));\n";
         let o = preprocess(s).unwrap();
-        assert!(o.contains("asm(\\\".section \\\\\\\"sec\\\\\\\"\\\")"), "quotes not escaped in stringification: {o}");
+        assert!(
+            o.contains("asm(\\\".section \\\\\\\"sec\\\\\\\"\\\")"),
+            "quotes not escaped in stringification: {o}"
+        );
     }
 
     #[test]
@@ -4367,7 +4501,10 @@ unsigned f(struct T *p, unsigned h) {\n\
             !o.contains("PredicateLockHashCodeFromTargetHashCode"),
             "newline-before-paren call must expand: {o}"
         );
-        assert!(o.contains("<< 4") || o.contains("<<4"), "body must expand: {o}");
+        assert!(
+            o.contains("<< 4") || o.contains("<<4"),
+            "body must expand: {o}"
+        );
     }
 
     #[test]

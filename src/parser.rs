@@ -81,7 +81,9 @@ impl Parser {
             Expr::Unary { op, expr } => match op {
                 UnaryOp::Neg => self.eval_enum_const(expr).map(|v| -v),
                 UnaryOp::BitNot => self.eval_enum_const(expr).map(|v| !v),
-                UnaryOp::Not => self.eval_enum_const(expr).map(|v| if v == 0 { 1 } else { 0 }),
+                UnaryOp::Not => self
+                    .eval_enum_const(expr)
+                    .map(|v| if v == 0 { 1 } else { 0 }),
                 _ => None,
             },
             Expr::Binary { op, left, right } => {
@@ -109,7 +111,11 @@ impl Parser {
                     _ => return None,
                 })
             }
-            Expr::Cond { cond, then_e, else_e } => {
+            Expr::Cond {
+                cond,
+                then_e,
+                else_e,
+            } => {
                 let c = self.eval_enum_const(cond)?;
                 if c != 0 {
                     self.eval_enum_const(then_e)
@@ -310,7 +316,30 @@ impl Parser {
                     || s == "__gnuc_va_list"
                     || s.ends_with("_t")
                     || s.ends_with("_T")
-                    || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool" | "_Bool" | "HIST_ENTRY" | "HIST_STATE" | "HISTORY_STATE")
+                    || matches!(
+                        s.as_str(),
+                        "__u8"
+                            | "__u16"
+                            | "__u32"
+                            | "__u64"
+                            | "__s8"
+                            | "__s16"
+                            | "__s32"
+                            | "__s64"
+                            | "__le16"
+                            | "__le32"
+                            | "__le64"
+                            | "__be16"
+                            | "__be32"
+                            | "__be64"
+                            | "__sum16"
+                            | "__wsum"
+                            | "bool"
+                            | "_Bool"
+                            | "HIST_ENTRY"
+                            | "HIST_STATE"
+                            | "HISTORY_STATE"
+                    )
                     || self.typedefs.iter().any(|t| t == s)
             }
             TokenKind::Section(_) | TokenKind::Packed | TokenKind::Weak => true,
@@ -388,42 +417,150 @@ impl Parser {
                 self.bump();
                 s
             }
-            TokenKind::Int => { self.bump(); "int".into() }
-            TokenKind::Void => { self.bump(); "void".into() }
-            TokenKind::Char => { self.bump(); "char".into() }
-            TokenKind::Long => { self.bump(); "long".into() }
-            TokenKind::Short => { self.bump(); "short".into() }
-            TokenKind::Float => { self.bump(); "float".into() }
-            TokenKind::Double => { self.bump(); "double".into() }
-            TokenKind::Struct => { self.bump(); "struct".into() }
-            TokenKind::Union => { self.bump(); "union".into() }
-            TokenKind::Typedef => { self.bump(); "typedef".into() }
-            TokenKind::Enum => { self.bump(); "enum".into() }
-            TokenKind::Unsigned => { self.bump(); "unsigned".into() }
-            TokenKind::Signed => { self.bump(); "signed".into() }
-            TokenKind::Static => { self.bump(); "static".into() }
-            TokenKind::Extern => { self.bump(); "extern".into() }
-            TokenKind::Register => { self.bump(); "register".into() }
-            TokenKind::Inline => { self.bump(); "inline".into() }
-            TokenKind::Restrict => { self.bump(); "restrict".into() }
-            TokenKind::Auto => { self.bump(); "auto".into() }
-            TokenKind::Const => { self.bump(); "const".into() }
-            TokenKind::Volatile => { self.bump(); "volatile".into() }
-            TokenKind::Return => { self.bump(); "return".into() }
-            TokenKind::If => { self.bump(); "if".into() }
-            TokenKind::Else => { self.bump(); "else".into() }
-            TokenKind::While => { self.bump(); "while".into() }
-            TokenKind::For => { self.bump(); "for".into() }
-            TokenKind::Do => { self.bump(); "do".into() }
-            TokenKind::Break => { self.bump(); "break".into() }
-            TokenKind::Continue => { self.bump(); "continue".into() }
-            TokenKind::Goto => { self.bump(); "goto".into() }
-            TokenKind::Switch => { self.bump(); "switch".into() }
-            TokenKind::Case => { self.bump(); "case".into() }
-            TokenKind::Default => { self.bump(); "default".into() }
-            TokenKind::Sizeof => { self.bump(); "sizeof".into() }
-            TokenKind::Packed => { self.bump(); "packed".into() }
-            TokenKind::Section(s) => { self.bump(); s }
+            TokenKind::Int => {
+                self.bump();
+                "int".into()
+            }
+            TokenKind::Void => {
+                self.bump();
+                "void".into()
+            }
+            TokenKind::Char => {
+                self.bump();
+                "char".into()
+            }
+            TokenKind::Long => {
+                self.bump();
+                "long".into()
+            }
+            TokenKind::Short => {
+                self.bump();
+                "short".into()
+            }
+            TokenKind::Float => {
+                self.bump();
+                "float".into()
+            }
+            TokenKind::Double => {
+                self.bump();
+                "double".into()
+            }
+            TokenKind::Struct => {
+                self.bump();
+                "struct".into()
+            }
+            TokenKind::Union => {
+                self.bump();
+                "union".into()
+            }
+            TokenKind::Typedef => {
+                self.bump();
+                "typedef".into()
+            }
+            TokenKind::Enum => {
+                self.bump();
+                "enum".into()
+            }
+            TokenKind::Unsigned => {
+                self.bump();
+                "unsigned".into()
+            }
+            TokenKind::Signed => {
+                self.bump();
+                "signed".into()
+            }
+            TokenKind::Static => {
+                self.bump();
+                "static".into()
+            }
+            TokenKind::Extern => {
+                self.bump();
+                "extern".into()
+            }
+            TokenKind::Register => {
+                self.bump();
+                "register".into()
+            }
+            TokenKind::Inline => {
+                self.bump();
+                "inline".into()
+            }
+            TokenKind::Restrict => {
+                self.bump();
+                "restrict".into()
+            }
+            TokenKind::Auto => {
+                self.bump();
+                "auto".into()
+            }
+            TokenKind::Const => {
+                self.bump();
+                "const".into()
+            }
+            TokenKind::Volatile => {
+                self.bump();
+                "volatile".into()
+            }
+            TokenKind::Return => {
+                self.bump();
+                "return".into()
+            }
+            TokenKind::If => {
+                self.bump();
+                "if".into()
+            }
+            TokenKind::Else => {
+                self.bump();
+                "else".into()
+            }
+            TokenKind::While => {
+                self.bump();
+                "while".into()
+            }
+            TokenKind::For => {
+                self.bump();
+                "for".into()
+            }
+            TokenKind::Do => {
+                self.bump();
+                "do".into()
+            }
+            TokenKind::Break => {
+                self.bump();
+                "break".into()
+            }
+            TokenKind::Continue => {
+                self.bump();
+                "continue".into()
+            }
+            TokenKind::Goto => {
+                self.bump();
+                "goto".into()
+            }
+            TokenKind::Switch => {
+                self.bump();
+                "switch".into()
+            }
+            TokenKind::Case => {
+                self.bump();
+                "case".into()
+            }
+            TokenKind::Default => {
+                self.bump();
+                "default".into()
+            }
+            TokenKind::Sizeof => {
+                self.bump();
+                "sizeof".into()
+            }
+            TokenKind::Packed => {
+                self.bump();
+                "packed".into()
+            }
+            TokenKind::Section(s) => {
+                self.bump();
+                s
+            }
             _ => {
                 return Err(format!(
                     "expected field name identifier after '.' or '->', got {:?} at {}:{}",
@@ -465,9 +602,13 @@ impl Parser {
                 | TokenKind::Static,
             ) => false,
             Some(TokenKind::Ident(s)) => {
-                if matches!(self.toks.get(j + 1).map(|t| &t.kind), Some(TokenKind::RParen))
-                    && matches!(self.toks.get(j + 2).map(|t| &t.kind), Some(TokenKind::LParen | TokenKind::LBracket))
-                {
+                if matches!(
+                    self.toks.get(j + 1).map(|t| &t.kind),
+                    Some(TokenKind::RParen)
+                ) && matches!(
+                    self.toks.get(j + 2).map(|t| &t.kind),
+                    Some(TokenKind::LParen | TokenKind::LBracket)
+                ) {
                     true
                 } else {
                     !self.typedefs.iter().any(|t| t == s)
@@ -511,10 +652,23 @@ impl Parser {
                 continue;
             }
             if self.peek_kind() == &TokenKind::Do
-                || (matches!(self.peek_kind(), TokenKind::Int | TokenKind::Void | TokenKind::Char | TokenKind::Long | TokenKind::Short)
-                    && self.toks.get(self.i + 1).map(|t| &t.kind) == Some(&TokenKind::Do))
+                || (matches!(
+                    self.peek_kind(),
+                    TokenKind::Int
+                        | TokenKind::Void
+                        | TokenKind::Char
+                        | TokenKind::Long
+                        | TokenKind::Short
+                ) && self.toks.get(self.i + 1).map(|t| &t.kind) == Some(&TokenKind::Do))
             {
-                if matches!(self.peek_kind(), TokenKind::Int | TokenKind::Void | TokenKind::Char | TokenKind::Long | TokenKind::Short) {
+                if matches!(
+                    self.peek_kind(),
+                    TokenKind::Int
+                        | TokenKind::Void
+                        | TokenKind::Char
+                        | TokenKind::Long
+                        | TokenKind::Short
+                ) {
                     self.bump();
                 }
                 self.expect(TokenKind::Do)?;
@@ -543,7 +697,10 @@ impl Parser {
                 if self.at(&TokenKind::LBrace) {
                     let _ = self.skip_balanced_braces();
                 } else {
-                    while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Else) && !self.at(&TokenKind::Eof) {
+                    while !self.at(&TokenKind::Semicolon)
+                        && !self.at(&TokenKind::Else)
+                        && !self.at(&TokenKind::Eof)
+                    {
                         self.bump();
                     }
                     let _ = self.eat(TokenKind::Semicolon);
@@ -825,11 +982,11 @@ impl Parser {
                     name: vname,
                     ty: vty,
                     init,
-                is_static: false,
-                is_extern: false,
-                is_weak: false,
-                section: None,
-            }))
+                    is_static: false,
+                    is_extern: false,
+                    is_weak: false,
+                    section: None,
+                }))
             }
         }
     }
@@ -867,7 +1024,10 @@ impl Parser {
             if s.starts_with(prefix) && s.len() > prefix.len() {
                 let rest = &s[prefix.len()..];
                 if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                    && best.as_ref().map(|(n, _)| prefix.len() > *n).unwrap_or(true)
+                    && best
+                        .as_ref()
+                        .map(|(n, _)| prefix.len() > *n)
+                        .unwrap_or(true)
                 {
                     best = Some((prefix.len(), ty));
                 }
@@ -985,9 +1145,15 @@ impl Parser {
                 }
                 break;
             }
-            while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Comma) && !self.at(&TokenKind::Eof) {
+            while !self.at(&TokenKind::Semicolon)
+                && !self.at(&TokenKind::Comma)
+                && !self.at(&TokenKind::Eof)
+            {
                 self.skip_trailing_gnu_attrs();
-                if self.at(&TokenKind::Semicolon) || self.at(&TokenKind::Comma) || self.at(&TokenKind::Eof) {
+                if self.at(&TokenKind::Semicolon)
+                    || self.at(&TokenKind::Comma)
+                    || self.at(&TokenKind::Eof)
+                {
                     break;
                 }
                 self.bump();
@@ -1222,9 +1388,7 @@ impl Parser {
                             }
                             if matches!(
                                 self.peek_kind(),
-                                TokenKind::Ident(_)
-                                    | TokenKind::IntLit(_)
-                                    | TokenKind::CharLit(_)
+                                TokenKind::Ident(_) | TokenKind::IntLit(_) | TokenKind::CharLit(_)
                             ) {
                                 continue;
                             }
@@ -1253,7 +1417,7 @@ impl Parser {
                                 is_static: true,
                                 is_extern: false,
                                 is_weak: false,
-                section: None,
+                                section: None,
                             });
                             next_val += 1;
                         } else {
@@ -1288,7 +1452,10 @@ impl Parser {
                     let t = if self.is_typename()
                         && !matches!(
                             self.peek_kind(),
-                            TokenKind::LParen | TokenKind::Star | TokenKind::AndAnd | TokenKind::Amp
+                            TokenKind::LParen
+                                | TokenKind::Star
+                                | TokenKind::AndAnd
+                                | TokenKind::Amp
                         ) {
                         self.parse_type_name()?
                     } else {
@@ -1314,19 +1481,55 @@ impl Parser {
             // types like malloc_zone_t). Register as opaque int typedef and continue.
             TokenKind::Ident(s) => {
                 self.bump();
-                let ty = if s.ends_with("_t") || s.ends_with("_T") || matches!(s.as_str(), "__u8" | "__u16" | "__u32" | "__u64" | "__s8" | "__s16" | "__s32" | "__s64" | "__le16" | "__le32" | "__le64" | "__be16" | "__be32" | "__be64" | "__sum16" | "__wsum" | "bool" | "_Bool" | "HIST_ENTRY" | "HIST_STATE" | "HISTORY_STATE") {
+                let ty = if s.ends_with("_t")
+                    || s.ends_with("_T")
+                    || matches!(
+                        s.as_str(),
+                        "__u8"
+                            | "__u16"
+                            | "__u32"
+                            | "__u64"
+                            | "__s8"
+                            | "__s16"
+                            | "__s32"
+                            | "__s64"
+                            | "__le16"
+                            | "__le32"
+                            | "__le64"
+                            | "__be16"
+                            | "__be32"
+                            | "__be64"
+                            | "__sum16"
+                            | "__wsum"
+                            | "bool"
+                            | "_Bool"
+                            | "HIST_ENTRY"
+                            | "HIST_STATE"
+                            | "HISTORY_STATE"
+                    ) {
                     match s.as_str() {
                         "bool" | "_Bool" | "__u8" | "u8" | "uint8_t" | "bool_t" => Type::UChar,
                         "__s8" | "s8" | "int8_t" | "flex_int8_t" | "yytype_int8" => Type::SChar,
                         "__u16" | "u16" | "uint16_t" => Type::UShort,
-                        "__s16" | "s16" | "int16_t" | "flex_int16_t" | "yytype_int16" => Type::Short,
-                        "__u64" | "u64" | "uint64_t" | "size_t" | "uintptr_t" | "uintmax_t" => Type::ULong,
-                        "__s64" | "s64" | "int64_t" | "intptr_t" | "off_t" | "ssize_t" | "ptrdiff_t" | "intmax_t" => Type::Long,
+                        "__s16" | "s16" | "int16_t" | "flex_int16_t" | "yytype_int16" => {
+                            Type::Short
+                        }
+                        "__u64" | "u64" | "uint64_t" | "size_t" | "uintptr_t" | "uintmax_t" => {
+                            Type::ULong
+                        }
+                        "__s64" | "s64" | "int64_t" | "intptr_t" | "off_t" | "ssize_t"
+                        | "ptrdiff_t" | "intmax_t" => Type::Long,
                         _ if s.starts_with("uint") || s.ends_with("u8") => Type::UChar,
                         _ if s.starts_with("int8") || s.ends_with("s8") => Type::SChar,
                         _ if s.ends_with("8_t") || s.ends_with("8") => Type::UChar,
                         _ if s.ends_with("16_t") || s.ends_with("16") => Type::UShort,
-                        _ if s.ends_with("64_t") || s.ends_with("64") || s.ends_with("ptr_t") || s.ends_with("size_t") => Type::ULong,
+                        _ if s.ends_with("64_t")
+                            || s.ends_with("64")
+                            || s.ends_with("ptr_t")
+                            || s.ends_with("size_t") =>
+                        {
+                            Type::ULong
+                        }
                         _ => Type::Int,
                     }
                 } else {
@@ -1480,7 +1683,7 @@ impl Parser {
                         is_static: false,
                         is_extern,
                         is_weak: false,
-                section: None,
+                        section: None,
                     }));
                 }
                 if self.eat(TokenKind::Comma) {
@@ -1495,11 +1698,15 @@ impl Parser {
 
     fn parse_struct_type(&mut self, is_union: bool) -> Result<Type, String> {
         self.bump(); // struct/union
-        // `struct __attribute__((packed)) name { ... }`
+                     // `struct __attribute__((packed)) name { ... }`
         let mut packed = self.eat_packed_attrs();
         let mut name: Option<String> = None;
         if let TokenKind::Ident(s) = self.peek_kind().clone() {
-            if s == "__attribute__" || s == "__attribute" || s == "__extension__" || s == "__extension" {
+            if s == "__attribute__"
+                || s == "__attribute"
+                || s == "__extension__"
+                || s == "__extension"
+            {
                 self.bump();
                 if self.at(&TokenKind::LParen) {
                     let _ = self.skip_balanced_parens();
@@ -1702,59 +1909,58 @@ impl Parser {
         // variables. false for bare `(name)` including `T *(name)(params)` (function
         // returning T*). Distinguishing by post-hoc Type::Ptr is wrong: outer `*` for
         // the return type also yields Ptr (Redis/Lua `lua_State *(luaL_newstate)(void)`).
-        let (name, mut ty, nested, nested_ptr_form, mut bubbled_fp) = if self.at(&TokenKind::LParen)
-            && self.lparen_starts_nested_declarator()
-        {
-            self.bump(); // (
-            self.skip_trailing_gnu_attrs();
-            let nested_ptr_form = self.at(&TokenKind::Star);
-            let (n, inner, inner_fp) = self.parse_declarator(ty)?;
-            self.skip_trailing_gnu_attrs();
-            self.expect(TokenKind::RParen)?;
-            // Bubble function params from `(*name(params))` so definitions work:
-            // `void (*f(T))(void) { ... }` is a function named f.
-            (n, inner, true, nested_ptr_form, inner_fp)
-        } else {
-            self.skip_trailing_gnu_attrs();
-            if self.eat(TokenKind::Do) {
-                if self.at(&TokenKind::LBrace) {
-                    let _ = self.skip_balanced_braces();
-                }
-                if self.at(&TokenKind::LParen) {
-                    let _ = self.skip_balanced_parens();
-                }
-                self.skip_trailing_gnu_attrs();
-            }
-            if let TokenKind::Ident(s) = self.peek_kind().clone() {
-                self.bump();
-                let full_name = if s.starts_with("__UNIQUE_ID") && self.at(&TokenKind::LParen) {
-                    self.bump(); // (
-                    let inner_name = if let TokenKind::Ident(id) = self.peek_kind().clone() {
-                        self.bump();
-                        id
-                    } else {
-                        "name".to_string()
-                    };
-                    if self.at(&TokenKind::RParen) {
-                        self.bump(); // )
-                    }
-                    format!("{}_{}", s, inner_name)
-                } else {
-                    s
-                };
-                (full_name, ty, false, false, None)
-            } else if self.at(&TokenKind::LParen) && self.lparen_starts_nested_declarator() {
-                self.bump();
+        let (name, mut ty, nested, nested_ptr_form, mut bubbled_fp) =
+            if self.at(&TokenKind::LParen) && self.lparen_starts_nested_declarator() {
+                self.bump(); // (
                 self.skip_trailing_gnu_attrs();
                 let nested_ptr_form = self.at(&TokenKind::Star);
                 let (n, inner, inner_fp) = self.parse_declarator(ty)?;
                 self.skip_trailing_gnu_attrs();
                 self.expect(TokenKind::RParen)?;
+                // Bubble function params from `(*name(params))` so definitions work:
+                // `void (*f(T))(void) { ... }` is a function named f.
                 (n, inner, true, nested_ptr_form, inner_fp)
             } else {
-                (String::new(), ty, false, false, None)
-            }
-        };
+                self.skip_trailing_gnu_attrs();
+                if self.eat(TokenKind::Do) {
+                    if self.at(&TokenKind::LBrace) {
+                        let _ = self.skip_balanced_braces();
+                    }
+                    if self.at(&TokenKind::LParen) {
+                        let _ = self.skip_balanced_parens();
+                    }
+                    self.skip_trailing_gnu_attrs();
+                }
+                if let TokenKind::Ident(s) = self.peek_kind().clone() {
+                    self.bump();
+                    let full_name = if s.starts_with("__UNIQUE_ID") && self.at(&TokenKind::LParen) {
+                        self.bump(); // (
+                        let inner_name = if let TokenKind::Ident(id) = self.peek_kind().clone() {
+                            self.bump();
+                            id
+                        } else {
+                            "name".to_string()
+                        };
+                        if self.at(&TokenKind::RParen) {
+                            self.bump(); // )
+                        }
+                        format!("{}_{}", s, inner_name)
+                    } else {
+                        s
+                    };
+                    (full_name, ty, false, false, None)
+                } else if self.at(&TokenKind::LParen) && self.lparen_starts_nested_declarator() {
+                    self.bump();
+                    self.skip_trailing_gnu_attrs();
+                    let nested_ptr_form = self.at(&TokenKind::Star);
+                    let (n, inner, inner_fp) = self.parse_declarator(ty)?;
+                    self.skip_trailing_gnu_attrs();
+                    self.expect(TokenKind::RParen)?;
+                    (n, inner, true, nested_ptr_form, inner_fp)
+                } else {
+                    (String::new(), ty, false, false, None)
+                }
+            };
         self.skip_trailing_gnu_attrs();
         // Arrays: collect dims left-to-right then wrap right-to-left so
         // `char a[2][4]` becomes Array(Array(Char,4), 2).
@@ -1771,10 +1977,8 @@ impl Parser {
                         self.bump();
                     }
                     TokenKind::Ident(s)
-                        if matches!(
-                            s.as_str(),
-                            "restrict" | "__restrict" | "__restrict__"
-                        ) || Self::is_gnu_attr_name(&s) =>
+                        if matches!(s.as_str(), "restrict" | "__restrict" | "__restrict__")
+                            || Self::is_gnu_attr_name(&s) =>
                     {
                         self.bump();
                         if self.at(&TokenKind::LParen) {
@@ -1883,10 +2087,9 @@ impl Parser {
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Ptr(_) => 8,
             Type::Array(e, _) => self.const_type_align(e),
-            Type::Struct(n) | Type::Union(n) => self
-                .layout_named(n)
-                .map(|(_, a, _)| a)
-                .unwrap_or(8),
+            Type::Struct(n) | Type::Union(n) => {
+                self.layout_named(n).map(|(_, a, _)| a).unwrap_or(8)
+            }
             Type::AnonStruct(fs) => self.layout_fields_const(fs, false, false).1,
             Type::AnonUnion(fs) => self.layout_fields_const(fs, true, false).1,
             Type::Const(_) => unreachable!(),
@@ -1947,7 +2150,11 @@ impl Parser {
             if let Some(width) = f.bit_width {
                 let container_sz = self.const_type_size(&f.ty).unwrap_or(4).max(1) as u64;
                 let container_bits = container_sz * 8;
-                let al = if packed { 1 } else { self.const_type_align(&f.ty) };
+                let al = if packed {
+                    1
+                } else {
+                    self.const_type_align(&f.ty)
+                };
                 max_align = max_align.max(al);
                 if is_union {
                     if !f.name.is_empty() && width > 0 {
@@ -1979,7 +2186,11 @@ impl Parser {
                 continue;
             }
             let sz = self.const_type_size(&f.ty).unwrap_or(8);
-            let al = if packed { 1 } else { self.const_type_align(&f.ty) };
+            let al = if packed {
+                1
+            } else {
+                self.const_type_align(&f.ty)
+            };
             max_align = max_align.max(al);
             if is_union {
                 if !f.name.is_empty() {
@@ -2081,11 +2292,7 @@ impl Parser {
     /// Nested offsetof path: `a.b.c` → sum of successive field offsets.
     /// Each path element is `(field_name, array_indices)` so
     /// `regs[2]` / `stackframe[1]` add `index * elem_size`.
-    fn const_offsetof_type_path(
-        &self,
-        ty: &Type,
-        path: &[(String, Vec<i64>)],
-    ) -> Option<i64> {
+    fn const_offsetof_type_path(&self, ty: &Type, path: &[(String, Vec<i64>)]) -> Option<i64> {
         let mut cur = ty.clone();
         let mut total = 0i64;
         for (field, indices) in path {
@@ -2219,9 +2426,7 @@ impl Parser {
             Expr::Int(n) => Some(Self::int_lit_type(*n)),
             Expr::Char(_) => Some(Type::Int),
             Expr::Float(_) => Some(Type::Double),
-            Expr::String(s) => {
-                Some(Type::Array(Box::new(Type::Char), (s.len() + 1) as i64))
-            }
+            Expr::String(s) => Some(Type::Array(Box::new(Type::Char), (s.len() + 1) as i64)),
             Expr::Var(name) => {
                 if let Some(t) = self.lookup_local_type(name) {
                     return Some(t.clone());
@@ -2275,18 +2480,14 @@ impl Parser {
                 match (l_unqual, r_unqual) {
                     (Some(Type::Double), _) | (_, Some(Type::Double)) => Some(Type::Double),
                     (Some(Type::Float), _) | (_, Some(Type::Float)) => Some(Type::Float),
-                    (Some(Type::Ptr(p)), _) | (_, Some(Type::Ptr(p))) => {
-                        Some(Type::Ptr(p.clone()))
-                    }
+                    (Some(Type::Ptr(p)), _) | (_, Some(Type::Ptr(p))) => Some(Type::Ptr(p.clone())),
                     (Some(Type::ULong), _) | (_, Some(Type::ULong)) => Some(Type::ULong),
                     (Some(Type::Long), _) | (_, Some(Type::Long)) => Some(Type::Long),
                     (Some(Type::UInt), _) | (_, Some(Type::UInt)) => Some(Type::UInt),
                     _ => Some(Type::Int),
                 }
             }
-            Expr::Cond {
-                then_e, else_e, ..
-            } => self
+            Expr::Cond { then_e, else_e, .. } => self
                 .const_expr_type(then_e)
                 .or_else(|| self.const_expr_type(else_e)),
             Expr::Call { .. } => Some(Type::Int),
@@ -2358,11 +2559,13 @@ impl Parser {
             Expr::Call { name, args } => match name.as_str() {
                 "__builtin_constant_p" => {
                     // 1 if argument is a foldable constant expression.
-                    Some(if args.len() == 1 && self.const_array_len(&args[0]).is_some() {
-                        1
-                    } else {
-                        0
-                    })
+                    Some(
+                        if args.len() == 1 && self.const_array_len(&args[0]).is_some() {
+                            1
+                        } else {
+                            0
+                        },
+                    )
                 }
                 "__builtin_clzll" | "__builtin_clzl" | "__builtin_clz" => {
                     let n = self.const_array_len(args.first()?)? as u64;
@@ -2370,7 +2573,11 @@ impl Parser {
                         // GCC: undefined for 0; kernel const paths avoid it.
                         return None;
                     }
-                    let width = if name == "__builtin_clz" { 32u32 } else { 64u32 };
+                    let width = if name == "__builtin_clz" {
+                        32u32
+                    } else {
+                        64u32
+                    };
                     Some((n.leading_zeros() - (64 - width)) as i64)
                 }
                 "__builtin_ctzll" | "__builtin_ctzl" | "__builtin_ctz" => {
@@ -2412,9 +2619,7 @@ impl Parser {
                     // invalidation never saw peer writes.
                     let ty = self.const_expr_type(other)?;
                     match &ty {
-                        Type::Array(elem, n) if *n > 0 => {
-                            Some(self.const_type_size(elem)? * *n)
-                        }
+                        Type::Array(elem, n) if *n > 0 => Some(self.const_type_size(elem)? * *n),
                         Type::Array(_, n) if *n <= 0 => None,
                         other_ty => self.const_type_size(other_ty),
                     }
@@ -2555,7 +2760,10 @@ impl Parser {
                     is_weak = true;
                 }
                 sec_attr = self.last_section.take().or(sec_attr);
-                if self.at(&TokenKind::LBrace) || self.at(&TokenKind::Semicolon) || self.at(&TokenKind::Eof) {
+                if self.at(&TokenKind::LBrace)
+                    || self.at(&TokenKind::Semicolon)
+                    || self.at(&TokenKind::Eof)
+                {
                     break;
                 }
                 if let TokenKind::Ident(_) = self.peek_kind().clone() {
@@ -2719,9 +2927,15 @@ impl Parser {
                 section: sec2,
             }));
         }
-        while !self.at(&TokenKind::Semicolon) && !self.at(&TokenKind::Comma) && !self.at(&TokenKind::Eof) {
+        while !self.at(&TokenKind::Semicolon)
+            && !self.at(&TokenKind::Comma)
+            && !self.at(&TokenKind::Eof)
+        {
             self.skip_trailing_gnu_attrs();
-            if self.at(&TokenKind::Semicolon) || self.at(&TokenKind::Comma) || self.at(&TokenKind::Eof) {
+            if self.at(&TokenKind::Semicolon)
+                || self.at(&TokenKind::Comma)
+                || self.at(&TokenKind::Eof)
+            {
                 break;
             }
             self.bump();
@@ -2746,13 +2960,20 @@ impl Parser {
             }
             Type::Union(name) => {
                 if let Some(fs) = self.struct_fields.get(name) {
-                    fs.iter().map(|f| self.scalar_count(&f.ty)).max().unwrap_or(1)
+                    fs.iter()
+                        .map(|f| self.scalar_count(&f.ty))
+                        .max()
+                        .unwrap_or(1)
                 } else {
                     1
                 }
             }
             Type::AnonStruct(fs) => fs.iter().map(|f| self.scalar_count(&f.ty)).sum(),
-            Type::AnonUnion(fs) => fs.iter().map(|f| self.scalar_count(&f.ty)).max().unwrap_or(1),
+            Type::AnonUnion(fs) => fs
+                .iter()
+                .map(|f| self.scalar_count(&f.ty))
+                .max()
+                .unwrap_or(1),
             _ => 1,
         }
     }
@@ -2775,7 +2996,9 @@ impl Parser {
                     cur += 1;
                 }
                 let elem_sc = self.scalar_count(elem).max(1) as i64;
-                let has_sub_initlists = fields.iter().any(|(_, e)| matches!(e, Expr::InitList { .. }));
+                let has_sub_initlists = fields
+                    .iter()
+                    .any(|(_, e)| matches!(e, Expr::InitList { .. }));
                 let count = if !has_sub_initlists && elem_sc > 1 {
                     (high + elem_sc - 1) / elem_sc
                 } else {
@@ -2831,8 +3054,7 @@ impl Parser {
                     // designated array index: [n], [1+2], [ENUM], GNU [lo ... hi]
                     // Always parse full constant expressions so `1 + 2` is not
                     // left as IntLit then Plus before `]`.
-                    let idx_str = if self.at(&TokenKind::RBracket)
-                        || self.at(&TokenKind::Ellipsis)
+                    let idx_str = if self.at(&TokenKind::RBracket) || self.at(&TokenKind::Ellipsis)
                     {
                         "0".into()
                     } else {
@@ -2906,7 +3128,10 @@ impl Parser {
     }
 
     fn skip_balanced_braces_offset(&self, start: usize) -> usize {
-        if !matches!(self.toks.get(start).map(|t| &t.kind), Some(TokenKind::LBrace)) {
+        if !matches!(
+            self.toks.get(start).map(|t| &t.kind),
+            Some(TokenKind::LBrace)
+        ) {
             return start;
         }
         let mut depth = 1i32;
@@ -2929,7 +3154,10 @@ impl Parser {
 
     /// Skip a balanced `(...)` starting at `start` index and return index after `)`.
     fn skip_balanced_parens_offset(&self, start: usize) -> usize {
-        if !matches!(self.toks.get(start).map(|t| &t.kind), Some(TokenKind::LParen)) {
+        if !matches!(
+            self.toks.get(start).map(|t| &t.kind),
+            Some(TokenKind::LParen)
+        ) {
             return start;
         }
         let mut depth = 1i32;
@@ -2953,7 +3181,12 @@ impl Parser {
     /// Skip GNU attributes starting at `idx` token offset.
     fn skip_gnu_attrs_offset(&self, mut idx: usize) -> usize {
         loop {
-            if idx < self.toks.len() && matches!(self.toks[idx].kind, TokenKind::Packed | TokenKind::Section(_)) {
+            if idx < self.toks.len()
+                && matches!(
+                    self.toks[idx].kind,
+                    TokenKind::Packed | TokenKind::Section(_)
+                )
+            {
                 idx += 1;
                 continue;
             }
@@ -3078,10 +3311,8 @@ impl Parser {
             Some(TokenKind::Ident(s)) if s == "ALTERNATIVE" || s == "_ALTERNATIVE_CFG"
                 || s == "__ALTERNATIVE_CFG"
         );
-        let clean_template = matches!(
-            after,
-            Some(TokenKind::StringLit(_) | TokenKind::RParen)
-        ) || is_alternative;
+        let clean_template =
+            matches!(after, Some(TokenKind::StringLit(_) | TokenKind::RParen)) || is_alternative;
         if !clean_template {
             self.skip_balanced_parens()?;
             let _ = self.eat(TokenKind::Semicolon);
@@ -3307,12 +3538,12 @@ impl Parser {
                             // Fixed x86 letter constraints must use the real
                             // physical register (cmpxchg requires %eax for "a").
                             let reg = match body {
-                                "a" => 0u8,   // %rax
-                                "b" => 19u8,  // %rbx
-                                "c" => 11u8,  // %rcx
-                                "d" => 3u8,   // %rdx
-                                "S" => 17u8,  // %rsi
-                                "D" => 1u8,   // %rdi
+                                "a" => 0u8,  // %rax
+                                "b" => 19u8, // %rbx
+                                "c" => 11u8, // %rcx
+                                "d" => 3u8,  // %rdx
+                                "S" => 17u8, // %rsi
+                                "D" => 1u8,  // %rdi
                                 _ => alloc_reg(),
                             };
                             let var = match &e {
@@ -3456,13 +3687,15 @@ impl Parser {
                     out_store_exprs.push((op_reg[i], e));
                 }
                 // "+r"(x) / "a"(*p) read-write: preload current value.
-                if op_plus[i] || matches!(
-                    op_expr[i],
-                    Some(Expr::Unary {
-                        op: UnaryOp::Deref,
-                        ..
-                    })
-                ) {
+                if op_plus[i]
+                    || matches!(
+                        op_expr[i],
+                        Some(Expr::Unary {
+                            op: UnaryOp::Deref,
+                            ..
+                        })
+                    )
+                {
                     if let Some(e) = op_expr[i].clone() {
                         in_loads.push((op_reg[i], e));
                     } else if let Some(ref v) = op_var[i] {
@@ -3548,15 +3781,11 @@ impl Parser {
                                 out.truncate(trimmed.len() - 1);
                             } else {
                                 out.push('%');
-                                out.push_str(
-                                    std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""),
-                                );
+                                out.push_str(std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""));
                             }
                         } else {
                             out.push('%');
-                            out.push_str(
-                                std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""),
-                            );
+                            out.push_str(std::str::from_utf8(&bytes[i + 1..j]).unwrap_or(""));
                         }
                     }
                     i = j;
@@ -4450,10 +4679,10 @@ impl Parser {
             }
             Some(
                 TokenKind::Int
-                    | TokenKind::Void
-                    | TokenKind::Char
-                    | TokenKind::Float
-                    | TokenKind::Double,
+                | TokenKind::Void
+                | TokenKind::Char
+                | TokenKind::Float
+                | TokenKind::Double,
             ) => {
                 j += 1;
             }
@@ -4496,10 +4725,7 @@ impl Parser {
         loop {
             match self.toks.get(j).map(|t| &t.kind) {
                 Some(
-                    TokenKind::Star
-                        | TokenKind::Const
-                        | TokenKind::Volatile
-                        | TokenKind::Restrict,
+                    TokenKind::Star | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict,
                 ) => j += 1,
                 Some(TokenKind::LBracket) => {
                     // skip [ ... ] (balanced by depth of brackets)
@@ -4592,7 +4818,7 @@ impl Parser {
 
     fn parse_type_name(&mut self) -> Result<Type, String> {
         let base = self.parse_type_specifier()?;
-        // Abstract declarator: * / (*)(params) / [] 
+        // Abstract declarator: * / (*)(params) / []
         let (_, ty) = self.parse_abstract_declarator(base)?;
         Ok(ty)
     }
@@ -4997,8 +5223,6 @@ enum Postfix {
     Func,
 }
 
-
-
 pub fn parse(src: &str) -> Result<Program, String> {
     let toks = crate::lexer::Lexer::tokenize(src)?;
     let mut p = Parser::new(toks);
@@ -5017,7 +5241,11 @@ mod tests {
             noinstr unsigned long spec_ctrl_current(void) { return 0; }
         ";
         let prog = parse(src);
-        assert!(prog.is_ok(), "failed to parse gnu attributes in declarators: {:?}", prog.err());
+        assert!(
+            prog.is_ok(),
+            "failed to parse gnu attributes in declarators: {:?}",
+            prog.err()
+        );
     }
 
     #[test]
@@ -5030,7 +5258,11 @@ mod tests {
             }
         ";
         let prog = parse(src);
-        assert!(prog.is_ok(), "failed to parse typeof/auto_type/attrs: {:?}", prog.err());
+        assert!(
+            prog.is_ok(),
+            "failed to parse typeof/auto_type/attrs: {:?}",
+            prog.err()
+        );
     }
 
     #[test]
@@ -5040,7 +5272,11 @@ mod tests {
             static const char var2[] __section__(".modinfo2") = "test2";
         "#;
         let prog = parse(src);
-        assert!(prog.is_ok(), "failed to parse array declarator section attribute: {:?}", prog.err());
+        assert!(
+            prog.is_ok(),
+            "failed to parse array declarator section attribute: {:?}",
+            prog.err()
+        );
         let items = prog.unwrap().items;
         assert_eq!(items.len(), 2);
         if let Item::Global(ref v) = items[0] {
@@ -5072,7 +5308,11 @@ mod tests {
             }
         "#;
         let prog = parse(src);
-        assert!(prog.is_ok(), "failed to parse arrow expression contexts: {:?}", prog.err());
+        assert!(
+            prog.is_ok(),
+            "failed to parse arrow expression contexts: {:?}",
+            prog.err()
+        );
     }
 
     /// `(struct Tag *)expr` must parse as cast (Redis SDS_HDR / sdslen).
@@ -5140,7 +5380,10 @@ mod tests {
             .find(|(n, _, _, _)| n == "task_struct")
             .map(|(_, _, _, f)| f.len())
             .unwrap_or(0);
-        assert!(fields >= 3, "task_struct fields in type_layouts, got {fields}");
+        assert!(
+            fields >= 3,
+            "task_struct fields in type_layouts, got {fields}"
+        );
         // Also ensure empty StructDef items exist (forward) without erasing fields map
         let empty_defs = prog.items.iter().filter(|i| matches!(i, Item::StructDef { name, fields } if name == "task_struct" && fields.is_empty())).count();
         let full_defs = prog.items.iter().filter(|i| matches!(i, Item::StructDef { name, fields } if name == "task_struct" && !fields.is_empty())).count();
@@ -5247,7 +5490,11 @@ mod tests {
             void __no_profile __no_stack_protector test_fn_attr(void) {}
         "#;
         let prog = parse(src);
-        assert!(prog.is_ok(), "failed to parse kernel gnu attributes in declarators: {:?}", prog.err());
+        assert!(
+            prog.is_ok(),
+            "failed to parse kernel gnu attributes in declarators: {:?}",
+            prog.err()
+        );
     }
 
     #[test]
@@ -5259,28 +5506,37 @@ mod tests {
             }
         "#;
         let prog = parse(src);
-        assert!(prog.is_ok(), "failed to parse local decl with attr: {:?}", prog.err());
+        assert!(
+            prog.is_ok(),
+            "failed to parse local decl with attr: {:?}",
+            prog.err()
+        );
     }
 }
-
 
 #[cfg(test)]
 mod weak_tests {
     use super::*;
-    use crate::lexer::Lexer;
     use crate::ast::Item;
+    use crate::lexer::Lexer;
 
     #[test]
     fn weak_function_is_weak() {
         let src = "long __attribute__((weak)) foo(void) { return 1; }";
         let toks = Lexer::tokenize(src).unwrap();
-        assert!(toks.iter().any(|t| matches!(t.kind, crate::token::TokenKind::Weak)));
+        assert!(toks
+            .iter()
+            .any(|t| matches!(t.kind, crate::token::TokenKind::Weak)));
         let mut p = Parser::new(toks);
         let prog = p.parse_program().unwrap();
-        let f = prog.items.iter().find_map(|i| match i {
-            Item::Func(f) if f.name == "foo" => Some(f),
-            _ => None,
-        }).expect("foo fn");
+        let f = prog
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Func(f) if f.name == "foo" => Some(f),
+                _ => None,
+            })
+            .expect("foo fn");
         assert!(f.is_weak, "foo should be weak, got is_weak={}", f.is_weak);
     }
 
@@ -5312,13 +5568,18 @@ mod weak_tests {
         let toks = Lexer::tokenize(src).unwrap();
         let mut p = Parser::new(toks);
         let prog = p.parse_program().unwrap();
-        let f = prog.items.iter().find_map(|i| match i {
-            Item::Func(f) if f.name == "f" => Some(f),
-            _ => None,
-        }).expect("f");
+        let f = prog
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Func(f) if f.name == "f" => Some(f),
+                _ => None,
+            })
+            .expect("f");
         let body = f.body.as_ref().expect("body");
         assert!(
-            body.iter().any(|s| matches!(s, crate::ast::Stmt::GotoIndirect(_))),
+            body.iter()
+                .any(|s| matches!(s, crate::ast::Stmt::GotoIndirect(_))),
             "expected GotoIndirect, got {body:?}"
         );
     }
@@ -5339,7 +5600,9 @@ mod weak_tests {
         let mut p = Parser::new(toks);
         let prog = p.parse_program().unwrap();
         assert!(
-            prog.items.iter().any(|i| matches!(i, Item::Func(f) if f.name == "f" && f.body.is_some())),
+            prog.items
+                .iter()
+                .any(|i| matches!(i, Item::Func(f) if f.name == "f" && f.body.is_some())),
             "pointer-to-array cast with const expr bound must parse"
         );
     }
@@ -5366,7 +5629,9 @@ mod weak_tests {
         let mut p = Parser::new(toks);
         let prog = p.parse_program().unwrap();
         assert!(
-            prog.items.iter().any(|i| matches!(i, Item::Func(f) if f.name == "get_extra_offset")),
+            prog.items
+                .iter()
+                .any(|i| matches!(i, Item::Func(f) if f.name == "get_extra_offset")),
             "get_extra_offset must parse successfully"
         );
     }

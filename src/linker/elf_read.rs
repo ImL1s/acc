@@ -140,7 +140,10 @@ pub fn parse_elf_rel(bytes: &[u8]) -> Result<ObjectFile, String> {
         if sh.sh_type != SHT_PROGBITS && sh.sh_type != SHT_NOBITS {
             continue;
         }
-        if name.starts_with(".rela") || name == ".symtab" || name == ".strtab" || name == ".shstrtab"
+        if name.starts_with(".rela")
+            || name == ".symtab"
+            || name == ".strtab"
+            || name == ".shstrtab"
         {
             continue;
         }
@@ -219,7 +222,11 @@ pub fn parse_elf_rel(bytes: &[u8]) -> Result<ObjectFile, String> {
             continue;
         };
         let sec = &mut sections[ti];
-        let entsz = if sh.sh_entsize == 0 { 24 } else { sh.sh_entsize };
+        let entsz = if sh.sh_entsize == 0 {
+            24
+        } else {
+            sh.sh_entsize
+        };
         if entsz < 24 {
             return Err("bad rela entsize".into());
         }

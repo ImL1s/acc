@@ -2,8 +2,8 @@
 //! Emits AT&T syntax assembly suitable for system `cc -arch x86_64` (macOS)
 //! or native `cc` on Linux x86_64.
 
-use crate::ast::*;
 use crate::assigned_names::collect_assigned_names_in_program;
+use crate::ast::*;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 
@@ -43,16 +43,10 @@ fn emit_global_sym_addr_opts(out: &mut String, s: &str, dest_reg: &str, force_go
     // loads SEGV inside getc. GOTPCREL without COPY reads libc's real pointer.
     let libc_stream = matches!(
         s,
-        "stdin"
-            | "stdout"
-            | "stderr"
-            | "__stdinp"
-            | "__stdoutp"
-            | "__stderrp"
+        "stdin" | "stdout" | "stderr" | "__stdinp" | "__stdoutp" | "__stderrp"
     );
-    let use_got = force_got
-        || libc_stream
-        || std::env::var_os("ACC_USE_GOT").is_some_and(|v| v != "0");
+    let use_got =
+        force_got || libc_stream || std::env::var_os("ACC_USE_GOT").is_some_and(|v| v != "0");
     if use_got {
         // GOT slot holds &sym; load it. (Do not use movq GOTPCREL alone for a
         // "value" path that also derefs — see module comment.)
@@ -257,8 +251,25 @@ fn att_qword_reg(att: &str) -> &str {
 /// `xaddl %rax,(%rdi)` (was dropped → orphan `lock` + SIGILL).
 fn resize_regs_for_mnemonic(line: &str, mnem: &str) -> String {
     let width = if mnem.ends_with('b')
-        || matches!(mnem, "setz" | "setnz" | "sete" | "setne" | "setl" | "setg" | "setle" | "setge" | "seta" | "setb" | "setae" | "setbe" | "setc" | "seto" | "sets" | "setns")
-    {
+        || matches!(
+            mnem,
+            "setz"
+                | "setnz"
+                | "sete"
+                | "setne"
+                | "setl"
+                | "setg"
+                | "setle"
+                | "setge"
+                | "seta"
+                | "setb"
+                | "setae"
+                | "setbe"
+                | "setc"
+                | "seto"
+                | "sets"
+                | "setns"
+        ) {
         8
     } else if mnem.ends_with('w') {
         16
@@ -528,10 +539,16 @@ struct Layout {
 
 #[derive(Clone)]
 enum Storage {
-    Local { offset: i64 },
-    Global { name: String },
+    Local {
+        offset: i64,
+    },
+    Global {
+        name: String,
+    },
     #[allow(dead_code)]
-    RegAddr { reg: u8 },
+    RegAddr {
+        reg: u8,
+    },
 }
 
 #[derive(Clone)]
@@ -616,10 +633,7 @@ impl Codegen {
         let peeled = Self::peel_casts(e);
         match peeled {
             Expr::Var(v) => {
-                if self.funcs.contains_key(v)
-                    || v == "main"
-                    || self.globals.contains_key(v)
-                {
+                if self.funcs.contains_key(v) || v == "main" || self.globals.contains_key(v) {
                     return Some((sym(v), 0));
                 }
                 if let Some(s) = self.get_local(v) {
@@ -628,7 +642,10 @@ impl Codegen {
                     }
                     return None;
                 }
-                if let Some(gname) = self.func_local_statics.get(&(self.func_name.clone(), v.clone())) {
+                if let Some(gname) = self
+                    .func_local_statics
+                    .get(&(self.func_name.clone(), v.clone()))
+                {
                     return Some((sym(gname), 0));
                 }
                 Some((sym(v), 0))
@@ -669,7 +686,10 @@ impl Codegen {
     }
 
     fn contains_local(&self, name: &str) -> bool {
-        self.scopes.iter().rev().any(|scope| scope.contains_key(name))
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
     }
 
     fn insert_local(&mut self, name: String, sym: Sym) {
@@ -772,7 +792,9 @@ impl Codegen {
     fn usual_arith_conv(l: &Type, r: &Type) -> Type {
         let l_unqual = l.unqual();
         let r_unqual = r.unqual();
-        if matches!(l_unqual, Type::Float | Type::Double) || matches!(r_unqual, Type::Float | Type::Double) {
+        if matches!(l_unqual, Type::Float | Type::Double)
+            || matches!(r_unqual, Type::Float | Type::Double)
+        {
             return Type::Double;
         }
         let rank = |t: &Type| -> i32 {
@@ -840,7 +862,9 @@ impl Codegen {
 
     /// How many integer argument registers / 8-byte stack slots an arg consumes.
     fn sysv_int_arg_slots(&self, ty: &Type) -> usize {
-        self.small_agg_arg_nregs(ty).map(|n| n as usize).unwrap_or(1)
+        self.small_agg_arg_nregs(ty)
+            .map(|n| n as usize)
+            .unwrap_or(1)
     }
 
     fn emit_sysv_arg_setup(
@@ -927,8 +951,7 @@ impl Codegen {
         match e {
             Expr::Var(_) | Expr::Member { .. } | Expr::Index { .. } => true,
             Expr::Unary {
-                op: UnaryOp::Deref,
-                ..
+                op: UnaryOp::Deref, ..
             } => true,
             Expr::Cast { expr, .. } => Self::expr_is_lvalue(expr),
             _ => false,
@@ -962,9 +985,30 @@ impl Codegen {
             if rem >= 8 {
                 writeln!(self.out, "\tmovq\t{r}, {off}({a})").unwrap();
             } else if rem > 0 {
-                let r_d = match r { "%rax" => "%eax", "%rdx" => "%edx", "%rcx" => "%ecx", "%r8" => "%r8d", "%r9" => "%r9d", _ => "%eax" };
-                let r_w = match r { "%rax" => "%ax", "%rdx" => "%dx", "%rcx" => "%cx", "%r8" => "%r8w", "%r9" => "%r9w", _ => "%ax" };
-                let r_b = match r { "%rax" => "%al", "%rdx" => "%dl", "%rcx" => "%cl", "%r8" => "%r8b", "%r9" => "%r9b", _ => "%al" };
+                let r_d = match r {
+                    "%rax" => "%eax",
+                    "%rdx" => "%edx",
+                    "%rcx" => "%ecx",
+                    "%r8" => "%r8d",
+                    "%r9" => "%r9d",
+                    _ => "%eax",
+                };
+                let r_w = match r {
+                    "%rax" => "%ax",
+                    "%rdx" => "%dx",
+                    "%rcx" => "%cx",
+                    "%r8" => "%r8w",
+                    "%r9" => "%r9w",
+                    _ => "%ax",
+                };
+                let r_b = match r {
+                    "%rax" => "%al",
+                    "%rdx" => "%dl",
+                    "%rcx" => "%cl",
+                    "%r8" => "%r8b",
+                    "%r9" => "%r9b",
+                    _ => "%al",
+                };
                 match rem {
                     1 => writeln!(self.out, "\tmovb\t{r_b}, {off}({a})").unwrap(),
                     2 => writeln!(self.out, "\tmovw\t{r_w}, {off}({a})").unwrap(),
@@ -996,8 +1040,7 @@ impl Codegen {
             writeln!(
                 self.out,
                 "\tmovq\t{}, {}(%rbp)",
-                ARG_REGS[arg_reg_idx],
-                slot
+                ARG_REGS[arg_reg_idx], slot
             )
             .unwrap();
             return;
@@ -1009,46 +1052,26 @@ impl Codegen {
             2 => writeln!(self.out, "\tmovw\t{}, {}(%rbp)", reg_w(ar), slot).unwrap(),
             3 => {
                 writeln!(self.out, "\tmovw\t{}, {}(%rbp)", reg_w(ar), slot).unwrap();
-                writeln!(
-                    self.out,
-                    "\tmovq\t{}, %rcx",
-                    ARG_REGS[arg_reg_idx]
-                )
-                .unwrap();
+                writeln!(self.out, "\tmovq\t{}, %rcx", ARG_REGS[arg_reg_idx]).unwrap();
                 writeln!(self.out, "\tshrl\t$16, %ecx").unwrap();
                 writeln!(self.out, "\tmovb\t%cl, {}(%rbp)", slot + 2).unwrap();
             }
             4 => writeln!(self.out, "\tmovl\t{}, {}(%rbp)", reg_d(ar), slot).unwrap(),
             5 => {
                 writeln!(self.out, "\tmovl\t{}, {}(%rbp)", reg_d(ar), slot).unwrap();
-                writeln!(
-                    self.out,
-                    "\tmovq\t{}, %rcx",
-                    ARG_REGS[arg_reg_idx]
-                )
-                .unwrap();
+                writeln!(self.out, "\tmovq\t{}, %rcx", ARG_REGS[arg_reg_idx]).unwrap();
                 writeln!(self.out, "\tshrq\t$32, %rcx").unwrap();
                 writeln!(self.out, "\tmovb\t%cl, {}(%rbp)", slot + 4).unwrap();
             }
             6 => {
                 writeln!(self.out, "\tmovl\t{}, {}(%rbp)", reg_d(ar), slot).unwrap();
-                writeln!(
-                    self.out,
-                    "\tmovq\t{}, %rcx",
-                    ARG_REGS[arg_reg_idx]
-                )
-                .unwrap();
+                writeln!(self.out, "\tmovq\t{}, %rcx", ARG_REGS[arg_reg_idx]).unwrap();
                 writeln!(self.out, "\tshrq\t$32, %rcx").unwrap();
                 writeln!(self.out, "\tmovw\t%cx, {}(%rbp)", slot + 4).unwrap();
             }
             7 => {
                 writeln!(self.out, "\tmovl\t{}, {}(%rbp)", reg_d(ar), slot).unwrap();
-                writeln!(
-                    self.out,
-                    "\tmovq\t{}, %rcx",
-                    ARG_REGS[arg_reg_idx]
-                )
-                .unwrap();
+                writeln!(self.out, "\tmovq\t{}, %rcx", ARG_REGS[arg_reg_idx]).unwrap();
                 writeln!(self.out, "\tshrq\t$32, %rcx").unwrap();
                 writeln!(self.out, "\tmovw\t%cx, {}(%rbp)", slot + 4).unwrap();
                 writeln!(self.out, "\tshrl\t$16, %ecx").unwrap();
@@ -1057,8 +1080,7 @@ impl Codegen {
             _ => writeln!(
                 self.out,
                 "\tmovq\t{}, {}(%rbp)",
-                ARG_REGS[arg_reg_idx],
-                slot
+                ARG_REGS[arg_reg_idx], slot
             )
             .unwrap(),
         }
@@ -1411,20 +1433,20 @@ impl Codegen {
         let mut emitted_syms = std::collections::HashSet::new();
         for f in best_funcs.values() {
             let f = *f;
-                // Emit: main; non-static (stubs or full); static if reachable
-                // (including empty `{}` no-op function pointers).
-                let is_root = !f.is_static || f.name == "main";
-                if !is_root && !reachable.contains(&f.name) {
-                    continue;
-                }
-                match &f.body {
-                    None => {}
-                    Some(_) => {
-                        if emitted_syms.insert(f.name.clone()) {
-                            self.emit_function(f, &typedefs)?;
-                        }
+            // Emit: main; non-static (stubs or full); static if reachable
+            // (including empty `{}` no-op function pointers).
+            let is_root = !f.is_static || f.name == "main";
+            if !is_root && !reachable.contains(&f.name) {
+                continue;
+            }
+            match &f.body {
+                None => {}
+                Some(_) => {
+                    if emitted_syms.insert(f.name.clone()) {
+                        self.emit_function(f, &typedefs)?;
                     }
                 }
+            }
         }
 
         let pending = std::mem::take(&mut self.pending_statics);
@@ -1461,11 +1483,7 @@ impl Codegen {
 
         if !self.strings.is_empty() {
             if cfg!(target_os = "macos") {
-                writeln!(
-                    self.out,
-                    "\n\t.section\t__TEXT,__cstring,cstring_literals"
-                )
-                .unwrap();
+                writeln!(self.out, "\n\t.section\t__TEXT,__cstring,cstring_literals").unwrap();
             } else {
                 writeln!(self.out, "\n\t.section\t.rodata").unwrap();
             }
@@ -1589,14 +1607,11 @@ impl Codegen {
                     // SQL keyword became IDENT (initdb "syntax error at REVOKE").
                     let unqual_ty = g.ty.unqual();
                     if let Type::Array(elem, n) = unqual_ty {
-                        let is_byte = matches!(elem.as_ref(), Type::Char | Type::SChar | Type::UChar)
-                            || self.type_size(elem) == 1;
+                        let is_byte =
+                            matches!(elem.as_ref(), Type::Char | Type::SChar | Type::UChar)
+                                || self.type_size(elem) == 1;
                         if is_byte {
-                            let nbytes = if *n > 0 {
-                                *n as usize
-                            } else {
-                                st.len() + 1
-                            };
+                            let nbytes = if *n > 0 { *n as usize } else { st.len() + 1 };
                             let is_const = g.ty.is_const() || elem.is_const();
                             if is_const {
                                 if cfg!(target_os = "macos") {
@@ -1862,42 +1877,38 @@ impl Codegen {
             }
         }
         match e {
-            Expr::Int(n) | Expr::Char(n) => {
-                match ty {
-                    Type::Float => writeln!(self.out, "\t.float\t{}", *n as f32).unwrap(),
-                    Type::Double => writeln!(self.out, "\t.double\t{}", *n as f64).unwrap(),
-                    _ => {
-                        let sz = self.type_size(ty);
-                        if sz <= 1 {
-                            writeln!(self.out, "\t.byte\t{n}").unwrap();
-                        } else if sz == 2 {
-                            writeln!(self.out, "\t.short\t{n}").unwrap();
-                        } else if sz <= 4 {
-                            writeln!(self.out, "\t.long\t{n}").unwrap();
-                        } else {
-                            writeln!(self.out, "\t.p2align\t3").unwrap();
-                            writeln!(self.out, "\t.quad\t{n}").unwrap();
-                        }
+            Expr::Int(n) | Expr::Char(n) => match ty {
+                Type::Float => writeln!(self.out, "\t.float\t{}", *n as f32).unwrap(),
+                Type::Double => writeln!(self.out, "\t.double\t{}", *n as f64).unwrap(),
+                _ => {
+                    let sz = self.type_size(ty);
+                    if sz <= 1 {
+                        writeln!(self.out, "\t.byte\t{n}").unwrap();
+                    } else if sz == 2 {
+                        writeln!(self.out, "\t.short\t{n}").unwrap();
+                    } else if sz <= 4 {
+                        writeln!(self.out, "\t.long\t{n}").unwrap();
+                    } else {
+                        writeln!(self.out, "\t.p2align\t3").unwrap();
+                        writeln!(self.out, "\t.quad\t{n}").unwrap();
                     }
                 }
-            }
-            Expr::Float(f) => {
-                match ty {
-                    Type::Float => writeln!(self.out, "\t.float\t{f}").unwrap(),
-                    Type::Double => writeln!(self.out, "\t.double\t{f}").unwrap(),
-                    _ => {
-                        let sz = self.type_size(ty);
-                        if sz <= 1 {
-                            writeln!(self.out, "\t.byte\t{}", *f as i64).unwrap();
-                        } else if sz <= 4 {
-                            writeln!(self.out, "\t.long\t{}", *f as i64).unwrap();
-                        } else {
-                            writeln!(self.out, "\t.p2align\t3").unwrap();
-                            writeln!(self.out, "\t.quad\t{}", *f as i64).unwrap();
-                        }
+            },
+            Expr::Float(f) => match ty {
+                Type::Float => writeln!(self.out, "\t.float\t{f}").unwrap(),
+                Type::Double => writeln!(self.out, "\t.double\t{f}").unwrap(),
+                _ => {
+                    let sz = self.type_size(ty);
+                    if sz <= 1 {
+                        writeln!(self.out, "\t.byte\t{}", *f as i64).unwrap();
+                    } else if sz <= 4 {
+                        writeln!(self.out, "\t.long\t{}", *f as i64).unwrap();
+                    } else {
+                        writeln!(self.out, "\t.p2align\t3").unwrap();
+                        writeln!(self.out, "\t.quad\t{}", *f as i64).unwrap();
                     }
                 }
-            }
+            },
             Expr::Unary {
                 op: UnaryOp::Addr,
                 expr,
@@ -1915,12 +1926,7 @@ impl Codegen {
             }
             Expr::AddrOfLabel(label) => {
                 writeln!(self.out, "\t.p2align\t3").unwrap();
-                writeln!(
-                    self.out,
-                    "\t.quad\t{}",
-                    self.c_goto_label_sym(label)
-                )
-                .unwrap();
+                writeln!(self.out, "\t.quad\t{}", self.c_goto_label_sym(label)).unwrap();
             }
             Expr::Var(v) => {
                 // Enum / static const int: emit immediate of the *field* width.
@@ -2038,7 +2044,12 @@ impl Codegen {
 
     /// Reserve a stack slot for `ty`, aligning the slot start to the type's ABI
     /// alignment (not just trailing padding). Used by measure + emit paths.
-    fn bump_stack_for_ty(stack: &mut i64, ty: &Type, align_of: impl Fn(&Type) -> i64, slot_size: impl Fn(&Type) -> i64) {
+    fn bump_stack_for_ty(
+        stack: &mut i64,
+        ty: &Type,
+        align_of: impl Fn(&Type) -> i64,
+        slot_size: impl Fn(&Type) -> i64,
+    ) {
         let sz = slot_size(ty).max(8);
         let al = align_of(ty).max(8);
         *stack = Self::align_up(*stack, al);
@@ -2049,11 +2060,7 @@ impl Codegen {
     /// at emit time — must be counted in the measure pass or the fixed `subq
     /// $frame` frame is too small and PruneState-sized locals SEGV (postgres
     /// heap_page_prune).
-    fn measure_materialize_slot(
-        &self,
-        ty: &Type,
-        stack: &mut i64,
-    ) {
+    fn measure_materialize_slot(&self, ty: &Type, stack: &mut i64) {
         if Self::is_struct_or_union_ty(ty) {
             Self::bump_stack_for_ty(
                 stack,
@@ -2186,12 +2193,7 @@ impl Codegen {
                 if ireg + nslots <= 6 && ireg + (nr as usize) <= 6 {
                     for k in 0..nr {
                         let slot = off + (k as i64) * 8;
-                        self.spill_small_agg_param_eightbyte(
-                            ireg + k as usize,
-                            slot,
-                            k,
-                            nbytes,
-                        );
+                        self.spill_small_agg_param_eightbyte(ireg + k as usize, slot, k, nbytes);
                     }
                     ireg += nslots;
                 } else {
@@ -2461,7 +2463,10 @@ impl Codegen {
             Expr::Binary { left, right, .. }
             | Expr::Assign { left, right }
             | Expr::CompoundAssign { left, right, .. }
-            | Expr::Index { base: left, index: right } => {
+            | Expr::Index {
+                base: left,
+                index: right,
+            } => {
                 self.measure_expr(left, locals, stack, typedefs);
                 self.measure_expr(right, locals, stack, typedefs);
             }
@@ -2475,7 +2480,11 @@ impl Codegen {
                     self.measure_materialize_slot(&f.ret, stack);
                 }
             }
-            Expr::Cond { cond, then_e, else_e } => {
+            Expr::Cond {
+                cond,
+                then_e,
+                else_e,
+            } => {
                 self.measure_expr(cond, locals, stack, typedefs);
                 self.measure_expr(then_e, locals, stack, typedefs);
                 self.measure_expr(else_e, locals, stack, typedefs);
@@ -2588,9 +2597,10 @@ impl Codegen {
                     if lower.starts_with(".purgem") {
                         continue;
                     }
-                    if t.as_bytes().windows(2).any(|w| {
-                        w[0] == b'\\' && (w[1].is_ascii_alphabetic() || w[1] == b'_')
-                    }) {
+                    if t.as_bytes()
+                        .windows(2)
+                        .any(|w| w[0] == b'\\' && (w[1].is_ascii_alphabetic() || w[1] == b'_'))
+                    {
                         pending_prefix = None;
                         continue;
                     }
@@ -2616,9 +2626,7 @@ impl Codegen {
                             while j < rest.len() && rest[j].is_ascii_alphabetic() {
                                 j += 1;
                             }
-                            j > 0
-                                && j < rest.len()
-                                && (rest[j].is_ascii_digit() || rest[j] == b'[')
+                            j > 0 && j < rest.len() && (rest[j].is_ascii_digit() || rest[j] == b'[')
                         })
                     {
                         // Still emit a leading numeric local label so EX_TABLE
@@ -2792,18 +2800,10 @@ impl Codegen {
                     if let (Type::Array(elem, n), Expr::String(s)) = (&ty, init) {
                         if matches!(elem.as_ref(), Type::Char | Type::SChar) {
                             let id = self.intern_str(s);
-                            let copy_n = if *n > 0 {
-                                *n
-                            } else {
-                                (s.len() + 1) as i64
-                            };
+                            let copy_n = if *n > 0 { *n } else { (s.len() + 1) as i64 };
                             // Inline copy (rep movsb) — avoids call ABI / align.
                             self.emit_fp_addr(off, 1); // %rdi = dest
-                            writeln!(
-                                self.out,
-                                "\tleaq\tl_str_{id}(%rip), %rsi"
-                            )
-                            .unwrap();
+                            writeln!(self.out, "\tleaq\tl_str_{id}(%rip), %rsi").unwrap();
                             writeln!(self.out, "\tmovq\t${copy_n}, %rcx").unwrap();
                             writeln!(self.out, "\trep\tmovsb").unwrap();
                             return Ok(());
@@ -2955,11 +2955,7 @@ impl Codegen {
                 Ok(())
             }
             Stmt::Break => {
-                let l = self
-                    .break_stack
-                    .last()
-                    .ok_or("break outside loop")?
-                    .clone();
+                let l = self.break_stack.last().ok_or("break outside loop")?.clone();
                 writeln!(self.out, "\tjmp\t{l}").unwrap();
                 Ok(())
             }
@@ -2973,12 +2969,7 @@ impl Codegen {
                 Ok(())
             }
             Stmt::Goto(name) => {
-                writeln!(
-                    self.out,
-                    "\tjmp\tL_{}_goto_{}",
-                    self.func_name, name
-                )
-                .unwrap();
+                writeln!(self.out, "\tjmp\tL_{}_goto_{}", self.func_name, name).unwrap();
                 Ok(())
             }
             Stmt::GotoIndirect(e) => {
@@ -2987,12 +2978,7 @@ impl Codegen {
                 Ok(())
             }
             Stmt::Label(name, inner) => {
-                writeln!(
-                    self.out,
-                    "L_{}_goto_{}:",
-                    self.func_name, name
-                )
-                .unwrap();
+                writeln!(self.out, "L_{}_goto_{}:", self.func_name, name).unwrap();
                 self.emit_stmt(inner, typedefs)
             }
             Stmt::Switch { cond, body } => {
@@ -3229,7 +3215,9 @@ impl Codegen {
             }
             Expr::Var(name) => self.const_globals.get(name).copied().map(|n| n as f64),
             Expr::SizeofType(t) => Some(self.type_size(t) as f64),
-            Expr::SizeofExpr(ex) => self.const_i64(&Expr::SizeofExpr(ex.clone())).map(|n| n as f64),
+            Expr::SizeofExpr(ex) => self
+                .const_i64(&Expr::SizeofExpr(ex.clone()))
+                .map(|n| n as f64),
             Expr::Cond {
                 cond,
                 then_e,
@@ -3264,21 +3252,27 @@ impl Codegen {
                 // const_i64_simple alone treats enum idents as non-const → false "default"
                 // and drops cmp/je (canonicalize_path / postgres path.c → path becomes "/").
                 let v = self.const_i64(value);
-                out.push(SwitchCaseItem { is_default: false, val: v, lab });
+                out.push(SwitchCaseItem {
+                    is_default: false,
+                    val: v,
+                    lab,
+                });
                 self.collect_switch_cases(body, out);
             }
             Stmt::Default(body) => {
                 let lab = self.lab("swdef");
-                out.push(SwitchCaseItem { is_default: true, val: None, lab });
+                out.push(SwitchCaseItem {
+                    is_default: true,
+                    val: None,
+                    lab,
+                });
                 self.collect_switch_cases(body, out);
             }
             Stmt::Label(_, inner) => self.collect_switch_cases(inner, out),
-            Stmt::DoWhile { body, .. }
-            | Stmt::While { body, .. }
-            | Stmt::For { body, .. } => self.collect_switch_cases(body, out),
-            Stmt::If {
-                then_b, else_b, ..
-            } => {
+            Stmt::DoWhile { body, .. } | Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                self.collect_switch_cases(body, out)
+            }
+            Stmt::If { then_b, else_b, .. } => {
                 self.collect_switch_cases(then_b, out);
                 if let Some(e) = else_b {
                     self.collect_switch_cases(e, out);
@@ -3323,12 +3317,7 @@ impl Codegen {
                 self.emit_switch_body(body, default_lab, typedefs)
             }
             Stmt::Label(name, inner) => {
-                writeln!(
-                    self.out,
-                    "L_{}_goto_{}:",
-                    self.func_name, name
-                )
-                .unwrap();
+                writeln!(self.out, "L_{}_goto_{}:", self.func_name, name).unwrap();
                 self.emit_switch_body(inner, default_lab, typedefs)
             }
             Stmt::If {
@@ -3669,10 +3658,9 @@ impl Codegen {
                 | "opterr"
                 | "optopt"
                 | "environ"
-                | "__environ"
-            // Do NOT list `errno` here: glibc errno is TLS; a GOT data ref
-            // against non-TLS `errno` fails the link (and is wrong anyway —
-            // use __errno_location via soft macros / helpers).
+                | "__environ" // Do NOT list `errno` here: glibc errno is TLS; a GOT data ref
+                              // against non-TLS `errno` fails the link (and is wrong anyway —
+                              // use __errno_location via soft macros / helpers).
         )
     }
 
@@ -3799,7 +3787,16 @@ impl Codegen {
                         writeln!(self.out, "\tmovzbq\t%r11b, %r11").unwrap();
                     }
                     _ => {
-                        if self.type_size(&ity_expanded) <= 4 && !matches!(ity_expanded.unqual(), Type::UInt | Type::ULong | Type::UShort | Type::UChar | Type::Ptr(_)) {
+                        if self.type_size(&ity_expanded) <= 4
+                            && !matches!(
+                                ity_expanded.unqual(),
+                                Type::UInt
+                                    | Type::ULong
+                                    | Type::UShort
+                                    | Type::UChar
+                                    | Type::Ptr(_)
+                            )
+                        {
                             writeln!(self.out, "\tmovslq\t%r11d, %r11").unwrap();
                         }
                     }
@@ -3860,10 +3857,7 @@ impl Codegen {
                         }
                         found.unwrap_or_else(|| {
                             let mut fields = HashMap::new();
-                            fields.insert(
-                                field.clone(),
-                                (0, Type::Ptr(Box::new(Type::Void))),
-                            );
+                            fields.insert(field.clone(), (0, Type::Ptr(Box::new(Type::Void))));
                             Layout {
                                 size: 8,
                                 align: 8,
@@ -3871,8 +3865,8 @@ impl Codegen {
                             }
                         })
                     }
-                    Type::Struct(n) | Type::Union(n) => self.get_layout(n).cloned().unwrap_or_else(
-                        || {
+                    Type::Struct(n) | Type::Union(n) => {
+                        self.get_layout(n).cloned().unwrap_or_else(|| {
                             // Soft: named struct without recorded layout.
                             let mut fields = HashMap::new();
                             fields.insert(field.clone(), (0, Type::Ptr(Box::new(Type::Void))));
@@ -3881,8 +3875,8 @@ impl Codegen {
                                 align: 8,
                                 fields,
                             }
-                        },
-                    ),
+                        })
+                    }
                     Type::AnonStruct(fs) => self.layout_fields(fs, false, false),
                     Type::AnonUnion(fs) => self.layout_fields(fs, true, false),
                     // Incomplete typing: void*/void/int treated as opaque struct.
@@ -3897,10 +3891,7 @@ impl Codegen {
                     | Type::UShort
                     | Type::Array(_, _) => {
                         let mut fields = HashMap::new();
-                        fields.insert(
-                            field.clone(),
-                            (0, Type::Ptr(Box::new(Type::Void))),
-                        );
+                        fields.insert(field.clone(), (0, Type::Ptr(Box::new(Type::Void))));
                         Layout {
                             size: 8,
                             align: 8,
@@ -3996,12 +3987,12 @@ impl Codegen {
     /// Soft prototypes for libm / string→float that return in `%xmm0` (SysV).
     fn known_fp_return(name: &str) -> Option<Type> {
         match name {
-            "rint" | "round" | "trunc" | "nearbyint" | "floor" | "ceil" | "fabs"
-            | "sqrt" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-            | "sinh" | "cosh" | "tanh" | "log" | "log10" | "exp" | "pow" | "fmod"
-            | "ldexp" | "frexp" | "modf" | "strtod" | "atof" | "nan" => Some(Type::Double),
-            "rintf" | "roundf" | "truncf" | "floorf" | "ceilf" | "fabsf" | "sqrtf"
-            | "sinf" | "cosf" | "tanf" | "strtof" => Some(Type::Float),
+            "rint" | "round" | "trunc" | "nearbyint" | "floor" | "ceil" | "fabs" | "sqrt"
+            | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh"
+            | "tanh" | "log" | "log10" | "exp" | "pow" | "fmod" | "ldexp" | "frexp" | "modf"
+            | "strtod" | "atof" | "nan" => Some(Type::Double),
+            "rintf" | "roundf" | "truncf" | "floorf" | "ceilf" | "fabsf" | "sqrtf" | "sinf"
+            | "cosf" | "tanf" | "strtof" => Some(Type::Float),
             _ => None,
         }
     }
@@ -4084,10 +4075,7 @@ impl Codegen {
             other => other.clone(),
         };
         let sz = self.type_size(&pointee);
-        let signed = matches!(
-            pointee,
-            Type::SChar | Type::Short | Type::Int | Type::Long
-        );
+        let signed = matches!(pointee, Type::SChar | Type::Short | Type::Int | Type::Long);
         let op = if name.contains("add") {
             "add"
         } else if name.contains("sub") {
@@ -4479,12 +4467,7 @@ impl Codegen {
             }
             Expr::String(s) => {
                 let id = self.intern_str(s);
-                writeln!(
-                    self.out,
-                    "\tleaq\tl_str_{id}(%rip), {}",
-                    reg(dest)
-                )
-                .unwrap();
+                writeln!(self.out, "\tleaq\tl_str_{id}(%rip), {}", reg(dest)).unwrap();
                 Ok(Type::Ptr(Box::new(Type::Char)))
             }
             Expr::AddrOfLabel(label) => {
@@ -4505,20 +4488,14 @@ impl Codegen {
                     return Ok(Type::Int);
                 }
                 // GCC/C99 predefined function name identifiers.
-                if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__"
-                {
+                if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
                     let fname = if self.func_name.is_empty() {
                         "?".to_string()
                     } else {
                         self.func_name.clone()
                     };
                     let id = self.intern_str(&fname);
-                    writeln!(
-                        self.out,
-                        "\tleaq\tl_str_{id}(%rip), {}",
-                        reg(dest)
-                    )
-                    .unwrap();
+                    writeln!(self.out, "\tleaq\tl_str_{id}(%rip), {}", reg(dest)).unwrap();
                     return Ok(Type::Ptr(Box::new(Type::Char)));
                 }
                 // Soft residue from failed stmt-expr / typeof (aarch64 parity).
@@ -4539,7 +4516,10 @@ impl Codegen {
                         // Lowercase / function designators -> func address.
                         if self.funcs.contains_key(name)
                             || self.globals.contains_key(name)
-                            || name.chars().next().map_or(false, |c| c.is_lowercase() || c == '_')
+                            || name
+                                .chars()
+                                .next()
+                                .map_or(false, |c| c.is_lowercase() || c == '_')
                         {
                             self.emit_func_addr(name, dest);
                             return Ok(Type::Ptr(Box::new(Type::Void)));
@@ -4624,14 +4604,15 @@ impl Codegen {
                 UnaryOp::Addr => {
                     if let Expr::Var(n) = expr.as_ref() {
                         // &fn — including undeclared libc (see Var rvalue path).
-                        if n == "__func__"
-                            || n == "__FUNCTION__"
-                            || n == "__PRETTY_FUNCTION__"
-                        {
+                        if n == "__func__" || n == "__FUNCTION__" || n == "__PRETTY_FUNCTION__" {
                             // fall through: not a function address
                         } else if self.funcs.contains_key(n)
                             || n == "main"
-                            || (self.lookup(n).is_err() && (self.globals.contains_key(n) || n.chars().next().map_or(false, |c| c.is_lowercase() || c == '_')))
+                            || (self.lookup(n).is_err()
+                                && (self.globals.contains_key(n)
+                                    || n.chars()
+                                        .next()
+                                        .map_or(false, |c| c.is_lowercase() || c == '_')))
                         {
                             self.emit_func_addr(n, dest);
                             return Ok(Type::Ptr(Box::new(Type::Void)));
@@ -4733,7 +4714,7 @@ impl Codegen {
                             let set = match op {
                                 BinOp::Eq => "sete",
                                 BinOp::Ne => "setne",
-                                BinOp::Lt => "setb",  // CF: xmm0 < xmm1 (unordered-safe-ish)
+                                BinOp::Lt => "setb", // CF: xmm0 < xmm1 (unordered-safe-ish)
                                 BinOp::Gt => "seta",
                                 BinOp::Le => "setbe",
                                 BinOp::Ge => "setae",
@@ -4820,16 +4801,12 @@ impl Codegen {
                     }
                     BinOp::Div => {
                         let res_ty = Self::usual_arith_conv(&lty, &rty);
-                        let unsigned = matches!(
-                            res_ty.unqual(),
-                            Type::ULong | Type::UInt | Type::UShort | Type::Char | Type::UChar
-                        ) || matches!(
-                            lty.unqual(),
-                            Type::ULong | Type::UInt | Type::Ptr(_)
-                        ) || matches!(
-                            rty.unqual(),
-                            Type::ULong | Type::UInt | Type::Ptr(_)
-                        );
+                        let unsigned =
+                            matches!(
+                                res_ty.unqual(),
+                                Type::ULong | Type::UInt | Type::UShort | Type::Char | Type::UChar
+                            ) || matches!(lty.unqual(), Type::ULong | Type::UInt | Type::Ptr(_))
+                                || matches!(rty.unqual(), Type::ULong | Type::UInt | Type::Ptr(_));
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
                         if unsigned {
                             writeln!(self.out, "\txorq\t%rdx, %rdx").unwrap();
@@ -4845,16 +4822,12 @@ impl Codegen {
                     }
                     BinOp::Mod => {
                         let res_ty = Self::usual_arith_conv(&lty, &rty);
-                        let unsigned = matches!(
-                            res_ty.unqual(),
-                            Type::ULong | Type::UInt | Type::UShort | Type::Char | Type::UChar
-                        ) || matches!(
-                            lty.unqual(),
-                            Type::ULong | Type::UInt | Type::Ptr(_)
-                        ) || matches!(
-                            rty.unqual(),
-                            Type::ULong | Type::UInt | Type::Ptr(_)
-                        );
+                        let unsigned =
+                            matches!(
+                                res_ty.unqual(),
+                                Type::ULong | Type::UInt | Type::UShort | Type::Char | Type::UChar
+                            ) || matches!(lty.unqual(), Type::ULong | Type::UInt | Type::Ptr(_))
+                                || matches!(rty.unqual(), Type::ULong | Type::UInt | Type::Ptr(_));
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
                         if unsigned {
                             writeln!(self.out, "\txorq\t%rdx, %rdx").unwrap();
@@ -4958,7 +4931,8 @@ impl Codegen {
                     }
                     BinOp::Shl => {
                         let res_ty = Self::usual_arith_conv(&lty, &Type::Int);
-                        let is_64 = matches!(res_ty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
+                        let is_64 =
+                            matches!(res_ty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
                         // Save count to %cl first: dest may be %r11 (holds count) or %rcx.
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
@@ -4981,7 +4955,8 @@ impl Codegen {
                     BinOp::Shr => {
                         let res_ty = Self::usual_arith_conv(&lty, &Type::Int);
                         let unsigned = res_ty.is_unsigned() || lty.is_unsigned();
-                        let is_64 = matches!(res_ty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
+                        let is_64 =
+                            matches!(res_ty.unqual(), Type::Long | Type::ULong | Type::Ptr(_));
                         writeln!(self.out, "\tmovq\t%r11, %rcx").unwrap();
                         writeln!(self.out, "\tmovq\t%r10, %rax").unwrap();
                         if is_64 {
@@ -5171,7 +5146,15 @@ impl Codegen {
                         let ty = self.typeof_expr(arg, typedefs);
                         match ty {
                             Type::Void => -1,
-                            Type::Int | Type::Long | Type::Short | Type::Char | Type::SChar | Type::UChar | Type::UInt | Type::ULong | Type::UShort => 1,
+                            Type::Int
+                            | Type::Long
+                            | Type::Short
+                            | Type::Char
+                            | Type::SChar
+                            | Type::UChar
+                            | Type::UInt
+                            | Type::ULong
+                            | Type::UShort => 1,
                             Type::Float | Type::Double => 8,
                             Type::Ptr(_) | Type::Array(_, _) => 5,
                             Type::Struct(_) | Type::AnonStruct(_) => 12,
@@ -5390,12 +5373,7 @@ impl Codegen {
                 {
                     if args.len() >= 3 {
                         self.emit_builtin_overflow(
-                            name,
-                            &args[0],
-                            &args[1],
-                            &args[2],
-                            dest,
-                            typedefs,
+                            name, &args[0], &args[1], &args[2], dest, typedefs,
                         )?;
                         return Ok(Type::Int);
                     }
@@ -5441,7 +5419,7 @@ impl Codegen {
                     return Ok(Type::Ptr(Box::new(Type::Void)));
                 }
                 // SysV: first 6 in regs; rest on stack (same as direct calls).
-                    // Soft builtins: ctz/clz/ffs (kernel uses these heavily).
+                // Soft builtins: ctz/clz/ffs (kernel uses these heavily).
                 if name == "__builtin_ctz" || name == "__builtin_ctzl" || name == "__builtin_ctzll"
                 {
                     if args.is_empty() {
@@ -5577,7 +5555,8 @@ impl Codegen {
                     self.emit_expr_rval(callee, 0, typedefs)?;
                     writeln!(self.out, "\tsubq\t$16, %rsp").unwrap();
                     writeln!(self.out, "\tmovq\t%rax, (%rsp)").unwrap();
-                    let (_nreg, nstack_bytes) = self.emit_sysv_arg_setup(real_args, &[], typedefs, 2)?;
+                    let (_nreg, nstack_bytes) =
+                        self.emit_sysv_arg_setup(real_args, &[], typedefs, 2)?;
                     let callee_off = nstack_bytes;
                     writeln!(self.out, "\tmovq\t{callee_off}(%rsp), %r10").unwrap();
                     writeln!(self.out, "\txorb\t%al, %al").unwrap();
@@ -5782,40 +5761,16 @@ impl Codegen {
                     // (8192+65535*56 → bogus span → SEGV in init_span).
                     match to.unqual() {
                         Type::UShort | Type::Char | Type::UChar => {
-                            writeln!(
-                                self.out,
-                                "\tmovzwq\t{}, {}",
-                                reg_w(dest),
-                                reg(dest)
-                            )
-                            .unwrap();
+                            writeln!(self.out, "\tmovzwq\t{}, {}", reg_w(dest), reg(dest)).unwrap();
                         }
                         Type::Short | Type::SChar => {
-                            writeln!(
-                                self.out,
-                                "\tmovswq\t{}, {}",
-                                reg_w(dest),
-                                reg(dest)
-                            )
-                            .unwrap();
+                            writeln!(self.out, "\tmovswq\t{}, {}", reg_w(dest), reg(dest)).unwrap();
                         }
                         Type::UInt => {
-                            writeln!(
-                                self.out,
-                                "\tmovl\t{}, {}",
-                                reg_d(dest),
-                                reg_d(dest)
-                            )
-                            .unwrap();
+                            writeln!(self.out, "\tmovl\t{}, {}", reg_d(dest), reg_d(dest)).unwrap();
                         }
                         Type::Int => {
-                            writeln!(
-                                self.out,
-                                "\tmovslq\t{}, {}",
-                                reg_d(dest),
-                                reg(dest)
-                            )
-                            .unwrap();
+                            writeln!(self.out, "\tmovslq\t{}, {}", reg_d(dest), reg(dest)).unwrap();
                         }
                         _ => {}
                     }
@@ -5963,7 +5918,8 @@ impl Codegen {
             } => {
                 let l = self.typeof_expr(left, typedefs);
                 let r = self.typeof_expr(right, typedefs);
-                if matches!(l, Type::Float | Type::Double) || matches!(r, Type::Float | Type::Double)
+                if matches!(l, Type::Float | Type::Double)
+                    || matches!(r, Type::Float | Type::Double)
                 {
                     Type::Double
                 } else if matches!(l, Type::Ptr(_)) {
@@ -5981,7 +5937,8 @@ impl Codegen {
             } => {
                 let l = self.typeof_expr(left, typedefs);
                 let r = self.typeof_expr(right, typedefs);
-                if matches!(l, Type::Float | Type::Double) || matches!(r, Type::Float | Type::Double)
+                if matches!(l, Type::Float | Type::Double)
+                    || matches!(r, Type::Float | Type::Double)
                 {
                     Type::Double
                 } else if matches!(l, Type::Ptr(_)) && matches!(r, Type::Ptr(_)) {
@@ -5999,7 +5956,8 @@ impl Codegen {
             } => {
                 let l = self.typeof_expr(left, typedefs);
                 let r = self.typeof_expr(right, typedefs);
-                if matches!(l, Type::Float | Type::Double) || matches!(r, Type::Float | Type::Double)
+                if matches!(l, Type::Float | Type::Double)
+                    || matches!(r, Type::Float | Type::Double)
                 {
                     Type::Double
                 } else {

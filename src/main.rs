@@ -1,5 +1,5 @@
-mod ast;
 mod assigned_names;
+mod ast;
 mod codegen;
 mod driver;
 mod lexer;
@@ -14,7 +14,7 @@ mod assembler;
 mod linker;
 
 use codegen::{Target, TargetOs};
-use driver::{CompileOptions, compile};
+use driver::{compile, CompileOptions};
 use std::env;
 use std::path::PathBuf;
 use std::process;
@@ -172,7 +172,11 @@ fn main() {
         let src = match std::fs::read_to_string(&input) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("ERROR: failed to read input file {}: {}", input.display(), e);
+                eprintln!(
+                    "ERROR: failed to read input file {}: {}",
+                    input.display(),
+                    e
+                );
                 process::exit(1);
             }
         };

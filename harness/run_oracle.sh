@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 # Oracle runner: compile each oracles/* fixture with the project compiler and check stdout/exit.
 # Success is only match against expected.stdout / expected.ret — not self-reported prose.
 set -euo pipefail
@@ -26,8 +26,9 @@ mkdir -p "$WORKDIR"
 failures=0
 ran=0
 
-for dir in "$ORACLE_DIR"/*(N/); do
-  name="${dir:t}"
+for dir in "$ORACLE_DIR"/*; do
+  [[ -d "$dir" ]] || continue
+  name="${dir##*/}"
   src="$dir/main.c"
   exp_out="$dir/expected.stdout"
   exp_ret="$dir/expected.ret"
@@ -74,9 +75,9 @@ for dir in "$ORACLE_DIR"/*(N/); do
   if [[ "$actual_out" != "$expected_out" ]]; then
     echo "FAIL $name: stdout mismatch"
     echo "--- expected ---"
-    printf '%s\n' "$expected_out" | cat -A
+    printf '%s\n' "$expected_out" | cat -e
     echo "--- actual ---"
-    printf '%s\n' "$actual_out" | cat -A
+    printf '%s\n' "$actual_out" | cat -e
     failures=$((failures + 1))
     continue
   fi

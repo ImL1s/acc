@@ -159,7 +159,7 @@ pub fn link_aarch64_linux(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
         text.data.extend_from_slice(&0x94000000u32.to_le_bytes()); // bl imm26=0
         text.data.extend_from_slice(&0xD2800BA8u32.to_le_bytes()); // movz x8, #93
         text.data.extend_from_slice(&0xD4000001u32.to_le_bytes()); // svc #0
-        // Synthetic reloc for bl → main (CALL26), addend 0, at start_off.
+                                                                   // Synthetic reloc for bl → main (CALL26), addend 0, at start_off.
         text.relocs.push(PendingReloc {
             offset: start_off,
             obj_index: usize::MAX, // synthetic
@@ -325,9 +325,7 @@ fn apply_reloc(
     match r_type {
         R_AARCH64_NONE => Ok(()),
         R_AARCH64_CALL26 | R_AARCH64_JUMP26 => {
-            let delta = (s as i64)
-                .wrapping_add(a)
-                .wrapping_sub(p as i64);
+            let delta = (s as i64).wrapping_add(a).wrapping_sub(p as i64);
             if delta & 0x3 != 0 {
                 return Err("CALL26/JUMP26 not 4-byte aligned".into());
             }
@@ -404,7 +402,7 @@ fn emit_et_exec(
     out[4] = 2; // ELFCLASS64
     out[5] = 1; // LSB
     out[6] = 1; // EV_CURRENT
-    // e_type ET_EXEC
+                // e_type ET_EXEC
     out[16..18].copy_from_slice(&2u16.to_le_bytes());
     out[18..20].copy_from_slice(&EM_AARCH64.to_le_bytes());
     out[20..24].copy_from_slice(&1u32.to_le_bytes());
@@ -427,7 +425,7 @@ fn emit_et_exec(
     let mut ph = Vec::new();
     write_u32(&mut ph, 1); // PT_LOAD
     write_u32(&mut ph, 5); // PF_R|PF_X (and we may have RW data — M4 uses R|W|X for simplicity)
-    // Actually include write for .data/.bss:
+                           // Actually include write for .data/.bss:
     ph.clear();
     write_u32(&mut ph, 1);
     write_u32(&mut ph, 7); // R|W|X freestanding single segment

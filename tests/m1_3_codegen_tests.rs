@@ -24,9 +24,7 @@ fn compile_and_run(c_code: &str, test_name: &str) -> (i32, String, String) {
 
     compile(&opts).expect("in-process compilation failed");
 
-    let output = Command::new(&bin_path)
-        .output()
-        .expect("execution failed");
+    let output = Command::new(&bin_path).output().expect("execution failed");
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -182,7 +180,11 @@ fn test_single_exec_00217() {
         .expect("run 00217.c");
     assert_eq!(output.status.code(), Some(0), "00217.c execution failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("data = \"0123-5678\""), "00217.c output mismatch: {}", stdout);
+    assert!(
+        stdout.contains("data = \"0123-5678\""),
+        "00217.c output mismatch: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -205,9 +207,17 @@ fn test_pg_plan_struct_layout() {
     let output = Command::new("target/worker_test/test_pg_plan_struct_layout_bin")
         .output()
         .expect("run pg_plan_struct_layout_bin");
-    assert_eq!(output.status.code(), Some(0), "pg_plan_struct_layout execution failed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "pg_plan_struct_layout execution failed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("PG_PLAN_STRUCT_LAYOUT_OK"), "output mismatch: {}", stdout);
+    assert!(
+        stdout.contains("PG_PLAN_STRUCT_LAYOUT_OK"),
+        "output mismatch: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -230,9 +240,17 @@ fn test_pg_switch_flex_bison() {
     let output = Command::new("target/worker_test/test_pg_switch_flex_bison_bin")
         .output()
         .expect("run pg_switch_flex_bison_bin");
-    assert_eq!(output.status.code(), Some(0), "pg_switch_flex_bison execution failed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "pg_switch_flex_bison execution failed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("PG_SWITCH_FLEX_BISON_OK"), "output mismatch: {}", stdout);
+    assert!(
+        stdout.contains("PG_SWITCH_FLEX_BISON_OK"),
+        "output mismatch: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -255,9 +273,17 @@ fn test_sysv_valist_vsnprintf() {
     let output = Command::new("target/worker_test/test_sysv_valist_vsnprintf_bin")
         .output()
         .expect("run sysv_valist_vsnprintf_bin");
-    assert_eq!(output.status.code(), Some(0), "sysv_valist_vsnprintf execution failed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "sysv_valist_vsnprintf execution failed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("SYSV_VALIST_VSNPRINTF_OK"), "output mismatch: {}", stdout);
+    assert!(
+        stdout.contains("SYSV_VALIST_VSNPRINTF_OK"),
+        "output mismatch: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -280,9 +306,17 @@ fn test_indirect_call_7args() {
     let output = Command::new("target/worker_test/test_indirect_call_7args_bin")
         .output()
         .expect("run indirect_call_7args_bin");
-    assert_eq!(output.status.code(), Some(0), "indirect_call_7args execution failed");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "indirect_call_7args execution failed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("INDIRECT_CALL_7ARGS_OK"), "output mismatch: {}", stdout);
+    assert!(
+        stdout.contains("INDIRECT_CALL_7ARGS_OK"),
+        "output mismatch: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -369,7 +403,3 @@ int main(void) {
     assert_eq!(code, 0, "unsigned indexing failed");
     assert!(stdout.contains("UNSIGNED_INDEXING_OK"));
 }
-
-
-
-

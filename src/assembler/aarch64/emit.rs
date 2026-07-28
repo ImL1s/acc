@@ -1,16 +1,15 @@
 //! Pass over parsed `AsmUnit` lines and emit a relocatable ELF object.
 
 use super::elf::{
-    ElfObject, Reloc, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_ADR_PREL_HI21, R_AARCH64_CALL26,
-    Section, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS, STB_GLOBAL,
-    STB_LOCAL, STB_WEAK, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION, Symbol,
+    ElfObject, Reloc, Section, Symbol, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_ADR_PREL_HI21,
+    R_AARCH64_CALL26, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS, STB_GLOBAL,
+    STB_LOCAL, STB_WEAK, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION,
 };
 use super::encode::{
-    encode_add_imm, encode_add_lo12_placeholder, encode_adrp_placeholder, encode_b_imm26,
-    encode_bl_placeholder, encode_ldp_post, encode_ldr_reg, encode_mov_reg, encode_movz,
-    encode_rev, encode_rev16, encode_and_imm,
-    encode_nop, encode_ret, encode_stp_pre, encode_str_pre, encode_str_reg, encode_sub_imm,
-    parse_reg, write_u32_le,
+    encode_add_imm, encode_add_lo12_placeholder, encode_adrp_placeholder, encode_and_imm,
+    encode_b_imm26, encode_bl_placeholder, encode_ldp_post, encode_ldr_reg, encode_mov_reg,
+    encode_movz, encode_nop, encode_ret, encode_rev, encode_rev16, encode_stp_pre, encode_str_pre,
+    encode_str_reg, encode_sub_imm, parse_reg, write_u32_le,
 };
 use crate::assembler::{AsmLine, AsmUnit};
 
@@ -172,7 +171,25 @@ impl<'a> Emitter<'a> {
     }
 
     fn pass_insn_size(&mut self, mnemonic: &str, _operands: &str) -> Result<(), String> {
-        if matches!(mnemonic, "ret" | "nop" | "mov" | "movz" | "add" | "sub" | "and" | "rev" | "rev16" | "stp" | "ldp" | "str" | "ldr" | "adrp" | "bl" | "b") {
+        if matches!(
+            mnemonic,
+            "ret"
+                | "nop"
+                | "mov"
+                | "movz"
+                | "add"
+                | "sub"
+                | "and"
+                | "rev"
+                | "rev16"
+                | "stp"
+                | "ldp"
+                | "str"
+                | "ldr"
+                | "adrp"
+                | "bl"
+                | "b"
+        ) {
             self.bump_size(4);
         } else {
             return Err(self.err(format!("M2 size pass: unsupported '{mnemonic}'")));
@@ -210,7 +227,12 @@ impl<'a> Emitter<'a> {
 
     fn align_cur(&mut self, log2: u32) -> Result<(), String> {
         let align = 1u64 << log2;
-        let sec = self.obj.sections.iter_mut().find(|s| s.name == self.cur).unwrap();
+        let sec = self
+            .obj
+            .sections
+            .iter_mut()
+            .find(|s| s.name == self.cur)
+            .unwrap();
         let is_text = sec.sh_flags & SHF_EXECINSTR != 0;
         while sec.data.len() as u64 & (align - 1) != 0 {
             if is_text {
@@ -283,11 +305,16 @@ impl<'a> Emitter<'a> {
                 }
             }
             ".p2align" | ".align" => {
-                let n: u32 = args.split_whitespace().next().unwrap_or("0").parse().map_err(|_| self.err("bad align"))?;
+                let n: u32 = args
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .map_err(|_| self.err("bad align"))?;
                 self.align_cur(n)?;
             }
-            ".type" | ".size" | ".file" | ".loc" | ".set" | ".equ" | ".local" | ".comm" | ".lcomm"
-            | ".cfi_startproc" | ".cfi_endproc" | ".cfi_def_cfa" | ".cfi_offset" => {}
+            ".type" | ".size" | ".file" | ".loc" | ".set" | ".equ" | ".local" | ".comm"
+            | ".lcomm" | ".cfi_startproc" | ".cfi_endproc" | ".cfi_def_cfa" | ".cfi_offset" => {}
             ".asciz" | ".string" => {
                 let s = parse_string_literal(args)?;
                 let sec = self.cur_sec();
@@ -299,7 +326,12 @@ impl<'a> Emitter<'a> {
                 self.cur_sec().data.extend_from_slice(s.as_bytes());
             }
             ".zero" | ".space" => {
-                let n: usize = args.split_whitespace().next().unwrap_or("0").parse().map_err(|_| self.err("bad .zero"))?;
+                let n: usize = args
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .map_err(|_| self.err("bad .zero"))?;
                 let sec = self.cur_sec();
                 let new_len = sec.data.len() + n;
                 sec.data.resize(new_len, 0);
@@ -414,7 +446,12 @@ impl<'a> Emitter<'a> {
                 }
                 write_u32_le(
                     &mut out,
-                    encode_stp_pre(parse_reg(&parts[0])?, parse_reg(&parts[1])?, parse_reg(&rn)?, off)?,
+                    encode_stp_pre(
+                        parse_reg(&parts[0])?,
+                        parse_reg(&parts[1])?,
+                        parse_reg(&rn)?,
+                        off,
+                    )?,
                 );
             }
             "ldp" => {
@@ -425,7 +462,12 @@ impl<'a> Emitter<'a> {
                 }
                 write_u32_le(
                     &mut out,
-                    encode_ldp_post(parse_reg(&parts[0])?, parse_reg(&parts[1])?, parse_reg(&rn)?, off)?,
+                    encode_ldp_post(
+                        parse_reg(&parts[0])?,
+                        parse_reg(&parts[1])?,
+                        parse_reg(&rn)?,
+                        off,
+                    )?,
                 );
             }
             "str" => {
@@ -490,7 +532,12 @@ impl<'a> Emitter<'a> {
 
         let sec_name = self.cur.clone();
         let section_names: Vec<String> = self.obj.sections.iter().map(|s| s.name.clone()).collect();
-        let sec = self.obj.sections.iter_mut().find(|s| s.name == sec_name).unwrap();
+        let sec = self
+            .obj
+            .sections
+            .iter_mut()
+            .find(|s| s.name == sec_name)
+            .unwrap();
         sec.data.extend_from_slice(&out);
         for r in relocs {
             if !self.labels.contains_key(&r.sym_name)
@@ -546,7 +593,8 @@ impl<'a> Emitter<'a> {
             } else {
                 STB_LOCAL
             };
-            let sym_type = if sec.contains("rodata") || sec.contains("data") || sec.contains("bss") {
+            let sym_type = if sec.contains("rodata") || sec.contains("data") || sec.contains("bss")
+            {
                 STT_OBJECT
             } else {
                 STT_FUNC

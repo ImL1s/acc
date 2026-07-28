@@ -113,8 +113,7 @@ fn compile_internal(opts: &CompileOptions) -> Result<(), String> {
 
     if let Some(parent) = asm_path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
     }
 
@@ -387,7 +386,13 @@ mod tests {
         assert_eq!(out_host.status.code(), Some(0));
 
         let is_x86_host = Target::host() == Target::X86_64;
-        let can_run_x86 = is_x86_host || Command::new("arch").arg("-x86_64").arg("true").output().map(|o| o.status.success()).unwrap_or(false);
+        let can_run_x86 = is_x86_host
+            || Command::new("arch")
+                .arg("-x86_64")
+                .arg("true")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
 
         if can_run_x86 {
             let bin_path_x86 = dir.join("shadow_x86");
@@ -408,7 +413,11 @@ mod tests {
             let out_x86 = if is_x86_host {
                 Command::new(&bin_path_x86).output().expect("run x86")
             } else {
-                Command::new("arch").arg("-x86_64").arg(&bin_path_x86).output().expect("run x86")
+                Command::new("arch")
+                    .arg("-x86_64")
+                    .arg(&bin_path_x86)
+                    .output()
+                    .expect("run x86")
             };
             assert_eq!(out_x86.status.code(), Some(0));
         }

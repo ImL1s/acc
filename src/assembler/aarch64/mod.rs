@@ -11,13 +11,12 @@ pub use emit::emit_elf_object;
 
 /// Mnemonics accepted in the parse subset (operands validated at encode time).
 const KNOWN_MNEMONICS: &[&str] = &[
-    "ret", "nop", "mov", "movz", "movk", "movn", "add", "sub", "adds", "subs", "cmp", "cmn",
-    "and", "orr", "eor", "bic", "lsl", "lsr", "asr", "neg", "mvn", "mul", "madd", "msub", "sdiv",
-    "udiv", "ldr", "ldrb", "ldrh", "ldp", "str", "strb", "strh", "stp", "adrp", "adr", "bl", "b",
-    "blr", "br", "cbz", "cbnz", "tbz", "tbnz", "b.eq", "b.ne", "b.lt", "b.le", "b.gt", "b.ge",
-    "b.lo", "b.hs", "b.hi", "b.ls", "b.mi", "b.pl", "b.vs", "b.vc", "sxtw", "uxtw", "sxtb",
-    "sxth", "csel", "cset", "fmov", "fadd", "fsub", "fmul", "fdiv", "fcmp", "scvtf", "fcvtzs",
-    "rev", "rev16",
+    "ret", "nop", "mov", "movz", "movk", "movn", "add", "sub", "adds", "subs", "cmp", "cmn", "and",
+    "orr", "eor", "bic", "lsl", "lsr", "asr", "neg", "mvn", "mul", "madd", "msub", "sdiv", "udiv",
+    "ldr", "ldrb", "ldrh", "ldp", "str", "strb", "strh", "stp", "adrp", "adr", "bl", "b", "blr",
+    "br", "cbz", "cbnz", "tbz", "tbnz", "b.eq", "b.ne", "b.lt", "b.le", "b.gt", "b.ge", "b.lo",
+    "b.hs", "b.hi", "b.ls", "b.mi", "b.pl", "b.vs", "b.vc", "sxtw", "uxtw", "sxtb", "sxth", "csel",
+    "cset", "fmov", "fadd", "fsub", "fmul", "fdiv", "fcmp", "scvtf", "fcvtzs", "rev", "rev16",
 ];
 
 const KNOWN_DIRECTIVES: &[&str] = &[

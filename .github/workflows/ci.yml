@@ -46,7 +46,7 @@ jobs:
       - name: Cargo Check & Code Format
         run: |
           cargo check
-          cargo fmt --check --quiet || true
+          cargo fmt --check --quiet
 
       - name: Cargo Unit Tests & Build Binary
         run: |
@@ -55,7 +55,7 @@ jobs:
 
       - name: Verify acc Binary Target
         run: |
-          ./target/release/acc --help || ./target/release/acc -E - < /dev/null
+          ./target/release/acc --help
 
       - name: Run In-Repo Oracle Suite
         run: |

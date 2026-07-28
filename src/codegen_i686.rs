@@ -436,7 +436,6 @@ impl Codegen {
         Ok(self.out.clone())
     }
 
-
     fn emit_global(&mut self, g: &VarDecl) -> Result<(), String> {
         let size = self.type_size(&g.ty).max(1);
         let s = sym(&g.name);
@@ -687,27 +686,20 @@ impl Codegen {
                             }
                         }
                         if cur < count {
-                            self.write_init_expr_to_blob(
-                                blob,
-                                off + cur * esz,
-                                elem,
-                                ex,
-                            )?;
+                            self.write_init_expr_to_blob(blob, off + cur * esz, elem, ex)?;
                         }
                         cur += 1;
                     }
                     return Ok(());
                 }
                 let sub_lay = match fty {
-                    Type::Struct(n) | Type::Union(n) => self
-                        .layouts
-                        .get(n)
-                        .cloned()
-                        .unwrap_or(Layout {
+                    Type::Struct(n) | Type::Union(n) => {
+                        self.layouts.get(n).cloned().unwrap_or(Layout {
                             size: self.type_size(fty),
                             align: 4,
                             fields: HashMap::new(),
-                        }),
+                        })
+                    }
                     Type::AnonStruct(fs) => self.layout_fields(fs, false, false),
                     Type::AnonUnion(fs) => self.layout_fields(fs, true, false),
                     _ => Layout {
@@ -886,9 +878,7 @@ impl Codegen {
                 self.measure_stmts(ss, locals, stack, typedefs);
                 locals.pop();
             }
-            Stmt::If {
-                then_b, else_b, ..
-            } => {
+            Stmt::If { then_b, else_b, .. } => {
                 self.measure_stmt(then_b, locals, stack, typedefs);
                 if let Some(e) = else_b {
                     self.measure_stmt(e, locals, stack, typedefs);
@@ -1224,12 +1214,10 @@ impl Codegen {
                 self.collect_switch_cases(body, out);
             }
             Stmt::Label(_, inner) => self.collect_switch_cases(inner, out),
-            Stmt::DoWhile { body, .. }
-            | Stmt::While { body, .. }
-            | Stmt::For { body, .. } => self.collect_switch_cases(body, out),
-            Stmt::If {
-                then_b, else_b, ..
-            } => {
+            Stmt::DoWhile { body, .. } | Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                self.collect_switch_cases(body, out)
+            }
+            Stmt::If { then_b, else_b, .. } => {
                 self.collect_switch_cases(then_b, out);
                 if let Some(e) = else_b {
                     self.collect_switch_cases(e, out);
@@ -1280,13 +1268,7 @@ impl Codegen {
 
     fn store_at_offset(&mut self, offset: i64, ty: &Type, val_reg: u8) {
         match self.type_size(ty) {
-            1 => writeln!(
-                self.out,
-                "\tmovb\t{}, {}(%ebp)",
-                reg_b(val_reg),
-                offset
-            )
-            .unwrap(),
+            1 => writeln!(self.out, "\tmovb\t{}, {}(%ebp)", reg_b(val_reg), offset).unwrap(),
             2 => writeln!(
                 self.out,
                 "\tmovw\t{}, {}(%ebp)",
@@ -1594,10 +1576,7 @@ impl Codegen {
                     BinOp::BitOr => writeln!(self.out, "\torl\t%ecx, %eax").unwrap(),
                     BinOp::BitXor => writeln!(self.out, "\txorl\t%ecx, %eax").unwrap(),
                     _ => {
-                        return Err(format!(
-                            "i686: unsupported compound-assign {:?}",
-                            op
-                        ));
+                        return Err(format!("i686: unsupported compound-assign {:?}", op));
                     }
                 }
                 writeln!(self.out, "\tpopl\t%ebx").unwrap();
@@ -1769,7 +1748,9 @@ impl Codegen {
                 writeln!(
                     self.out,
                     "\tmovl\t$L_{}_goto_{}, {}",
-                    self.func_name, label, reg(dest)
+                    self.func_name,
+                    label,
+                    reg(dest)
                 )
                 .unwrap();
                 Ok(Type::Ptr(Box::new(Type::Void)))
@@ -1880,10 +1861,7 @@ impl Codegen {
             Expr::Int(_) | Expr::Char(_) => Type::Int,
             Expr::Float(_) => Type::Double,
             Expr::String(_) => Type::Ptr(Box::new(Type::Char)),
-            Expr::Var(name) => self
-                .lookup(name)
-                .map(|s| s.ty)
-                .unwrap_or(Type::Int),
+            Expr::Var(name) => self.lookup(name).map(|s| s.ty).unwrap_or(Type::Int),
             Expr::Unary {
                 op: UnaryOp::Addr,
                 expr,

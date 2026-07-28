@@ -88,10 +88,14 @@ mod tests {
     fn parses_minimal_aarch64_linux_main_ret() {
         let src = "\t.text\n\t.globl\tmain\nmain:\n\tmov\tw0, #0\n\tret\n";
         let unit = parse_assembly(src, Target::Aarch64, TargetOs::Linux).expect("parse");
-        assert!(unit.lines.iter().any(|l| matches!(l, AsmLine::Label(s) if s == "main")));
-        assert!(unit.lines.iter().any(|l| {
-            matches!(l, AsmLine::Instr { mnemonic, .. } if mnemonic == "ret")
-        }));
+        assert!(unit
+            .lines
+            .iter()
+            .any(|l| matches!(l, AsmLine::Label(s) if s == "main")));
+        assert!(unit
+            .lines
+            .iter()
+            .any(|l| { matches!(l, AsmLine::Instr { mnemonic, .. } if mnemonic == "ret") }));
     }
 
     #[test]
@@ -248,10 +252,7 @@ l_str_0:
             .output()
             .expect("docker run");
         assert!(run.status.success(), "hello run failed: {:?}", run);
-        assert_eq!(
-            String::from_utf8_lossy(&run.stdout),
-            "Hello, world!\n"
-        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, world!\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

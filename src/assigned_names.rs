@@ -52,7 +52,11 @@ fn collect_assigned_names_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::Cast { expr, .. }
         | Expr::SizeofExpr(expr)
         | Expr::Member { base: expr, .. } => collect_assigned_names_expr(expr, out),
-        Expr::Binary { left, right, .. } | Expr::Index { base: left, index: right } => {
+        Expr::Binary { left, right, .. }
+        | Expr::Index {
+            base: left,
+            index: right,
+        } => {
             collect_assigned_names_expr(left, out);
             collect_assigned_names_expr(right, out);
         }

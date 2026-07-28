@@ -25,13 +25,13 @@ This document describes **this** tree only. It is implemented completely from sc
 **Goals**
 - Real (subset) C: multi-function, local variables, pointers/arrays, struct/union layouts, control flow (`if`, `while`, `for`, `do-while`, `switch`), `goto`, `typedef`, globals, `sizeof`, object/function-like macros (`#define`), conditional compilation (`#if`, `#ifdef`), and header inclusion (`#include`).
 - Public-oracle driven growth (`c-testsuite` + real-world projects).
-- Dual ISA: AArch64 and x86_64 backends sharing a single clean-room frontend.
+- 4-ISA: AArch64, x86_64, i686, and RISC-V 64 backends sharing a single clean-room frontend.
 - Clean-room: no CCC or external compiler sources used as reference implementation.
 - Stage C achievements: Linux Kernel 6.9 arm64 via Docker QEMU boot; large-scale projects (SQLite amalgamation, Redis 7.2.5 server).
 
 **Non-Goals (Today)**
 - Full ISO C23 / complete GNU extension coverage.
-- In-tree assembler, linker, or DWARF writer (system tools assemble/link emitted `.s`).
+- DWARF writer (system tools assemble/link by default; in-tree assembler and linker implemented under src/assembler and src/linker for Builtin M4/M5).
 - Bit-for-bit CCC AST parity or superficial LOC matching.
 - Soft fallback to host C compilers.
 
@@ -75,13 +75,20 @@ This document describes **this** tree only. It is implemented completely from sc
 
 ```
 src/
+  lib.rs            Library root and module declarations
   main.rs           CLI parser (-o, -S, -E, -m, --target-os, -I, -D)
   driver.rs         Orchestration: read → PP → parse → codegen → assemble/link
   preprocess.rs     C preprocessor, macro expansion, #if evaluator, #include resolver
   lexer.rs / token.rs Lexical analyzer & token definitions
   parser.rs / ast.rs Recursive descent parser, type checking, AST representation
+  assigned_names.rs Static symbol name resolution & mangling
   codegen.rs        AArch64 code generator (Darwin & Linux ELF dialects)
   codegen_x86_64.rs x86_64 code generator (System V ABI & Darwin)
+  codegen_i686.rs   i686 32-bit code generator (Linux ELF ILP32)
+  codegen_riscv.rs  RISC-V 64-bit code generator (Linux ELF LP64)
+  codegen_x86_64_freestanding.rs Freestanding x86_64 code generator
+  assembler/        In-tree assembler (AArch64 machine code encoding & ELF emission)
+  linker/           In-tree ELF linker (AArch64 executable & static library linking)
 
 harness/
   run_oracle.sh / run_ctestsuite.sh / run_multiarch.sh / run_multiarch_4isa.sh
@@ -161,6 +168,6 @@ See `harness/progress.md` for gate status and `scratch/` for physical log eviden
 
 ## Known Residual Design Debt
 
-- Assembler and linker are currently external (system `as` / `ld`); future architecture roadmap includes in-tree assembler and ELF/Mach-O linker.
+- System assembler and linker are used by default; in-tree assembler (src/assembler/) and linker (src/linker/) are implemented for Builtin M4/M5 (AArch64).
 - Parser soft recovery can drop bodies on highly complex unsupported GNU extensions; ongoing test-driven expansion continues to reduce unparsed constructs.
 - Direct AST → assembly code generation without intermediate SSA IR.

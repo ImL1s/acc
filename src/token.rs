@@ -29,11 +29,11 @@ pub enum TokenKind {
     StarEq,
     SlashEq,
     PercentEq,
-    AndEq,   // &=
-    OrEq,    // |=
-    XorEq,   // ^=
-    ShlEq,   // <<=
-    ShrEq,   // >>=
+    AndEq, // &=
+    OrEq,  // |=
+    XorEq, // ^=
+    ShlEq, // <<=
+    ShrEq, // >>=
     Eq,    // ==
     Ne,    // !=
     Lt,

@@ -106,17 +106,14 @@ main:
 
     #[test]
     fn links_freestanding_main_to_et_exec() {
-        let obj = assembler::assemble_to_object(
-            freestanding_main_s(),
-            Target::Aarch64,
-            TargetOs::Linux,
-        )
-        .expect("assemble");
+        let obj =
+            assembler::assemble_to_object(freestanding_main_s(), Target::Aarch64, TargetOs::Linux)
+                .expect("assemble");
         let exe = link_to_executable(&[obj], Target::Aarch64, TargetOs::Linux).expect("link");
         assert_eq!(&exe[0..4], b"\x7fELF");
         assert_eq!(exe[16], 2); // ET_EXEC
         assert_eq!(exe[18], 183); // EM_AARCH64
-        // e_entry non-zero
+                                  // e_entry non-zero
         let entry = u64::from_le_bytes(exe[24..32].try_into().unwrap());
         assert!(entry >= 0x400000, "entry={entry:#x}");
         if let Ok(p) = std::env::var("ACC_WRITE_M4_EXE") {
@@ -126,12 +123,9 @@ main:
 
     #[test]
     fn links_and_runs_in_docker_without_system_cc() {
-        let obj = assembler::assemble_to_object(
-            freestanding_main_s(),
-            Target::Aarch64,
-            TargetOs::Linux,
-        )
-        .expect("assemble");
+        let obj =
+            assembler::assemble_to_object(freestanding_main_s(), Target::Aarch64, TargetOs::Linux)
+                .expect("assemble");
         let exe = link_to_executable(&[obj], Target::Aarch64, TargetOs::Linux).expect("link");
 
         if !std::path::Path::new("/var/run/docker.sock").exists() {
@@ -237,7 +231,8 @@ main:
             eprintln!("musl not installed; skipping M5 hosted link test");
             return;
         }
-        let exe = link_to_executable(&[obj], Target::Aarch64, TargetOs::Linux).expect("hosted link");
+        let exe =
+            link_to_executable(&[obj], Target::Aarch64, TargetOs::Linux).expect("hosted link");
         assert_eq!(&exe[0..4], b"\x7fELF");
         assert_eq!(exe[16], 2); // ET_EXEC
         if let Ok(p) = std::env::var("ACC_WRITE_M5_EXE") {
@@ -254,7 +249,9 @@ main:
             perms.set_mode(0o755);
             std::fs::set_permissions(dir.join("prog"), perms).unwrap();
         }
-        let run = std::process::Command::new(dir.join("prog")).output().expect("run");
+        let run = std::process::Command::new(dir.join("prog"))
+            .output()
+            .expect("run");
         let stdout = String::from_utf8_lossy(&run.stdout);
         assert!(
             run.status.success() && stdout.trim_end() == "Hello, world!",

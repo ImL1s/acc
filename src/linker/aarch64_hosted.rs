@@ -62,9 +62,7 @@ pub fn musl_lib_dir() -> PathBuf {
 pub fn libgcc_archive() -> PathBuf {
     std::env::var("ACC_LIBGCC_A")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from("/usr/lib/gcc/aarch64-linux-gnu/13/libgcc.a")
-        })
+        .unwrap_or_else(|_| PathBuf::from("/usr/lib/gcc/aarch64-linux-gnu/13/libgcc.a"))
 }
 
 /// True when any input object has an undefined global function/data symbol (hosted TU).
@@ -90,15 +88,11 @@ pub fn link_aarch64_linux_hosted(user_objects: &[Vec<u8>]) -> Result<Vec<u8>, St
     let mut inputs: Vec<Vec<u8>> = Vec::new();
     for name in ["Scrt1.o", "crti.o"] {
         let p = musl.join(name);
-        inputs.push(
-            std::fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?,
-        );
+        inputs.push(std::fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?);
     }
     inputs.extend_from_slice(user_objects);
     let crtn = musl.join("crtn.o");
-    inputs.push(
-        std::fs::read(&crtn).map_err(|e| format!("read {}: {e}", crtn.display()))?,
-    );
+    inputs.push(std::fs::read(&crtn).map_err(|e| format!("read {}: {e}", crtn.display()))?);
 
     // Archive-driven symbol resolution (--start-group style).
     let mut archives: Vec<(PathBuf, Vec<(String, Vec<u8>)>)> = Vec::new();
@@ -438,10 +432,7 @@ fn link_objects_hosted(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
 
     // Pre-scan GOT requirements before layout so `.got` lands in the RW image.
     let mut got_off: HashMap<String, u64> = HashMap::new();
-    let got_base = merged
-        .get(".got")
-        .map(|g| g.data.len() as u64)
-        .unwrap_or(0);
+    let got_base = merged.get(".got").map(|g| g.data.len() as u64).unwrap_or(0);
     let mut got_extra = 0u64;
     // Honour existing `.got` reloc layout from libc objects first.
     if let Some(got) = merged.get(".got") {
@@ -561,9 +552,17 @@ fn link_objects_hosted(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
             merged[".preinit_array"].data.len() as u64,
         ),
         ("__init_array_start", ".init_array", 0u64),
-        ("__init_array_end", ".init_array", merged[".init_array"].data.len() as u64),
+        (
+            "__init_array_end",
+            ".init_array",
+            merged[".init_array"].data.len() as u64,
+        ),
         ("__fini_array_start", ".fini_array", 0u64),
-        ("__fini_array_end", ".fini_array", merged[".fini_array"].data.len() as u64),
+        (
+            "__fini_array_end",
+            ".fini_array",
+            merged[".fini_array"].data.len() as u64,
+        ),
     ] {
         if sec_addr.contains_key(sec) {
             defs.insert(
@@ -734,8 +733,13 @@ fn link_objects_hosted(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
             let val = symbol_va(sym, &defs, &sec_addr)?;
             let got_va = sec_addr.get(".got").copied().unwrap_or(rw_vma_start);
             let fo = (rw_file_start + (got_va - rw_vma_start) + off) as usize;
-            if std::env::var("ACC_DEBUG_M5").is_ok() && matches!(sym.as_str(), "_fini" | "_init" | "main") {
-                eprintln!("m5 got fill {sym} off={off} fo={fo:#x} val={val:#x} file_len={}", file.len());
+            if std::env::var("ACC_DEBUG_M5").is_ok()
+                && matches!(sym.as_str(), "_fini" | "_init" | "main")
+            {
+                eprintln!(
+                    "m5 got fill {sym} off={off} fo={fo:#x} val={val:#x} file_len={}",
+                    file.len()
+                );
             }
             if fo + 8 <= file.len() {
                 file[fo..fo + 8].copy_from_slice(&val.to_le_bytes());
@@ -771,33 +775,16 @@ fn link_objects_hosted(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
                 // STT_SECTION often has empty st_name; resolve via shndx — do NOT
                 // fall back to the reloc's own section (that mapped .bss.main_tls
                 // → .text / _start and caused SEGV_ACCERR in __init_tls).
-                section_va_for_shndx(
-                    r.obj_index,
-                    sym.shndx,
-                    &parsed,
-                    &obj_sec_base,
-                    &sec_addr,
-                )?
+                section_va_for_shndx(r.obj_index, sym.shndx, &parsed, &obj_sec_base, &sec_addr)?
             } else if sym_name.is_empty() {
                 sec_va
             } else if sym_name.starts_with('.') {
-                lookup_symbol_va(
-                    sym_name,
-                    &parsed,
-                    r.obj_index,
-                    &obj_sec_base,
-                    &sec_addr,
-                )?
-                .or_else(|| sec_addr.get(sym_name).copied())
-                .ok_or_else(|| format!("hosted link: local symbol `{sym_name}` missing"))?
-            } else if let Some(va) = resolve_sym_va(
-                sym_name,
-                &parsed,
-                r,
-                &defs,
-                &obj_sec_base,
-                &sec_addr,
-            )? {
+                lookup_symbol_va(sym_name, &parsed, r.obj_index, &obj_sec_base, &sec_addr)?
+                    .or_else(|| sec_addr.get(sym_name).copied())
+                    .ok_or_else(|| format!("hosted link: local symbol `{sym_name}` missing"))?
+            } else if let Some(va) =
+                resolve_sym_va(sym_name, &parsed, r, &defs, &obj_sec_base, &sec_addr)?
+            {
                 va
             } else {
                 symbol_va(sym_name, &defs, &sec_addr)?
@@ -989,9 +976,9 @@ fn section_va_for_shndx(
         .ok_or_else(|| {
             format!("hosted link: no parsed section for shndx {shndx} in object {obj_index}")
         })?;
-    let sec_va = sec_addr.get(&sec_name).ok_or_else(|| {
-        format!("hosted link: section `{sec_name}` (shndx {shndx}) not laid out")
-    })?;
+    let sec_va = sec_addr
+        .get(&sec_name)
+        .ok_or_else(|| format!("hosted link: section `{sec_name}` (shndx {shndx}) not laid out"))?;
     Ok(sec_va + base)
 }
 
@@ -1010,7 +997,9 @@ fn symbol_tls_offset(
             .map(|t| t.data.len() as u64)
             .unwrap_or(0);
     } else if d.sec != ".tdata" {
-        return Err(format!("hosted link: tls symbol `{name}` not in .tdata/.tbss"));
+        return Err(format!(
+            "hosted link: tls symbol `{name}` not in .tdata/.tbss"
+        ));
     }
     Ok(base + d.value)
 }
@@ -1252,9 +1241,7 @@ fn apply_reloc_hosted(
             Ok(())
         }
         R_AARCH64_PREL32 => {
-            let val = (s as i64)
-                .wrapping_add(a)
-                .wrapping_sub(p as i64) as u32;
+            let val = (s as i64).wrapping_add(a).wrapping_sub(p as i64) as u32;
             file[fo..fo + 4].copy_from_slice(&val.to_le_bytes());
             Ok(())
         }
@@ -1262,9 +1249,7 @@ fn apply_reloc_hosted(
             if fo + 8 > file.len() {
                 return Err("PREL64 past image".into());
             }
-            let val = (s as i64)
-                .wrapping_add(a)
-                .wrapping_sub(p as i64) as u64;
+            let val = (s as i64).wrapping_add(a).wrapping_sub(p as i64) as u64;
             file[fo..fo + 8].copy_from_slice(&val.to_le_bytes());
             Ok(())
         }
@@ -1356,13 +1341,7 @@ fn apply_reloc_hosted(
     }
 }
 
-fn apply_movw_uabs(
-    file: &mut [u8],
-    fo: usize,
-    s: u64,
-    a: i64,
-    shift: u32,
-) -> Result<(), String> {
+fn apply_movw_uabs(file: &mut [u8], fo: usize, s: u64, a: i64, shift: u32) -> Result<(), String> {
     let val = s.wrapping_add(a as u64);
     let imm16 = ((val >> shift) & 0xffff) as u32;
     let mut insn = u32::from_le_bytes(file[fo..fo + 4].try_into().unwrap());

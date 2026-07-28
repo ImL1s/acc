@@ -15,7 +15,9 @@ pub fn read_archive(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
         let size = parse_decimal_field(std::str::from_utf8(&hdr[48..58]).unwrap_or(""))?;
         let mut name = String::from_utf8_lossy(&hdr[0..16]).trim().to_string();
         off += 60;
-        let data_end = off.checked_add(size).ok_or("archive member size overflow")?;
+        let data_end = off
+            .checked_add(size)
+            .ok_or("archive member size overflow")?;
         if data_end > bytes.len() {
             return Err(format!("{}: member past EOF", path.display()));
         }
@@ -25,7 +27,8 @@ pub fn read_archive(path: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
             off += 1;
         }
         // Long-name table
-        if name.starts_with('#') && name.len() > 1 && name[1..].chars().all(|c| c.is_ascii_digit()) {
+        if name.starts_with('#') && name.len() > 1 && name[1..].chars().all(|c| c.is_ascii_digit())
+        {
             if let Ok(idx) = name[1..].trim().parse::<usize>() {
                 if let Some(slash) = data.iter().position(|&b| b == b'/') {
                     name = String::from_utf8_lossy(&data[..slash]).into_owned();
@@ -69,7 +72,11 @@ mod tests {
             return;
         }
         let members = read_archive(path).expect("read archive");
-        assert!(members.len() > 100, "expected many members, got {}", members.len());
+        assert!(
+            members.len() > 100,
+            "expected many members, got {}",
+            members.len()
+        );
         assert!(
             members.iter().any(|(n, _)| n.contains("printf")),
             "printf member missing"

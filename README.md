@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ImL1s/acc/actions/workflows/ci.yml/badge.svg)](https://github.com/ImL1s/acc/actions/workflows/ci.yml)
 [![Release](https://github.com/ImL1s/acc/actions/workflows/release.yml/badge.svg)](https://github.com/ImL1s/acc/actions/workflows/release.yml)
-[![Status](https://img.shields.io/badge/status-RELEASE--0.1.0-brightgreen.svg)](RELEASE.md)
+[![Status](https://img.shields.io/badge/status-IN__PROGRESS-yellow.svg)](harness/progress.md)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-brightgreen.svg)](https://www.rust-lang.org/)
 [![Architecture](https://img.shields.io/badge/architecture-AArch64%20%7C%20x86__64%20%7C%20i686%20%7C%20RISC--V%2064-blue.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

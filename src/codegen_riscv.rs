@@ -627,15 +627,13 @@ impl Codegen {
                     return Ok(());
                 }
                 let sub_lay = match fty {
-                    Type::Struct(n) | Type::Union(n) => self
-                        .layouts
-                        .get(n)
-                        .cloned()
-                        .unwrap_or(Layout {
+                    Type::Struct(n) | Type::Union(n) => {
+                        self.layouts.get(n).cloned().unwrap_or(Layout {
                             size: self.type_size(fty),
                             align: 8,
                             fields: HashMap::new(),
-                        }),
+                        })
+                    }
                     Type::AnonStruct(fs) => self.layout_fields(fs, false, false),
                     Type::AnonUnion(fs) => self.layout_fields(fs, true, false),
                     _ => Layout {
@@ -790,9 +788,7 @@ impl Codegen {
                 self.measure_stmts(ss);
                 self.exit_scope();
             }
-            Stmt::If {
-                then_b, else_b, ..
-            } => {
+            Stmt::If { then_b, else_b, .. } => {
                 self.measure_stmt(then_b);
                 if let Some(e) = else_b {
                     self.measure_stmt(e);
@@ -818,11 +814,7 @@ impl Codegen {
         }
     }
 
-    fn emit_stmt(
-        &mut self,
-        st: &Stmt,
-        typedefs: &HashMap<String, Type>,
-    ) -> Result<(), String> {
+    fn emit_stmt(&mut self, st: &Stmt, typedefs: &HashMap<String, Type>) -> Result<(), String> {
         match st {
             Stmt::Empty => Ok(()),
             Stmt::Block(ss) => {
@@ -1037,12 +1029,10 @@ impl Codegen {
                 self.collect_switch_cases(body, out);
             }
             Stmt::Label(_, inner) => self.collect_switch_cases(inner, out),
-            Stmt::DoWhile { body, .. }
-            | Stmt::While { body, .. }
-            | Stmt::For { body, .. } => self.collect_switch_cases(body, out),
-            Stmt::If {
-                then_b, else_b, ..
-            } => {
+            Stmt::DoWhile { body, .. } | Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                self.collect_switch_cases(body, out)
+            }
+            Stmt::If { then_b, else_b, .. } => {
                 self.collect_switch_cases(then_b, out);
                 if let Some(e) = else_b {
                     self.collect_switch_cases(e, out);
@@ -1105,7 +1095,10 @@ impl Codegen {
                     _ => None,
                 }
             }
-            Expr::Unary { op: UnaryOp::Neg, expr } => Some(-self.const_i64_simple(expr)?),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => Some(-self.const_i64_simple(expr)?),
             _ => None,
         }
     }
@@ -1291,10 +1284,7 @@ impl Codegen {
             Expr::Int(_) | Expr::Char(_) => Type::Int,
             Expr::Float(_) => Type::Double,
             Expr::String(_) => Type::Ptr(Box::new(Type::Char)),
-            Expr::Var(name) => self
-                .lookup(name)
-                .map(|s| s.ty)
-                .unwrap_or(Type::Int),
+            Expr::Var(name) => self.lookup(name).map(|s| s.ty).unwrap_or(Type::Int),
             Expr::Unary {
                 op: UnaryOp::Addr,
                 expr,
@@ -1394,13 +1384,8 @@ impl Codegen {
                         .unwrap();
                     } else {
                         writeln!(self.out, "\tli\tt6, {esz}").unwrap();
-                        writeln!(
-                            self.out,
-                            "\tmul\t{}, {}, t6",
-                            Self::treg(2),
-                            Self::treg(2)
-                        )
-                        .unwrap();
+                        writeln!(self.out, "\tmul\t{}, {}, t6", Self::treg(2), Self::treg(2))
+                            .unwrap();
                     }
                 }
                 writeln!(self.out, "\tld\t{}, 0(sp)", Self::treg(1)).unwrap();
@@ -1689,12 +1674,7 @@ impl Codegen {
             }
             Expr::AddrOfLabel(label) => {
                 let rd = Self::treg(dest);
-                writeln!(
-                    self.out,
-                    "\tlla\t{rd}, L_{}_goto_{}",
-                    self.func_name, label
-                )
-                .unwrap();
+                writeln!(self.out, "\tlla\t{rd}, L_{}_goto_{}", self.func_name, label).unwrap();
                 Ok(Type::Ptr(Box::new(Type::Void)))
             }
         }
@@ -1908,13 +1888,7 @@ impl Codegen {
                 let tmp = (i as u8) + 1;
                 self.emit_expr_rval(a, tmp, typedefs)?;
                 if Self::treg(tmp) != ARG_REGS[i] {
-                    writeln!(
-                        self.out,
-                        "\tmv\t{}, {}",
-                        ARG_REGS[i],
-                        Self::treg(tmp)
-                    )
-                    .unwrap();
+                    writeln!(self.out, "\tmv\t{}, {}", ARG_REGS[i], Self::treg(tmp)).unwrap();
                 }
             }
             self.emit_expr_rval(callee, 7, typedefs)?;
@@ -1945,13 +1919,7 @@ impl Codegen {
                 let spill = -(self.stack_size + 8 + (i as i64) * 8);
                 self.emit_ld_s0(ARG_REGS[i], spill);
             } else if Self::treg(tmp) != ARG_REGS[i] {
-                writeln!(
-                    self.out,
-                    "\tmv\t{}, {}",
-                    ARG_REGS[i],
-                    Self::treg(tmp)
-                )
-                .unwrap();
+                writeln!(self.out, "\tmv\t{}, {}", ARG_REGS[i], Self::treg(tmp)).unwrap();
             }
         }
         writeln!(self.out, "\tcall\t{}", sym(name)).unwrap();
@@ -2134,9 +2102,7 @@ mod tests {
             "a".into(),
             Sym {
                 ty: Type::Struct("S".into()),
-                storage: Storage::Global {
-                    name: "a".into(),
-                },
+                storage: Storage::Global { name: "a".into() },
             },
         );
         let e = Expr::Member {

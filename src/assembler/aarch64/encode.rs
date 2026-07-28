@@ -37,18 +37,14 @@ pub fn parse_reg(s: &str) -> Result<Reg, String> {
         return Ok(Reg::Wzr);
     }
     if let Some(rest) = s.strip_prefix('x').or_else(|| s.strip_prefix('X')) {
-        let n: u8 = rest
-            .parse()
-            .map_err(|_| format!("bad x register '{s}'"))?;
+        let n: u8 = rest.parse().map_err(|_| format!("bad x register '{s}'"))?;
         if n > 30 {
             return Err(format!("register out of range '{s}'"));
         }
         return Ok(Reg::X(n));
     }
     if let Some(rest) = s.strip_prefix('w').or_else(|| s.strip_prefix('W')) {
-        let n: u8 = rest
-            .parse()
-            .map_err(|_| format!("bad w register '{s}'"))?;
+        let n: u8 = rest.parse().map_err(|_| format!("bad w register '{s}'"))?;
         if n > 30 {
             return Err(format!("register out of range '{s}'"));
         }
@@ -133,7 +129,14 @@ pub fn encode_ldp_post(rt: Reg, rt2: Reg, rn: Reg, imm: i32) -> Result<u32, Stri
     encode_pair(false, false, rt, rt2, rn, imm)
 }
 
-fn encode_pair(store: bool, pre: bool, rt: Reg, rt2: Reg, rn: Reg, imm: i32) -> Result<u32, String> {
+fn encode_pair(
+    store: bool,
+    pre: bool,
+    rt: Reg,
+    rt2: Reg,
+    rn: Reg,
+    imm: i32,
+) -> Result<u32, String> {
     if rt.is_32() || rt2.is_32() || rn.is_32() {
         return Err("32-bit stp/ldp not implemented in M2".into());
     }
@@ -260,11 +263,7 @@ pub fn encode_add_lo12_placeholder(rd: Reg, rn: Reg) -> Result<u32, String> {
 pub fn encode_rev(rd: Reg, rn: Reg) -> Result<u32, String> {
     let rd_n = rd.x_num()?;
     let rn_n = rn.x_num()?;
-    let base = if rd.is_32() {
-        0x5AC0_0800
-    } else {
-        0x5AC0_0C00
-    };
+    let base = if rd.is_32() { 0x5AC0_0800 } else { 0x5AC0_0C00 };
     Ok(base | ((rn_n as u32) << 5) | rd_n as u32)
 }
 
@@ -283,7 +282,13 @@ pub fn encode_and_imm(rd: Reg, rn: Reg, imm: u64) -> Result<u32, String> {
     let sf = if rd.is_32() { 0u32 } else { 1u32 << 31 };
     let rd_n = rd.x_num()?;
     let rn_n = rn.x_num()?;
-    Ok(0x1200_0000 | sf | (n << 12) | (immr << 16) | (imms << 10) | ((rn_n as u32) << 5) | rd_n as u32)
+    Ok(0x1200_0000
+        | sf
+        | (n << 12)
+        | (immr << 16)
+        | (imms << 10)
+        | ((rn_n as u32) << 5)
+        | rd_n as u32)
 }
 
 fn encode_bitmask_imm(imm: u64, is_32: bool) -> Result<(u32, u32, u32), String> {

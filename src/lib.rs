@@ -1,5 +1,5 @@
-pub mod ast;
 pub mod assigned_names;
+pub mod ast;
 pub mod codegen;
 pub mod driver;
 pub mod lexer;

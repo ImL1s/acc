@@ -108,14 +108,17 @@ impl ElfObject {
         strtab.add("");
 
         let mut sym_entries: Vec<(u32, Symbol)> = Vec::new();
-        sym_entries.push((0, Symbol {
-            name: String::new(),
-            section: None,
-            value: 0,
-            size: 0,
-            binding: STB_LOCAL,
-            sym_type: STT_NOTYPE,
-        }));
+        sym_entries.push((
+            0,
+            Symbol {
+                name: String::new(),
+                section: None,
+                value: 0,
+                size: 0,
+                binding: STB_LOCAL,
+                sym_type: STT_NOTYPE,
+            },
+        ));
 
         let mut locals: Vec<Symbol> = Vec::new();
         let mut globals: Vec<Symbol> = Vec::new();
@@ -163,10 +166,10 @@ impl ElfObject {
                 sh_addr: 0,
                 sh_offset: offset,
                 sh_size: sec.data.len() as u64,
-            sh_link: 0,
-            sh_info: 0,
-            sh_align: sec.align,
-            sh_entsize: 0,
+                sh_link: 0,
+                sh_info: 0,
+                sh_align: sec.align,
+                sh_entsize: 0,
             });
         }
 
@@ -227,7 +230,13 @@ impl ElfObject {
                 let sym_i = *sym_idx
                     .get(&reloc.sym_name)
                     .unwrap_or_else(|| panic!("reloc symbol {} missing", reloc.sym_name));
-                write_rela(&mut rela_bytes, reloc.offset, sym_i, reloc.r_type, reloc.addend);
+                write_rela(
+                    &mut rela_bytes,
+                    reloc.offset,
+                    sym_i,
+                    reloc.r_type,
+                    reloc.addend,
+                );
             }
             file.extend_from_slice(&rela_bytes);
             shdrs.push(Shdr {
@@ -267,12 +276,7 @@ impl ElfObject {
         }
 
         let mut ehdr = Vec::new();
-        write_ehdr(
-            &mut ehdr,
-            e_shoff,
-            shdrs.len() as u16,
-            shstrtab_idx as u16,
-        );
+        write_ehdr(&mut ehdr, e_shoff, shdrs.len() as u16, shstrtab_idx as u16);
         file[..64].copy_from_slice(&ehdr);
         file
     }
@@ -305,7 +309,10 @@ impl StringTable {
     }
 
     fn offset(&self, s: &str) -> u32 {
-        *self.offsets.get(s).unwrap_or_else(|| panic!("shstr missing {s}"))
+        *self
+            .offsets
+            .get(s)
+            .unwrap_or_else(|| panic!("shstr missing {s}"))
     }
 }
 
@@ -364,7 +371,22 @@ fn encode_nop_le() -> [u8; 4] {
 
 fn write_ehdr(out: &mut Vec<u8>, shoff: u64, shnum: u16, shstrndx: u16) {
     out.extend_from_slice(&[
-        0x7F, b'E', b'L', b'F', ELFCLASS64, ELFDATA2LSB, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x7F,
+        b'E',
+        b'L',
+        b'F',
+        ELFCLASS64,
+        ELFDATA2LSB,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     ]);
     write_u16(out, ET_REL);
     write_u16(out, EM_AARCH64);

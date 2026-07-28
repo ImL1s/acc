@@ -223,9 +223,7 @@ impl<'a> Lexer<'a> {
         let col = self.col;
         let start = self.i;
         // hex 0x… / binary 0b… (GCC/clang C extension, required by kernel headers)
-        if self.peek() == Some(b'0')
-            && matches!(self.peek2(), Some(b'x' | b'X'))
-        {
+        if self.peek() == Some(b'0') && matches!(self.peek2(), Some(b'x' | b'X')) {
             self.bump();
             self.bump();
             while matches!(self.peek(), Some(b) if b.is_ascii_hexdigit()) {
@@ -240,9 +238,7 @@ impl<'a> Lexer<'a> {
             }
             return self.make(TokenKind::IntLit(n), line, col);
         }
-        if self.peek() == Some(b'0')
-            && matches!(self.peek2(), Some(b'b' | b'B'))
-        {
+        if self.peek() == Some(b'0') && matches!(self.peek2(), Some(b'b' | b'B')) {
             self.bump();
             self.bump();
             let mut buf = String::new();
@@ -268,8 +264,7 @@ impl<'a> Lexer<'a> {
             self.bump();
         }
         // float: 1.0 or 1. or 1e10
-        let is_float = self.peek() == Some(b'.')
-            || matches!(self.peek(), Some(b'e' | b'E'));
+        let is_float = self.peek() == Some(b'.') || matches!(self.peek(), Some(b'e' | b'E'));
         if is_float {
             if self.peek() == Some(b'.') {
                 self.bump();
@@ -292,7 +287,14 @@ impl<'a> Lexer<'a> {
             let s = std::str::from_utf8(&self.src[start..self.i]).unwrap();
             let cleaned: String = s
                 .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == 'e' || *c == 'E' || *c == '+' || *c == '-')
+                .take_while(|c| {
+                    c.is_ascii_digit()
+                        || *c == '.'
+                        || *c == 'e'
+                        || *c == 'E'
+                        || *c == '+'
+                        || *c == '-'
+                })
                 .collect();
             let f: f64 = cleaned.parse().unwrap_or(0.0);
             // encode as IntLit of bits? Use StringLit-like - store as FloatLit via IntLit with tag
@@ -601,9 +603,7 @@ impl<'a> Lexer<'a> {
             let Some(c) = self.peek() else {
                 return Ok(self.make(TokenKind::Eof, line, col));
             };
-            if c == b'L'
-                && (self.peek2() == Some(b'\'') || self.peek2() == Some(b'"'))
-            {
+            if c == b'L' && (self.peek2() == Some(b'\'') || self.peek2() == Some(b'"')) {
                 return if self.peek2() == Some(b'\'') {
                     self.char_lit()
                 } else {
@@ -903,7 +903,9 @@ mod tests {
     fn skips_include_and_lexes_main() {
         let src = "#include <stdio.h>\nint main(void) { return 0; }";
         let t = Lexer::tokenize(src).unwrap();
-        assert!(t.iter().any(|x| matches!(&x.kind, TokenKind::Ident(s) if s == "main")));
+        assert!(t
+            .iter()
+            .any(|x| matches!(&x.kind, TokenKind::Ident(s) if s == "main")));
     }
 
     #[test]
@@ -912,16 +914,21 @@ mod tests {
         let t = Lexer::tokenize(src).unwrap();
         let kinds: Vec<&TokenKind> = t.iter().map(|x| &x.kind).collect();
         assert!(
-            !kinds.iter().any(|k| matches!(k, TokenKind::Ident(s) if s.contains("attribute"))),
+            !kinds
+                .iter()
+                .any(|k| matches!(k, TokenKind::Ident(s) if s.contains("attribute"))),
             "attribute not erased: {kinds:?}"
         );
         assert!(matches!(kinds[0], TokenKind::Int));
         // packed becomes TokenKind::Packed before the declarator name
         assert!(
-            matches!(kinds[1], TokenKind::Packed) || matches!(kinds[1], TokenKind::Ident(s) if s == "x"),
+            matches!(kinds[1], TokenKind::Packed)
+                || matches!(kinds[1], TokenKind::Ident(s) if s == "x"),
             "expected Packed or x, got {kinds:?}"
         );
-        assert!(kinds.iter().any(|k| matches!(k, TokenKind::Ident(s) if s == "x")));
+        assert!(kinds
+            .iter()
+            .any(|k| matches!(k, TokenKind::Ident(s) if s == "x")));
     }
 
     /// Redis `CallReply.attribute` / `p->attribute` must remain Ident tokens.
@@ -955,7 +962,9 @@ mod tests {
             "attribute((packed)) should be consumed: {:?}",
             t.iter().map(|x| &x.kind).collect::<Vec<_>>()
         );
-        assert!(t.iter().any(|x| matches!(&x.kind, TokenKind::Ident(s) if s == "x")));
+        assert!(t
+            .iter()
+            .any(|x| matches!(&x.kind, TokenKind::Ident(s) if s == "x")));
     }
 
     #[test]
@@ -964,7 +973,10 @@ mod tests {
         let t = Lexer::tokenize(src).unwrap();
         let kinds: Vec<&TokenKind> = t.iter().map(|x| &x.kind).collect();
         assert!(matches!(kinds[0], TokenKind::Struct));
-        assert!(matches!(kinds[1], TokenKind::Packed), "expected Packed: {kinds:?}");
+        assert!(
+            matches!(kinds[1], TokenKind::Packed),
+            "expected Packed: {kinds:?}"
+        );
         assert!(matches!(kinds[2], TokenKind::Ident(s) if s == "S"));
     }
 
@@ -992,7 +1004,9 @@ mod tests {
         let src = "__extension typedef int my_int;";
         let t = Lexer::tokenize(src).unwrap();
         let kinds: Vec<&TokenKind> = t.iter().map(|x| &x.kind).collect();
-        assert!(!kinds.iter().any(|k| matches!(k, TokenKind::Ident(s) if s == "__extension")));
+        assert!(!kinds
+            .iter()
+            .any(|k| matches!(k, TokenKind::Ident(s) if s == "__extension")));
         assert!(kinds.iter().any(|k| matches!(k, TokenKind::Typedef)));
     }
 
@@ -1001,6 +1015,8 @@ mod tests {
         let src = "int x __attribute__((__section__(\".mysec\")));";
         let t = Lexer::tokenize(src).unwrap();
         let kinds: Vec<&TokenKind> = t.iter().map(|x| &x.kind).collect();
-        assert!(kinds.iter().any(|k| matches!(k, TokenKind::Section(s) if s == ".mysec")));
+        assert!(kinds
+            .iter()
+            .any(|k| matches!(k, TokenKind::Section(s) if s == ".mysec")));
     }
 }
