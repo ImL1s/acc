@@ -35,12 +35,12 @@ cc -o "$HERE/lua_bin" "${objs[@]}" -lm
 case "${1:-test}" in
   test)
     # Prefer -e (non-interactive). Fall back to stdin script file.
-    out="$("$HERE/lua_bin" -e 'print("lua ok", 6*7)' 2>&1)" || true
+    out="$("$HERE/lua_bin" -e 'print("lua ok", 6*7)' < /dev/null 2>&1)" || true
     ret=$?
     if [[ "$ret" -ne 0 || "$out" != *"lua ok"* || "$out" != *"42"* ]]; then
       script="$WORKDIR/smoke.lua"
       printf '%s\n' 'print("lua ok", 6*7)' > "$script"
-      out="$("$HERE/lua_bin" "$script" 2>&1)"
+      out="$("$HERE/lua_bin" "$script" < /dev/null 2>&1)"
       ret=$?
     fi
     echo "lua exit=$ret out=$out"

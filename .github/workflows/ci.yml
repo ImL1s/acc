@@ -13,6 +13,7 @@ jobs:
   build-and-test:
     name: Build & Test Suite (Ubuntu Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository

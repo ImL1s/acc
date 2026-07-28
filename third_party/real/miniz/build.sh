@@ -16,7 +16,7 @@ cc -o miniz_bin miniz.s test_compress.s
 
 case "${1:-test}" in
   test)
-    if ! out="$(./miniz_bin 2>&1)"; then
+    if ! out="$(./miniz_bin < /dev/null 2>&1)"; then
       echo "WARN: miniz_bin execution failed on this arch, delegating to miniz_smoke"
       exec "$ROOT/third_party/real/miniz_smoke/build.sh" "$@"
     fi

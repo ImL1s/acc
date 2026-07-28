@@ -17,7 +17,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 cc -o "$HERE/sqlite_bin" "$WORKDIR/sqlite3.s" "$WORKDIR/smoke.s" -lm
 case "${1:-test}" in
   test)
-    if ! out="$("$HERE/sqlite_bin" 2>&1)"; then
+    if ! out="$("$HERE/sqlite_bin" < /dev/null 2>&1)"; then
       echo "WARN: sqlite_bin execution failed on this arch"
       exit 0
     fi
