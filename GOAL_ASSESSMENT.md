@@ -1,8 +1,8 @@
 # ACC Goal Assessment
 
 **Assessment Date**: 2026-07-28  
-**Goal**: **PASSED**  
-**Status**: **COMPLETE**  
+**Goal Status**: **BASELINE_CI_PASSED / FULL_GOAL_IN_PROGRESS**  
+**Overall Status**: **PARTIAL (NOT 100% COMPLETE)**  
 **Method**: Grounded codebase audit & empirical CI verification (`src/codegen_x86_64.rs`, `src/codegen.rs`, `src/parser.rs`, `src/main.rs`, `src/driver.rs`, `.github/workflows/ci.yml`, GitHub Actions CI Run `#30303689385`)
 
 ---
@@ -11,50 +11,42 @@
 
 The `acc` C compiler is an in-tree clean-room C compiler written entirely in Rust. It compiles C source files via an internal preprocessor, lexer, parser, and target assembly generators (`codegen.rs` for AArch64, `codegen_x86_64.rs` for x86_64, `codegen_i686.rs` for i686, `codegen_riscv.rs` for RISC-V 64), invoking system assemblers and linkers (`as`, `ld`, `gcc`) to produce native executables.
 
-All x86_64 codegen bugs (unary operators, integer shifts, bitwise operations type propagation, `__builtin_va_arg` struct alignment, CLI `--help` exit status, default target auto-detection, cross-compilation linker selection, anti-bypass audit fallback, and real-world project wrappers) have been resolved. All compiler warnings across `src/` and `tests/` have been eliminated.
+### Key Progress & Fixes Verified
+- **Target & Codegen Fixes**: `Target::default()` target selection bug, x86_64 assembly emission issues, 32-bit vs 64-bit shift/unary/bitwise type propagation, and integer promotion retention are **fully fixed**.
+- **Test Coverage**: `00200.c` execution test passes, and a comprehensive stress test suite for 32/64-bit signed/unsigned compound shift and unary operations has been added.
+- **Baseline CI**: GitHub Actions Run `#30303689385` on commit `5e614f0` ran completely green (13/13 steps success) on Ubuntu Linux x86_64.
 
-GitHub Actions CI Run `#30303689385` has passed 100% GREEN across all 13 verification steps on Ubuntu Linux x86_64!
-
----
-
-## 1. Verified CI Pipeline Status
-
-- **Cargo Check & Code Format**: PASSED (0 warnings)
-- **Cargo Unit Tests & Build Binary**: PASSED (73 unit tests, 0 failures)
-- **Verify acc Binary Target**: PASSED (`acc --help` exits with code 0)
-- **Run In-Repo Oracle Suite**: PASSED (7/7 100%)
-- **Run Public c-testsuite (Stage A & B)**: PASSED
-- **Run Dual-ISA Multiarch Suite (Stage C3)**: PASSED (200/200 100% on AArch64 and x86_64)
-- **Run Mutation & Anti-Bypass Audit (Stage C4)**: PASSED (100% pass rate)
-- **Run Real-World Project Wrappers (Stage B)**: PASSED (`miniz`, `lua`, `sqlite`)
+### Caveats & Remaining Gaps to 100% Completion
+1. **Baseline CI vs Full CCC-Status**: The current CI workflow runs baseline checks (Cargo tests, Oracle, c-testsuite, dual-ISA, Stage B wrappers). It does **not** cover full 4-ISA (i686, RISC-V 64), Linux Kernel 6.9 + dual-arch BusyBox boot, Postgres 237, GCC torture (~99%), Builtin M5, or Stage C5 double-run parity required by `plan.md` for full completion.
+2. **Threshold Gates**: `c-testsuite` runs with `CTEST_MIN_PASS=200` threshold, and `dual-ISA` requires 95% threshold per architecture, which are threshold gates rather than 100% pass proofs.
+3. **Fail-Open / Wrapper Fallbacks**: Real-world project wrappers contain fail-open / warning fallbacks (e.g., SQLite wrapper emits a warning and exits 0 on failure; miniz and lua fallback to smoke tests). Step success indicates wrapper execution exit 0, but not full strict real-world binary execution parity.
+4. **Release/CD Verification**: Release workflow (triggered on tags) has not been exercised by regular CI runs.
+5. **Doc Consistency**: Documented status in `harness/progress.md` and `README.md` correctly indicates `Goal: NOT COMPLETE` (Postgres IN_PROGRESS, Torture 77%).
 
 ---
 
-## 2. Actual Repository Structure
+## 1. Matrix Status Summary
 
-The actual codebase structure consists of:
-- **Executable**: Single `acc` binary output target defined in `Cargo.toml` and `src/main.rs`.
-- **Frontend & Preprocessor**:
-  - `src/lexer.rs` & `src/token.rs`: Lexical analyzer and token definitions.
-  - `src/preprocess.rs`: Preprocessor handling `#include`, macro expansion, conditional compilation (`#ifdef`/`#if`), and pre-included headers.
-  - `src/parser.rs` & `src/ast.rs`: Recursive-descent parser producing AST representation (`Expr`, `Stmt`, `Type`).
-  - `src/assigned_names.rs`: Name resolution helpers.
-- **Code Generators**:
-  - `src/codegen.rs`: Core AArch64 code generator and target dispatcher (`Target::Aarch64`, `Target::X86_64`, `Target::I686`, `Target::Riscv64`).
-  - `src/codegen_x86_64.rs`: System V x86_64 code generator.
-  - `src/codegen_i686.rs`: 32-bit i686 code generator.
-  - `src/codegen_riscv.rs`: RISC-V 64 code generator.
-- **Optional Built-in Toolchain**:
-  - `src/assembler/`: Built-in assembler (optional feature).
-  - `src/linker/`: Built-in linker (optional feature).
-- **Harness & Verification Scripts**:
-  - `harness/`: Integration testing scripts (`run_oracle.sh`, `run_ctestsuite.sh`, `run_multiarch.sh`, `run_ccc_parity.sh`).
-  - `tests/`: Integration test modules (`m1_1_frontend_tests.rs`, `single_exec_tests.rs`).
+| Item / Gate | Verified Status | Notes / Evidence |
+|---|---|---|
+| `Target::default()` Architecture Selection | **FIXED** | Verified in `src/driver.rs` / `src/codegen.rs` |
+| Ubuntu x86_64 Assembler / Shift Codegen | **FIXED** | Distinguishes 32/64-bit signed/unsigned, retains promoted types |
+| `00200.c` Shift Type Protection | **FIXED** | Passed + stress test added in `tests/` |
+| Cargo Tests & Baseline CI | **PASS (GREEN)** | Actions Run `#30303689385` (13/13 steps success) |
+| `c-testsuite` (Stage A & B) | **PASS (Threshold)** | At least 200 pass threshold met |
+| Dual-ISA Multiarch (Stage C3) | **PASS (Threshold)** | AArch64 + x86_64 each met 95% threshold |
+| Real-world Wrappers (Lua / miniz / SQLite) | **PASS (Wrapper Exit 0)** | Wrappers pass with fail-open/smoke fallbacks |
+| Full 4-ISA (i686, RISC-V 64) CCC-Status | **NOT RUN IN CI** | Defined in `plan.md` for full completion |
+| Postgres 237 Integration | **IN_PROGRESS** | Pending per `harness/progress.md` |
+| GCC Torture Suite | **PARTIAL (77%)** | Target is ~99%, currently 77/100 |
+| Release / CD Workflow | **UNVERIFIED** | Only triggered on `v*` release tags |
+| Document Consistency | **UPDATED** | `GOAL_ASSESSMENT.md` synced with `README.md` & `progress.md` |
 
 ---
 
-## 3. Status Synchronization
+## 2. Conclusion
 
-- **Architecture**: Single `acc` binary supporting target selection via `-m aarch64|x86_64|i686|riscv64` and `--target-os darwin|linux`.
-- **Test Status**: `cargo build --release` produces ZERO warnings. `cargo test --release` passes with ZERO warnings and 0 failures. `test_single_exec_00200` passes cleanly.
-- **Goal Status**: `Goal: PASSED` / `Status: COMPLETE`.
+**Core compiler fixes and daily Ubuntu CI baseline are complete and fully green.**
+
+However, because the green workflow represents baseline CI with threshold gates and fail-open wrappers, and full CCC-Status parity gates (Postgres 237, Torture ~99%, 4-ISA, CD release) remain in progress, the overall project goal is **PARTIAL (NOT 100% COMPLETE)**.
+
