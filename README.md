@@ -82,6 +82,53 @@ Unlike black-box compilers, `acc` emits clean, human-readable textual assembly (
 
 ---
 
+## 📦 Installation
+
+`acc` provides multiple installation methods for macOS and Linux users.
+
+### 1. One-Line Shell Installer (Recommended)
+
+Quickly download and install the latest `acc` binary for your OS and architecture:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ImL1s/acc/main/install.sh | sh
+```
+
+By default, the script installs `acc` to `~/.local/bin` (or `/usr/local/bin` if run as root). Ensure `~/.local/bin` is in your `PATH`.
+
+### 2. Pre-Built Binary Release
+
+Download pre-built binary archives directly from [GitHub Releases](https://github.com/ImL1s/acc/releases):
+
+| Target Platform | Archive Name |
+|---|---|
+| **Linux x86_64** | `acc-x86_64-linux.tar.gz` |
+| **Linux AArch64** | `acc-aarch64-linux.tar.gz` |
+| **macOS Intel** | `acc-x86_64-macos.tar.gz` |
+| **macOS Apple Silicon** | `acc-aarch64-macos.tar.gz` |
+
+```bash
+# Example: Download and extract for macOS Apple Silicon
+curl -LO https://github.com/ImL1s/acc/releases/download/v0.1.0/acc-aarch64-macos.tar.gz
+tar -xzf acc-aarch64-macos.tar.gz
+mkdir -p ~/.local/bin
+mv acc ~/.local/bin/
+```
+
+### 3. Cargo Install (From Source)
+
+If you have Rust 1.75+ installed, you can build and install directly via Cargo:
+
+```bash
+# Install from the latest main branch
+cargo install --git https://github.com/ImL1s/acc.git
+
+# Or install a specific release version
+cargo install --git https://github.com/ImL1s/acc.git --tag v0.1.0
+```
+
+---
+
 ## 🛠️ Quick Start
 
 ### Building `acc`

@@ -5,10 +5,14 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-release:
     name: Build Release Binary (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -20,6 +24,7 @@ jobs:
             os: ubuntu-latest
             artifact_name: acc-aarch64-linux.tar.gz
             binary_name: acc
+            linker: aarch64-linux-gnu-gcc
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact_name: acc-x86_64-macos.tar.gz
@@ -33,6 +38,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Cross-Compilation Toolchain (AArch64 Linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Set up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,6 +52,8 @@ jobs:
 
       - name: Build Binary
         run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package Binary Artifact
         run: |
@@ -59,23 +72,24 @@ jobs:
     name: Create GitHub Release
     needs: build-release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: acc-*
+          merge-multiple: true
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            acc-x86_64-linux.tar.gz/*
-            acc-aarch64-linux.tar.gz/*
-            acc-x86_64-macos.tar.gz/*
-            acc-aarch64-macos.tar.gz/*
+          files: acc-*.tar.gz
           draft: false
           prerelease: false
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
