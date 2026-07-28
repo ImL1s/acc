@@ -96,6 +96,12 @@ curl -fsSL https://raw.githubusercontent.com/ImL1s/acc/main/install.sh | sh
 
 By default, the script installs `acc` to `~/.local/bin` (or `/usr/local/bin` if run as root). Ensure `~/.local/bin` is in your `PATH`.
 
+To install to a custom directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ImL1s/acc/main/install.sh | ACC_INSTALL_DIR=/usr/local/bin sh
+```
+
 ### 2. Pre-Built Binary Release
 
 Download pre-built binary archives directly from [GitHub Releases](https://github.com/ImL1s/acc/releases):
@@ -121,10 +127,10 @@ If you have Rust 1.75+ installed, you can build and install directly via Cargo:
 
 ```bash
 # Install from the latest main branch
-cargo install --git https://github.com/ImL1s/acc.git
+cargo install --git https://github.com/ImL1s/acc.git acc
 
 # Or install a specific release version
-cargo install --git https://github.com/ImL1s/acc.git --tag v0.1.0
+cargo install --git https://github.com/ImL1s/acc.git --tag v0.1.0 acc
 ```
 
 ---
