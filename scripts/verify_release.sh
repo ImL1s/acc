@@ -99,11 +99,11 @@ if [[ ! -x "$ACC_BIN" ]]; then
 fi
 
 echo "[4/4] Testing extracted binary './acc --help'..."
-HELP_OUTPUT="$("$ACC_BIN" --help)"
+HELP_OUTPUT="$("$ACC_BIN" --help 2>&1)"
 if echo "$HELP_OUTPUT" | grep -qi "usage\|help"; then
   echo "  ✓ Extracted binary acc executed successfully (exit 0, help output verified)."
 else
-  echo "  ✗ ERROR: Extracted binary stdout did not contain expected help string." >&2
+  echo "  ✗ ERROR: Extracted binary output did not contain expected help string." >&2
   exit 1
 fi
 
