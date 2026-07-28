@@ -12,8 +12,8 @@
 The `acc` C compiler is an in-tree clean-room C compiler written entirely in Rust. It compiles C source files via an internal preprocessor, lexer, parser, and target assembly generators (`codegen.rs` for AArch64, `codegen_x86_64.rs` for x86_64, `codegen_i686.rs` for i686, `codegen_riscv.rs` for RISC-V 64), invoking system assemblers and linkers (`as`, `ld`, `gcc`) to produce native executables.
 
 ### Key Progress & Fixes Verified
-- **Host Target Selection**: CLI entry points (`src/main.rs`) and integration tests (`tests/`) now explicitly invoke `Target::host()` instead of relying on default target selection. Note: `Target::default()` itself still yields `Aarch64`.
-- **Codegen & Promotion Fixes**: x86_64 assembly emission issues, 32-bit vs 64-bit shift/unary/bitwise type propagation, and integer promotion retention are **fully fixed**.
+- **Host Target Selection**: CLI entry point (`src/main.rs`) and integration tests (`tests/`) now explicitly invoke `Target::host()` instead of relying on default target selection. Note: `Target::default()` itself still yields `Aarch64`.
+- **Codegen & Promotion Fixes**: The identified x86_64 shift, unary, bitwise, and integer-promotion regressions are fixed and covered by the current tests and baseline CI.
 - **Test Coverage**: `00200.c` execution test passes, and a comprehensive stress test suite for 32/64-bit signed/unsigned compound shift and unary operations has been added.
 - **Baseline CI**: GitHub Actions Run `#30303689385` on commit `5e614f0` ran completely green (13/13 steps success) on Ubuntu Linux x86_64.
 
@@ -47,7 +47,7 @@ The `acc` C compiler is an in-tree clean-room C compiler written entirely in Rus
 
 ## 2. Conclusion
 
-**Core compiler fixes and daily Ubuntu CI baseline are complete and fully green.**
+**The targeted compiler regressions and daily Ubuntu baseline CI are complete and green.**
 
 However, because host target selection is fixed via `Target::host()` (while `Target::default()` remains `Aarch64`), real-world wrappers use fail-open/smoke fallbacks, secondary docs contain stale claims, and full CCC-Status parity gates (Postgres 237, Torture ~99%, 4-ISA, CD release) remain in progress, the overall project goal is **PARTIAL / IN_PROGRESS (NOT 100% COMPLETE)**.
 
